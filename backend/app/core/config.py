@@ -41,10 +41,12 @@ class Settings(BaseSettings):
     DB_POOL_SIZE: int = Field(default=5, ge=1, le=100)
     DB_MAX_OVERFLOW: int = Field(default=5, ge=0, le=100)
 
-    # LLM(本地 llama.cpp OpenAI 兼容接口)
-    LLM_BASE_URL: str = "http://127.0.0.1:8080/v1"
-    LLM_API_KEY: SecretStr | None = None
+    # LLM —— chat 和 embedding 各自独立配置，可以指向不同厂商/服务
+    LLM_CHAT_BASE_URL: str = "http://127.0.0.1:8080/v1"
+    LLM_CHAT_API_KEY: SecretStr | None = None
     LLM_CHAT_MODEL: str = "local-chat"
+    LLM_EMBEDDING_BASE_URL: str = "http://127.0.0.1:8080/v1"
+    LLM_EMBEDDING_API_KEY: SecretStr | None = None
     LLM_EMBEDDING_MODEL: str = "Qwen3-Embedding-0.6B"
 
     # JWT / 会话
@@ -180,11 +182,18 @@ class Settings(BaseSettings):
         return self.SECRET_KEY.get_secret_value()
 
     @property
-    def llm_api_key(self) -> str:
-        """Return the LLM provider API key, or an empty string when none is configured."""
-        if self.LLM_API_KEY is None:
+    def llm_chat_api_key(self) -> str:
+        """Return the chat model's API key, or an empty string when none is configured."""
+        if self.LLM_CHAT_API_KEY is None:
             return ""
-        return self.LLM_API_KEY.get_secret_value()
+        return self.LLM_CHAT_API_KEY.get_secret_value()
+
+    @property
+    def llm_embedding_api_key(self) -> str:
+        """Return the embedding model's API key, or an empty string when none is configured."""
+        if self.LLM_EMBEDDING_API_KEY is None:
+            return ""
+        return self.LLM_EMBEDDING_API_KEY.get_secret_value()
 
     @property
     def migration_database_url(self) -> str:

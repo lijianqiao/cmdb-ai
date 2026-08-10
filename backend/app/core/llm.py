@@ -27,14 +27,14 @@ class ModelConfig:
 MODELS: dict[str, ModelConfig] = {
     "local-chat": ModelConfig(
         name="local-chat",
-        base_url=settings.LLM_BASE_URL,
-        api_key=settings.llm_api_key,
+        base_url=settings.LLM_CHAT_BASE_URL,
+        api_key=settings.llm_chat_api_key,
         request_model=settings.LLM_CHAT_MODEL,
     ),
     "local-embedding": ModelConfig(
         name="local-embedding",
-        base_url=settings.LLM_BASE_URL,
-        api_key=settings.llm_api_key,
+        base_url=settings.LLM_EMBEDDING_BASE_URL,
+        api_key=settings.llm_embedding_api_key,
         request_model=settings.LLM_EMBEDDING_MODEL,
     ),
 }

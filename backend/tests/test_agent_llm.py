@@ -6,7 +6,8 @@ from typing import Any
 import httpx
 import pytest
 
-from app.core.llm import ChatMessage, LlmRequestError, ToolCall, chat
+from app.core.config import settings
+from app.core.llm import MODELS, ChatMessage, LlmRequestError, ToolCall, chat
 
 pytestmark = pytest.mark.asyncio
 
@@ -124,3 +125,15 @@ async def test_chat_raises_llm_request_error_on_invalid_json_body() -> None:
 async def test_chat_rejects_unknown_model_key() -> None:
     with pytest.raises(LlmRequestError):
         await chat("does-not-exist", [ChatMessage(role="user", content="hi")])
+
+
+async def test_chat_and_embedding_models_use_independent_connection_settings() -> None:
+    """Chat and embedding must be individually pointable at different providers.
+
+    conftest.py sets LLM_CHAT_BASE_URL/LLM_EMBEDDING_BASE_URL to distinct
+    values specifically so this test fails if the two registry entries ever
+    collapse back onto one shared base_url/api_key pair.
+    """
+    assert MODELS["local-chat"].base_url == settings.LLM_CHAT_BASE_URL
+    assert MODELS["local-embedding"].base_url == settings.LLM_EMBEDDING_BASE_URL
+    assert MODELS["local-chat"].base_url != MODELS["local-embedding"].base_url
