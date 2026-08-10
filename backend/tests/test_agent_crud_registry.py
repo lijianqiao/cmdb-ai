@@ -96,3 +96,88 @@ async def test_list_active_children_excludes_closed(
     active = await agent_registry_crud.list_active_children(db_session, session_id)
 
     assert [c.child_id for c in active] == [still_running]
+
+
+async def test_transition_to_failed(db_session: AsyncSession, test_user: User) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    child_id = await _spawn(db_session, session_id)
+
+    updated = await agent_registry_crud.transition_status(
+        db_session, child_id, "FAILED", result_summary="工具调用超时,任务失败"
+    )
+    await db_session.commit()
+
+    assert updated.status == "FAILED"
+
+
+async def test_transition_to_cancelled(db_session: AsyncSession, test_user: User) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    child_id = await _spawn(db_session, session_id)
+    await agent_registry_crud.transition_status(db_session, child_id, "SPAWNING")
+    await agent_registry_crud.transition_status(db_session, child_id, "RUNNING")
+
+    updated = await agent_registry_crud.transition_status(db_session, child_id, "CANCELLED")
+    await db_session.commit()
+
+    assert updated.status == "CANCELLED"
+
+
+async def test_illegal_transition_from_spawning_raises(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    child_id = await _spawn(db_session, session_id)
+    await agent_registry_crud.transition_status(db_session, child_id, "SPAWNING")
+
+    with pytest.raises(InvalidAgentStatusTransitionError):
+        await agent_registry_crud.transition_status(db_session, child_id, "COMPLETED")
+
+
+async def test_illegal_transition_from_terminal_status_raises(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    child_id = await _spawn(db_session, session_id)
+    await agent_registry_crud.transition_status(db_session, child_id, "SPAWNING")
+    await agent_registry_crud.transition_status(db_session, child_id, "RUNNING")
+    await agent_registry_crud.transition_status(db_session, child_id, "COMPLETED")
+
+    with pytest.raises(InvalidAgentStatusTransitionError):
+        await agent_registry_crud.transition_status(db_session, child_id, "RUNNING")
+
+
+async def test_illegal_transition_from_closed_raises(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    child_id = await _spawn(db_session, session_id)
+    await agent_registry_crud.close(db_session, child_id)
+
+    with pytest.raises(InvalidAgentStatusTransitionError):
+        await agent_registry_crud.transition_status(db_session, child_id, "RUNNING")
+
+
+async def test_close_from_spawning_succeeds(db_session: AsyncSession, test_user: User) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    child_id = await _spawn(db_session, session_id)
+    await agent_registry_crud.transition_status(db_session, child_id, "SPAWNING")
+
+    closed = await agent_registry_crud.close(db_session, child_id)
+    await db_session.commit()
+
+    assert closed.status == "CLOSED"
+
+
+async def test_close_from_terminal_status_succeeds(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    child_id = await _spawn(db_session, session_id)
+    await agent_registry_crud.transition_status(
+        db_session, child_id, "FAILED", result_summary="连续三次工具调用失败"
+    )
+
+    closed = await agent_registry_crud.close(db_session, child_id)
+    await db_session.commit()
+
+    assert closed.status == "CLOSED"
