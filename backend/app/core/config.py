@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     DB_POOL_SIZE: int = Field(default=5, ge=1, le=100)
     DB_MAX_OVERFLOW: int = Field(default=5, ge=0, le=100)
 
+    # LLM(本地 llama.cpp OpenAI 兼容接口)
+    LLM_BASE_URL: str = "http://127.0.0.1:8080/v1"
+    LLM_API_KEY: SecretStr | None = None
+    LLM_CHAT_MODEL: str = "local-chat"
+    LLM_EMBEDDING_MODEL: str = "Qwen3-Embedding-0.6B"
+
     # JWT / 会话
     SECRET_KEY: SecretStr | None = None
     ALGORITHM: Literal["HS256"] = "HS256"
@@ -172,6 +178,13 @@ class Settings(BaseSettings):
         if self.SECRET_KEY is None:  # pragma: no cover - 已由模型校验保证
             raise RuntimeError("SECRET_KEY 未初始化")
         return self.SECRET_KEY.get_secret_value()
+
+    @property
+    def llm_api_key(self) -> str:
+        """Return the LLM provider API key, or an empty string when none is configured."""
+        if self.LLM_API_KEY is None:
+            return ""
+        return self.LLM_API_KEY.get_secret_value()
 
     @property
     def migration_database_url(self) -> str:
