@@ -73,3 +73,18 @@ async def test_list_for_session_limit_keeps_most_recent(
     messages = await agent_message_crud.list_for_session(db_session, session_id, limit=2)
 
     assert [m.content for m in messages] == ["msg-3", "msg-4"]
+
+
+async def test_list_for_session_limit_zero_returns_empty(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    for i in range(3):
+        await agent_message_crud.append(
+            db_session, session_id=session_id, role="user", content=f"msg-{i}"
+        )
+    await db_session.commit()
+
+    messages = await agent_message_crud.list_for_session(db_session, session_id, limit=0)
+
+    assert messages == []

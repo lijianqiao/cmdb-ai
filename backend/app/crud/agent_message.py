@@ -52,8 +52,8 @@ class CRUDAgentMessage:
         )
         result = await db.execute(stmt)
         messages = list(result.scalars().all())
-        if limit is not None and len(messages) > limit:
-            return messages[-limit:]
+        if limit is not None:
+            return messages[-limit:] if limit else []
         return messages
 
 
