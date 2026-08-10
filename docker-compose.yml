@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: ent-agent-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lijianqiao
+      POSTGRES_PASSWORD: ent-agent-dev-only
+      POSTGRES_DB: Ent-agent
+    ports:
+      - "5433:5432"
+    volumes:
+      - ent-agent-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  ent-agent-postgres-data:
