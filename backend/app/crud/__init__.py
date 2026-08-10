@@ -5,6 +5,7 @@ from app.crud.agent_registry import agent_registry_crud
 from app.crud.agent_session import agent_session_crud
 from app.crud.audit_log import audit_log_crud
 from app.crud.dashboard import dashboard_crud
+from app.crud.hitl_proposal import hitl_proposal_crud
 from app.crud.permission import permission_crud
 from app.crud.role import role_crud
 from app.crud.user import user_crud
@@ -15,6 +16,7 @@ __all__ = [
     "agent_session_crud",
     "audit_log_crud",
     "dashboard_crud",
+    "hitl_proposal_crud",
     "permission_crud",
     "role_crud",
     "user_crud",
