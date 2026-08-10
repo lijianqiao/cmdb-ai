@@ -131,8 +131,8 @@ async def chat(
             f"model {model_key!r} returned HTTP {response.status_code}: {response.text}"
         )
 
-    body = response.json()
     try:
+        body = response.json()
         choice = body["choices"][0]
         message = choice["message"]
         raw_tool_calls = message.get("tool_calls") or []
@@ -148,5 +148,5 @@ async def chat(
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
         )
-    except (KeyError, IndexError) as exc:
-        raise LlmRequestError(f"malformed response body from model {model_key!r}: {body}") from exc
+    except (KeyError, IndexError, ValueError) as exc:
+        raise LlmRequestError(f"malformed response body from model {model_key!r}: {response.text}") from exc

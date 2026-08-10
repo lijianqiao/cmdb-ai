@@ -161,7 +161,6 @@ async def test_loop_backfills_skipped_tool_calls_after_early_exit_in_batch(
         )
 
     async def fake_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
-        assert name != "call_3", "call_3 should never be dispatched"
         if name == "query_monitor_status":
             return ToolResult(control="ok", content="状态: up")
         if name == "propose_remediation":

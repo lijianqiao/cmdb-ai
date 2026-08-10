@@ -114,6 +114,13 @@ async def test_chat_raises_on_non_200() -> None:
             await chat("local-chat", [ChatMessage(role="user", content="hi")], client=fake_client)
 
 
+async def test_chat_raises_llm_request_error_on_invalid_json_body() -> None:
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, text="not json"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://fake") as fake_client:
+        with pytest.raises(LlmRequestError):
+            await chat("local-chat", [ChatMessage(role="user", content="hi")], client=fake_client)
+
+
 async def test_chat_rejects_unknown_model_key() -> None:
     with pytest.raises(LlmRequestError):
         await chat("does-not-exist", [ChatMessage(role="user", content="hi")])
