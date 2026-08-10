@@ -9,6 +9,3 @@ wheels/
 # Virtual environments
 .venv
 .test_venv
-
-# 数据迁移
-alembic/
