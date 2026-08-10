@@ -83,10 +83,14 @@ async def run_loop(
             db, session_id, result.content or "", tool_calls=result.tool_calls
         )
 
-        for tool_call in result.tool_calls:
+        for index, tool_call in enumerate(result.tool_calls):
             tool_result = await dispatch_tool(tool_call.name, _parse_arguments(tool_call))
             await append_tool_result(db, session_id, tool_call.id, tool_result.content)
             if tool_result.control in _EARLY_EXIT_CONTROLS:
+                for skipped_call in result.tool_calls[index + 1 :]:
+                    await append_tool_result(
+                        db, session_id, skipped_call.id, "已跳过：等待前一个工具调用的处理结果"
+                    )
                 return LoopOutcome(
                     reason="early_exit", final_answer=None, control=tool_result.control
                 )
