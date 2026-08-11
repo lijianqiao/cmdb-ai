@@ -79,12 +79,32 @@ def test_glob_documents_excludes_matches_outside_knowledge_root(
     monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
     write_document_file(category_code="sop", document_id=1, filename="a.md", content=b"x")
 
+    # glob_documents(category_code="sop") searches from category_dir("sop") == tmp_path/sop,
+    # so reaching tmp_path.parent needs two ".." segments: sop -> tmp_path -> tmp_path.parent.
     outside_file = tmp_path.parent / "leak.md"
     outside_file.write_text("secret", encoding="utf-8")
 
     try:
-        results = glob_documents("../*.md", category_code="sop")
+        results = glob_documents("../../*.md", category_code="sop")
         assert "leak.md" not in [Path(r).name for r in results]
         assert all("leak" not in r for r in results)
     finally:
         outside_file.unlink()
+
+
+def test_glob_documents_includes_matches_within_knowledge_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Positive control for the traversal test above: one ".." level from sop/ lands
+    back inside KNOWLEDGE_ROOT (tmp_path itself), so a matching file there must still
+    be returned. This guards against the negative test's pattern depth silently
+    drifting out of sync with its file placement again.
+    """
+    monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
+    write_document_file(category_code="sop", document_id=1, filename="a.md", content=b"x")
+
+    inbounds_file = tmp_path / "inbounds.md"
+    inbounds_file.write_text("ok", encoding="utf-8")
+
+    results = glob_documents("../*.md", category_code="sop")
+    assert "inbounds.md" in [Path(r).name for r in results]
