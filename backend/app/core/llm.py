@@ -150,3 +150,52 @@ async def chat(
         )
     except (KeyError, IndexError, ValueError) as exc:
         raise LlmRequestError(f"malformed response body from model {model_key!r}: {response.text}") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingResult:
+    """The embedding vectors returned by `embed()`, in request order."""
+
+    vectors: list[list[float]]
+    prompt_tokens: int
+
+
+async def embed(
+    model_key: str,
+    inputs: list[str],
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> EmbeddingResult:
+    """Send one OpenAI-compatible embeddings request and return the vectors, input-order.
+
+    `client` is injectable for tests, matching `chat()`'s convention.
+    """
+    config = MODELS.get(model_key)
+    if config is None:
+        raise LlmRequestError(f"unknown model key {model_key!r}; register it in MODELS first")
+
+    payload: dict[str, Any] = {"model": config.request_model, "input": inputs}
+
+    owns_client = client is None
+    http_client = client or _build_client(config)
+    try:
+        response = await http_client.post("/embeddings", json=payload)
+    finally:
+        if owns_client:
+            await http_client.aclose()
+
+    if response.status_code != 200:
+        raise LlmRequestError(
+            f"model {model_key!r} returned HTTP {response.status_code}: {response.text}"
+        )
+
+    try:
+        body = response.json()
+        ordered = sorted(body["data"], key=lambda item: item["index"])
+        vectors = [item["embedding"] for item in ordered]
+        usage = body.get("usage", {})
+        return EmbeddingResult(vectors=vectors, prompt_tokens=usage.get("prompt_tokens", 0))
+    except (KeyError, IndexError, ValueError) as exc:
+        raise LlmRequestError(
+            f"malformed embedding response from model {model_key!r}: {response.text}"
+        ) from exc

@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from app.core.config import settings
-from app.core.llm import MODELS, ChatMessage, LlmRequestError, ToolCall, chat
+from app.core.llm import MODELS, ChatMessage, LlmRequestError, ToolCall, chat, embed
 
 pytestmark = pytest.mark.asyncio
 
@@ -137,3 +137,32 @@ async def test_chat_and_embedding_models_use_independent_connection_settings() -
     assert MODELS["local-chat"].base_url == settings.LLM_CHAT_BASE_URL
     assert MODELS["local-embedding"].base_url == settings.LLM_EMBEDDING_BASE_URL
     assert MODELS["local-chat"].base_url != MODELS["local-embedding"].base_url
+
+
+async def test_embed_returns_vectors_in_index_order() -> None:
+    transport = _fake_transport(
+        {
+            "data": [
+                {"index": 1, "embedding": [0.4, 0.5]},
+                {"index": 0, "embedding": [0.1, 0.2]},
+            ],
+            "usage": {"prompt_tokens": 7},
+        }
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://fake") as fake_client:
+        result = await embed("local-embedding", ["第一段", "第二段"], client=fake_client)
+
+    assert result.vectors == [[0.1, 0.2], [0.4, 0.5]]
+    assert result.prompt_tokens == 7
+
+
+async def test_embed_raises_on_non_200() -> None:
+    transport = httpx.MockTransport(lambda request: httpx.Response(500, text="boom"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://fake") as fake_client:
+        with pytest.raises(LlmRequestError):
+            await embed("local-embedding", ["x"], client=fake_client)
+
+
+async def test_embed_rejects_unknown_model_key() -> None:
+    with pytest.raises(LlmRequestError):
+        await embed("does-not-exist", ["x"])
