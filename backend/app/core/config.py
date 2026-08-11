@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     LLM_CHAT_BASE_URL: str = "http://127.0.0.1:8080/v1"
     LLM_CHAT_API_KEY: SecretStr | None = None
     LLM_CHAT_MODEL: str = "local-chat"
+    LLM_CHAT_INPUT_COST_PER_MILLION_USD: float = Field(
+        default=0.0, ge=0, allow_inf_nan=False
+    )
+    LLM_CHAT_OUTPUT_COST_PER_MILLION_USD: float = Field(
+        default=0.0, ge=0, allow_inf_nan=False
+    )
     LLM_EMBEDDING_BASE_URL: str = "http://127.0.0.1:8080/v1"
     LLM_EMBEDDING_API_KEY: SecretStr | None = None
     LLM_EMBEDDING_MODEL: str = "Qwen3-Embedding-0.6B"

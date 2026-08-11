@@ -73,6 +73,25 @@ def test_production_accepts_distinct_migration_database_role() -> None:
     assert settings.migration_database_url == migration_url
 
 
+def test_llm_price_settings_reject_negative_values() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            SECRET_KEY="x" * 32,
+            LLM_CHAT_INPUT_COST_PER_MILLION_USD=-0.01,
+        )
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_llm_price_settings_reject_non_finite_values(bad: float) -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            SECRET_KEY="x" * 32,
+            LLM_CHAT_INPUT_COST_PER_MILLION_USD=bad,
+        )
+
+
 def test_migration_database_url_requires_postgresql() -> None:
     with pytest.raises(ValidationError, match="数据库迁移仅支持 PostgreSQL"):
         Settings.model_validate(

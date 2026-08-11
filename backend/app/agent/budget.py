@@ -5,6 +5,7 @@ raises rather than silently clamping so the caller can only proceed by
 catching the error, never by accident.
 """
 
+import math
 from dataclasses import dataclass, field
 
 
@@ -27,11 +28,22 @@ class Budget:
     steps_used: int = field(default=0, init=False)
     cost_used_usd: float = field(default=0.0, init=False)
 
-    def record_step(self, cost_usd: float = 0.0) -> None:
-        """Record one loop iteration's cost, raising if any limit is now exceeded."""
-        self.steps_used += 1
+    def reserve_step(self) -> None:
+        """Reserve one model iteration before incurring its external cost."""
+        attempted = self.steps_used + 1
+        if attempted > self.max_steps:
+            raise BudgetExceededError("max_steps", self.max_steps, attempted)
+        self.steps_used = attempted
+
+    def record_cost(self, cost_usd: float) -> None:
+        """Charge one completed model response and stop after crossing the limit."""
+        if not math.isfinite(cost_usd) or cost_usd < 0:
+            raise ValueError("cost_usd must be a finite non-negative number")
         self.cost_used_usd += cost_usd
-        if self.steps_used > self.max_steps:
-            raise BudgetExceededError("max_steps", self.max_steps, self.steps_used)
         if self.cost_used_usd > self.max_cost_usd:
             raise BudgetExceededError("max_cost_usd", self.max_cost_usd, self.cost_used_usd)
+
+    def record_step(self, cost_usd: float = 0.0) -> None:
+        """Backward-compatible combined operation used by existing callers/tests."""
+        self.reserve_step()
+        self.record_cost(cost_usd)

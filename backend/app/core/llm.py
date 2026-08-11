@@ -6,7 +6,7 @@ should construct an HTTP client to a model provider directly.
 """
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -15,24 +15,31 @@ from app.core.config import settings
 
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
-    """One entry in the model registry."""
+    """One typed model-registry entry."""
 
     name: str
+    capability: Literal["chat", "embedding"]
     base_url: str
     api_key: str
     request_model: str
     timeout_seconds: float = 60.0
+    input_cost_per_million_usd: float = 0.0
+    output_cost_per_million_usd: float = 0.0
 
 
 MODELS: dict[str, ModelConfig] = {
     "local-chat": ModelConfig(
         name="local-chat",
+        capability="chat",
         base_url=settings.LLM_CHAT_BASE_URL,
         api_key=settings.llm_chat_api_key,
         request_model=settings.LLM_CHAT_MODEL,
+        input_cost_per_million_usd=settings.LLM_CHAT_INPUT_COST_PER_MILLION_USD,
+        output_cost_per_million_usd=settings.LLM_CHAT_OUTPUT_COST_PER_MILLION_USD,
     ),
     "local-embedding": ModelConfig(
         name="local-embedding",
+        capability="embedding",
         base_url=settings.LLM_EMBEDDING_BASE_URL,
         api_key=settings.llm_embedding_api_key,
         request_model=settings.LLM_EMBEDDING_MODEL,
@@ -68,6 +75,7 @@ class ChatResult:
     finish_reason: str
     prompt_tokens: int
     completion_tokens: int
+    cost_usd: float = 0.0
 
 
 class LlmRequestError(RuntimeError):
@@ -110,6 +118,8 @@ async def chat(
     config = MODELS.get(model_key)
     if config is None:
         raise LlmRequestError(f"unknown model key {model_key!r}; register it in MODELS first")
+    if config.capability != "chat":
+        raise LlmRequestError(f"model {model_key!r} is not registered for chat")
 
     payload: dict[str, Any] = {
         "model": config.request_model,
@@ -141,12 +151,19 @@ async def chat(
             for tc in raw_tool_calls
         ]
         usage = body.get("usage", {})
+        prompt_tokens = int(usage.get("prompt_tokens", 0))
+        completion_tokens = int(usage.get("completion_tokens", 0))
+        cost_usd = (
+            prompt_tokens * config.input_cost_per_million_usd
+            + completion_tokens * config.output_cost_per_million_usd
+        ) / 1_000_000
         return ChatResult(
             content=message.get("content"),
             tool_calls=tool_calls,
             finish_reason=choice["finish_reason"],
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=cost_usd,
         )
     except (KeyError, IndexError, ValueError) as exc:
         raise LlmRequestError(f"malformed response body from model {model_key!r}: {response.text}") from exc
@@ -173,6 +190,8 @@ async def embed(
     config = MODELS.get(model_key)
     if config is None:
         raise LlmRequestError(f"unknown model key {model_key!r}; register it in MODELS first")
+    if config.capability != "embedding":
+        raise LlmRequestError(f"model {model_key!r} is not registered for embedding")
 
     payload: dict[str, Any] = {"model": config.request_model, "input": inputs}
 

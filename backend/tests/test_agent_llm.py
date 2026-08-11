@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from app.core.config import settings
-from app.core.llm import MODELS, ChatMessage, LlmRequestError, ToolCall, chat, embed
+from app.core.llm import MODELS, ChatMessage, LlmRequestError, ModelConfig, ToolCall, chat, embed
 
 pytestmark = pytest.mark.asyncio
 
@@ -166,3 +166,68 @@ async def test_embed_raises_on_non_200() -> None:
 async def test_embed_rejects_unknown_model_key() -> None:
     with pytest.raises(LlmRequestError):
         await embed("does-not-exist", ["x"])
+
+
+async def test_chat_reports_configured_token_cost(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = ModelConfig(
+        name="priced-chat",
+        capability="chat",
+        base_url="http://model.test/v1",
+        api_key="",
+        request_model="priced-model",
+        input_cost_per_million_usd=2.0,
+        output_cost_per_million_usd=8.0,
+    )
+    monkeypatch.setitem(MODELS, "priced-chat", config)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1_000, "completion_tokens": 500},
+            },
+        )
+
+    client = httpx.AsyncClient(
+        base_url="http://model.test/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await chat(
+            "priced-chat",
+            [ChatMessage(role="user", content="hello")],
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert result.cost_usd == pytest.approx(0.006)
+
+
+@pytest.mark.parametrize(
+    ("model_key", "call"),
+    [
+        ("local-embedding", "chat"),
+        ("local-chat", "embed"),
+    ],
+)
+async def test_model_capability_mismatch_is_rejected_before_http_request(
+    model_key: str, call: str
+) -> None:
+    def fail_if_called(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("HTTP request must not be sent for an incompatible model")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(fail_if_called), base_url="http://fake"
+    ) as client:
+        with pytest.raises(LlmRequestError, match="not registered"):
+            if call == "chat":
+                await chat(model_key, [ChatMessage(role="user", content="hi")], client=client)
+            else:
+                await embed(model_key, ["hi"], client=client)

@@ -39,3 +39,24 @@ def test_default_limits_match_docs_agent_architecture() -> None:
 
     assert budget.max_steps == 20
     assert budget.max_cost_usd == 1.0
+
+
+def test_reserve_step_and_record_cost_enforce_limits_separately() -> None:
+    budget = Budget(max_steps=2, max_cost_usd=0.50)
+
+    budget.reserve_step()
+    budget.record_cost(0.30)
+
+    with pytest.raises(BudgetExceededError) as exc_info:
+        budget.record_cost(0.21)
+    assert exc_info.value.limit_name == "max_cost_usd"
+
+
+@pytest.mark.parametrize("invalid_cost", [-1.0, float("nan"), float("inf"), float("-inf")])
+def test_record_cost_rejects_invalid_values(invalid_cost: float) -> None:
+    budget = Budget()
+
+    with pytest.raises(ValueError, match="finite non-negative"):
+        budget.record_cost(invalid_cost)
+
+    assert budget.cost_used_usd == 0.0

@@ -70,7 +70,7 @@ async def run_loop(
 
     while True:
         try:
-            active_budget.record_step()
+            active_budget.reserve_step()
         except BudgetExceededError:
             return LoopOutcome(reason="budget_exceeded", final_answer=None)
 
@@ -82,11 +82,20 @@ async def run_loop(
         )
         result: ChatResult = await chat_fn(model_key, history, tools=tools)
 
+        cost_exceeded = False
+        try:
+            active_budget.record_cost(result.cost_usd)
+        except BudgetExceededError:
+            cost_exceeded = True
+
         if not result.tool_calls:
             await append_assistant_message(
                 db, session_id, result.content or "", agent_id=agent_id
             )
             return LoopOutcome(reason="final_answer", final_answer=result.content)
+
+        if cost_exceeded:
+            return LoopOutcome(reason="budget_exceeded", final_answer=None)
 
         await append_assistant_message(
             db,

@@ -320,3 +320,77 @@ async def test_child_loop_reinjects_one_system_prompt_on_every_model_iteration(
     assert len(seen) == 2
     assert all(history[0] == ("system", "owned instructions") for history in seen)
     assert all(sum(role == "system" for role, _ in history) == 1 for history in seen)
+
+
+async def test_loop_keeps_final_answer_that_crosses_cost_budget(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    await append_user_message(db_session, session_id, "expensive question")
+    await db_session.commit()
+
+    async def expensive_chat(
+        model_key: str, messages: list[ChatMessage], **kwargs: Any
+    ) -> ChatResult:
+        return ChatResult(
+            content="answer already incurred cost",
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=100,
+            completion_tokens=50,
+            cost_usd=0.60,
+        )
+
+    async def no_tools(name: str, args: dict[str, Any]) -> ToolResult:
+        raise AssertionError(f"unexpected tool {name!r} with {args!r}")
+
+    outcome = await run_loop(
+        db_session,
+        session_id=session_id,
+        model_key="local-chat",
+        dispatch_tool=no_tools,
+        budget=Budget(max_steps=2, max_cost_usd=0.50),
+        chat_fn=expensive_chat,
+    )
+
+    assert outcome == LoopOutcome(
+        reason="final_answer", final_answer="answer already incurred cost"
+    )
+
+
+async def test_loop_does_not_execute_tool_calls_after_cost_budget_is_crossed(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    await append_user_message(db_session, session_id, "expensive lookup")
+    await db_session.commit()
+    dispatched = False
+
+    async def expensive_chat(
+        model_key: str, messages: list[ChatMessage], **kwargs: Any
+    ) -> ChatResult:
+        return ChatResult(
+            content=None,
+            tool_calls=[ToolCall(id="call-1", name="kb_read", arguments="{}")],
+            finish_reason="tool_calls",
+            prompt_tokens=100,
+            completion_tokens=50,
+            cost_usd=0.60,
+        )
+
+    async def must_not_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
+        nonlocal dispatched
+        dispatched = True
+        return ToolResult(control="ok", content="unexpected")
+
+    outcome = await run_loop(
+        db_session,
+        session_id=session_id,
+        model_key="local-chat",
+        dispatch_tool=must_not_dispatch,
+        budget=Budget(max_steps=2, max_cost_usd=0.50),
+        chat_fn=expensive_chat,
+    )
+
+    assert outcome == LoopOutcome(reason="budget_exceeded", final_answer=None)
+    assert dispatched is False
