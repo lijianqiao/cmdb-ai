@@ -358,6 +358,50 @@ async def test_reserved_cost_uses_active_max_and_terminal_actual(
     assert await agent_registry_crud.reserved_cost_for_session(db_session, session_id) == 1.7
 
 
+@pytest.mark.parametrize(
+    ("status", "budget", "message"),
+    [
+        ("RUNNING", {"cost_used_usd": 0.2}, "max_cost_usd"),
+        ("RUNNING", {"max_cost_usd": True}, "max_cost_usd"),
+        ("COMPLETED", {"cost_used_usd": -0.1}, "cost_used_usd"),
+        ("FAILED", {"cost_used_usd": float("nan")}, "cost_used_usd"),
+        ("CANCELLED", {"cost_used_usd": float("inf")}, "cost_used_usd"),
+        ("CLOSED", {"cost_used_usd": float("-inf")}, "cost_used_usd"),
+    ],
+)
+async def test_reserved_cost_rejects_invalid_selected_budget_value(
+    db_session: AsyncSession,
+    test_user: User,
+    status: str,
+    budget: dict[str, object],
+    message: str,
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    child_id = await _spawn(db_session, session_id)
+    receipt = await agent_registry_crud.get(db_session, child_id)
+    assert receipt is not None
+    receipt.status = status
+    receipt.budget = budget
+    await db_session.flush()
+
+    with pytest.raises(ValueError, match=message):
+        await agent_registry_crud.reserved_cost_for_session(db_session, session_id)
+
+
+async def test_reserved_cost_rejects_unknown_status(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    child_id = await _spawn(db_session, session_id)
+    receipt = await agent_registry_crud.get(db_session, child_id)
+    assert receipt is not None
+    receipt.status = "CORRUPT"
+    await db_session.flush()
+
+    with pytest.raises(ValueError, match="unknown agent registry status"):
+        await agent_registry_crud.reserved_cost_for_session(db_session, session_id)
+
+
 async def test_terminal_transition_flushes_complete_receipt_atomically(
     db_session: AsyncSession, test_user: User
 ) -> None:

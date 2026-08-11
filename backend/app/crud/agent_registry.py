@@ -7,7 +7,7 @@ the forced-detach escape valve so a hung child can always free its slot.
 """
 
 from datetime import UTC, datetime
-from math import fsum
+from math import fsum, isfinite
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +26,7 @@ _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 
 _ACTIVE_STATUSES = {"REQUESTED", "SPAWNING", "RUNNING"}
 _TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
+_ACTUAL_COST_STATUSES = _TERMINAL_STATUSES | {"CLOSED"}
 _BUDGET_DEFAULTS: dict[str, int | float] = {
     "max_steps": 20,
     "max_cost_usd": 1.0,
@@ -247,10 +248,25 @@ class CRUDAgentRegistry:
         receipts = await self.list_for_session(db, session_id)
         costs: list[float] = []
         for receipt in receipts:
-            key = "max_cost_usd" if receipt.status in _ACTIVE_STATUSES else "cost_used_usd"
-            value = receipt.budget.get(key, 0.0)
-            if not isinstance(value, int | float):
-                raise ValueError(f"agent budget {key!r} must be numeric")
+            if receipt.status in _ACTIVE_STATUSES:
+                key = "max_cost_usd"
+            elif receipt.status in _ACTUAL_COST_STATUSES:
+                key = "cost_used_usd"
+            else:
+                raise ValueError(f"unknown agent registry status {receipt.status!r}")
+
+            if key not in receipt.budget:
+                raise ValueError(f"agent budget {key!r} is required")
+            value = receipt.budget[key]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(
+                    f"agent budget {key!r} must be a finite non-negative number"
+                )
             costs.append(float(value))
         return fsum(costs)
 
