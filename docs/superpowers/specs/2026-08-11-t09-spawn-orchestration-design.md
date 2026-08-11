@@ -1,6 +1,6 @@
 # T09 · Spawn 编排与角色目录设计
 
-**状态：** 待书面评审
+**状态：** 已确认
 
 **日期：** 2026-08-11
 
@@ -125,7 +125,16 @@ flowchart LR
 - 不使用 `created_at` 估算完成时间，避免长任务一完成就被误判为过期；
 - `closed_at` 仍只在进入 `CLOSED` 时填写。
 
-### 5.4 `AgentRegistry.budget`
+### 5.4 `AgentRegistry.force_closed` 与 `role_version`
+
+新增非空字段：
+
+- `force_closed: bool = false`：仅在 `close_agent` 取消超时后强制 detach 时置为 `true`；正常关闭、启动 reconciliation 和 GC 均保持 `false`；
+- `role_version: String`：Spawn 时持久化角色目录版本（当前为 `t09-v1`），使历史 receipt 和 trace 可按当时的角色契约解释。
+
+迁移时对旧 registry 行回填：`trace_id=child_id`、`status_changed_at=COALESCE(closed_at, created_at)`、`role_version='legacy'`、`force_closed=false`。旧 budget JSON 保留已有值，并为缺失键补齐 T09 默认的 `max_wall_time_seconds=120.0`、`steps_used=0`、`cost_used_usd=0.0`；既有 `max_steps`/`max_cost_usd` 缺失时分别补 `20`/`1.0`。回填后字段均为非空；不改写既有 role、工具参数或历史结果。
+
+### 5.5 `AgentRegistry.budget`
 
 继续使用现有 JSON 字段，契约固定为：
 
@@ -141,14 +150,14 @@ flowchart LR
 
 前三项在 Spawn 时确定；后两项在终态落盘。没有新增预算表，因为 T09 只需在同一 session 内通过 registry 聚合 child 预算。
 
-### 5.5 `ChildReceipt`
+### 5.6 `ChildReceipt`
 
 Python 侧使用不可变 dataclass，将 ORM 行转换为稳定返回契约：
 
 - `child_id`, `trace_id`, `session_id`, `parent_agent_id`, `agent_path`；
-- `role`, `model`, `tools_allowlist`, `sandbox_mode`, `task_brief`；
+- `role`, `role_version`, `model`, `tools_allowlist`, `sandbox_mode`, `task_brief`；
 - `budget`, `status`, `result_summary`, `artifacts`；
-- `created_at`, `status_changed_at`, `closed_at`。
+- `force_closed`, `created_at`, `status_changed_at`, `closed_at`。
 
 调用方不直接持有 ORM 实例，避免 session 关闭后的延迟加载或意外修改。
 
@@ -209,6 +218,10 @@ child 看不到：
 - 工具自身的业务结果：原样返回；
 - 未处理执行异常：`failed`，只暴露异常类型，不暴露连接串、SQL 或密钥。
 
+`control=failed` 只把安全的失败信息返回模型；只要仍有 step、费用和墙钟预算，模型可以据此修正参数、改用其他允许工具或直接给出最终答案。只有工具循环最终仍有未处理异常，或后续触发任一预算上限，才映射为 child 终态失败。
+
+T07/T08 已交付工具的参数实现是本设计的规范来源；T09 只调用既有契约，不改写工具或另设平行参数。包括知识库的 `category_id`、监控/CMDB 查询的 `ip_prefix`、`since_limit` 等字段，均以现有实现为准。
+
 白名单覆盖不能扩权：调用方传入的 `tools_allowlist` 必须是角色默认集合的子集。
 
 ## 9. Spawn 原语
@@ -254,7 +267,8 @@ child 看不到：
 - 先按后代优先顺序关闭整棵子树；
 - RUNNING task 先 cancel，并在有限时间内等待；
 - 正常取消：`RUNNING → CANCELLED → CLOSED`；
-- task 不响应取消：强制 detach，receipt 标注 `force_closed=true`；
+- cancel 后以 `wait_for(shield(task), timeout)` 或等价的 deadline wait 等待，不能让吞掉 `CancelledError` 的 task 拖住 close deadline；
+- task 不响应取消：先落 CANCELLED terminal trace，再强制 detach，registry 与 receipt 标注 `force_closed=true`；这是唯一可将该字段设为 `true` 的路径；
 - 终态 child：直接进入 CLOSED；
 - 最后且只释放一次 Semaphore 槽位。
 
@@ -297,6 +311,8 @@ REQUESTED → SPAWNING → RUNNING → COMPLETED | FAILED | CANCELLED → CLOSED
 | `AGENT_TERMINAL_RECEIPT_TTL_SECONDS` | 300.0 |
 | `AGENT_RECEIPT_GC_INTERVAL_SECONDS` | 60.0 |
 
+调用方的 child budget override 只能收紧上述单 child 上限：steps 至少 1、cost 为 finite 且非负、wall time 为 finite 且大于 0，并且初始 usage 必须为零。非法 override 在 receipt 创建前拒绝。
+
 ### 11.2 模型费用
 
 `ModelConfig` 增加：
@@ -307,7 +323,7 @@ REQUESTED → SPAWNING → RUNNING → COMPLETED | FAILED | CANCELLED → CLOSED
 
 `chat()` 根据响应 usage 计算 `ChatResult.cost_usd`。本地模型价格默认 0；付费模型价格由 `.env` 明确配置，不在代码中写易过期的厂商价格。
 
-`Budget` 在模型调用前预留 step，在响应后记录费用。响应已经产生的成本无法撤销，因此超过费用上限时停止的是下一次模型/工具循环。
+`Budget` 在模型调用前预留 step，在响应后记录费用。响应已经产生的成本无法撤销；若本次响应使费用越限但已包含 final answer，保留该结果并以 `COMPLETED` 结束。若响应包含 `tool_calls`，禁止执行任何工具并以 `FAILED/policy_reject` 结束；其余越限情形同样停止后续模型/工具循环。
 
 ### 11.3 session child 预算
 
@@ -338,9 +354,9 @@ T09 的总额只覆盖 spawned children。root 自身的跨轮累计费用需要
 | :--- | :--- | :--- |
 | final answer | `COMPLETED` | 空 |
 | step/cost/wall-time 超限 | `FAILED` | `policy_reject` |
-| tool `rejected` early exit | `FAILED` | `policy_reject` |
+| tool `rejected`/`clarification`/`pending_approval` early exit | `FAILED` | `policy_reject` |
 | model 请求异常 | `FAILED` | `model` |
-| 未处理工具异常 | `FAILED` | `tool` |
+| 工具循环最终未处理异常 | `FAILED` | `tool` |
 | DB/task/runtime 异常 | `FAILED` | `infra` |
 | close/shutdown 取消 | `CANCELLED` | 空 |
 
@@ -362,11 +378,13 @@ T09 的总额只覆盖 spawned children。root 自身的跨轮累计费用需要
 2. 并行 wait 当前波；
 3. 在 `finally` 中 close 当前波全部 children；
 4. 严格解析每个分类 JSON；
-5. 收集低置信度、`needs_review=true`、新分类建议、解析失败或 child 失败；
+5. 收集低置信度（`confidence < 0.80`）、`needs_review=true`、新分类建议、解析失败或 child 失败；
 6. 没有问题时直接返回建议；
 7. 有问题时 Spawn 一个 reviewer，输入只包含分类摘要、冲突和证据路径；
 8. wait + close reviewer；
 9. 返回分类建议、失败 child IDs 和复核结论。
+
+close 会尝试当前波全部 children；任一 close 失败必须产生显式 workflow cleanup failure，不能吞掉异常后返回成功。
 
 classifier 输出：
 
@@ -404,6 +422,8 @@ classifier 输出：
 8. 返回 findings、synthesis、失败 child IDs 和 evidence gaps；
 9. 所有分支失败时不浪费 reviewer 调用，返回明确的 workflow failure。
 
+该范式沿用相同 cleanup 契约：尝试关闭全部已 Spawn children，任一 close 失败都禁止成功返回。
+
 investigator 输出：
 
 ```json
@@ -438,7 +458,7 @@ root 根据该结构化结果生成用户最终回答；reviewer 不直接面向
 
 - `REQUESTED`/`SPAWNING`/`RUNNING` 且本进程没有 task：先标记 CANCELLED，再 CLOSED；
 - terminal 但未 CLOSED：直接 CLOSED；
-- `result_summary` 追加结构化强制关闭原因；
+- 不改写 `result_summary`；强制关闭原因写入 `close` trace 的结构化控制/错误字段，避免破坏 child 严格 JSON 输出；
 - 写 `close` trace；
 - 不释放本进程 semaphore，因为这些 rows 从未在本 manager 中取得槽位。
 
@@ -471,7 +491,7 @@ FastAPI lifespan：
 - `agent`：COMPLETED/FAILED/CANCELLED、费用、error class；
 - `close`：正常关闭、级联、GC 或 force detach。
 
-沿用 `AgentTraceEvent` 固定错误分类：`model | tool | policy_reject | infra`。`result_summary` 只保存回传父上下文的正文；内部异常详情写服务日志，不进入模型上下文。
+沿用 `AgentTraceEvent` 固定错误分类：`model | tool | policy_reject | infra`。同一 `step` 内的 trace 固定按 `step, created_at, id` 排序，保证并发下的历史回放稳定。`result_summary` 只保存回传父上下文的正文；内部异常详情写服务日志，不进入模型上下文。
 
 工具级和 generation 级完整瀑布 trace 可在 root Chat 入口接入时扩充；T09 必须先保证 child 生命周期、费用和失败类别可审计。
 
@@ -486,9 +506,11 @@ FastAPI lifespan：
 - 模型 capability 与 token 费用计算；
 - 五角色、档位、说明和精确 allowlist；
 - 七工具 JSON Schema、参数边界和 fail-closed 调度；
-- ChildReceipt ORM 转换；
+- ChildReceipt ORM 转换、`role_version` 与 `force_closed=false` 默认值；
+- legacy registry 回填 `trace_id=child_id`、`status_changed_at=COALESCE(closed_at, created_at)`、`role_version='legacy'`、`force_closed=false`；
 - 合法/非法生命周期流转；
-- model/tool/policy/infra 失败映射。
+- 模型计费越限时 final answer 保留、含 `tool_calls` 禁止执行并 `policy_reject`，以及 `control=failed` 在剩余预算内可纠错；
+- model/tool/policy/infra 失败映射与同 step trace 的 `step, created_at, id` 排序。
 
 ### 17.2 并发与生命周期测试
 
@@ -496,6 +518,8 @@ FastAPI lifespan：
 - 第六个 active child 被拒绝而非无限等待；
 - COMPLETED 未 close 仍占槽；
 - close 后槽位可重新使用且只释放一次；
+- 强制 detach 是 `force_closed=true` 的唯一来源；
+- 吞掉取消的 task 仍在 close deadline 后被 force detach，晚到结果不能覆盖 CLOSED；
 - wait timeout 不取消 child；
 - wall-time 超限只失败当前 child；
 - depth 2 可用，depth 3 被拒绝；
@@ -507,15 +531,16 @@ FastAPI lifespan：
 
 - 单文档分类拒绝 Spawn；
 - 两份文档并行分类，无问题不调用 reviewer；
-- 新分类、低置信度、解析失败或 child failure 触发 reviewer；
+- 新分类、`confidence < 0.80`、解析失败或 child failure 触发 reviewer；
 - 大批量按五个一波执行且无 active receipt 泄漏；
 - 根因分支并行并由 reviewer 综合；
 - 全部分支失败时返回 workflow failure；
 - 严格 JSON 解析失败绝不静默通过。
+- 任一 workflow close 失败仍继续关闭兄弟，并返回显式 cleanup failure 而非成功；
 
 ### 17.4 跨组件不变量测试
 
-使用真实 SQLite ORM、真实 SpawnManager、fake ChildRunner 执行两个 workflow，验证：
+使用真实 SQLite ORM、真实 SpawnManager 和注入 fake ChatFn 的默认 child runner 执行两个 workflow（纯 manager 故障单测可注入 fake ChildRunner），验证：
 
 - registry 最终全部 CLOSED；
 - `list_active_children()` 为空；
@@ -543,7 +568,9 @@ FastAPI lifespan：
 4. children 全部只读；分类和根因结果只作为建议；
 5. 当前所有角色默认 `local-chat`，不虚构未登记模型；
 6. 根因默认分支只使用当前七个工具可取得的证据；
-7. 自动化验收不调用用户的真实模型、embedding 或 Docker PostgreSQL。
+7. T07/T08 已实现的工具及其参数（包括 `category_id`、`ip_prefix`、`since_limit`）是规范来源，T09 不擅改已交付工具；
+8. classifier 的低置信阈值固定为 `0.80`；
+9. 自动化验收不调用用户的真实模型、embedding 或 Docker PostgreSQL。
 
 ## 20. 验收标准
 
@@ -554,8 +581,11 @@ T09 完成需同时满足：
 - 同 session 默认最多五个 active children，终态未 close 仍占槽；
 - 最大深度 2，只有 reviewer 可嵌套；
 - ChildReceipt 在断线、root 上下文丢失和进程重启后仍可查询；
+- registry 与 receipt 持久化 `role_version`、`force_closed`，旧行按既定 backfill 规则可解释；
 - batch classification 与 root-cause workflow 都能并行、严格解析、部分失败隔离并最终关闭全部 children；
 - 预算至少覆盖 steps、child token cost、wall time、session child allocation；
+- 费用越限时 final answer 可完成、含 `tool_calls` 不执行工具并以 `policy_reject` 失败；`control=failed` 可在剩余预算内由模型纠错；
+- trace 同 step 的查询顺序为 `step, created_at, id`，分类 `confidence < 0.80` 必须触发 reviewer；
 - startup reconciliation、GC、cascade close 不泄漏槽位；
 - 全量 pytest、mypy、ruff 通过；
 - 不需要真实外部服务即可重复验收。
