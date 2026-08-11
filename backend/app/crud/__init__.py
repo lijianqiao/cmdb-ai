@@ -12,6 +12,7 @@ from app.crud.hitl_proposal import hitl_proposal_crud
 from app.crud.knowledge_category import knowledge_category_crud
 from app.crud.knowledge_chunk import knowledge_chunk_crud
 from app.crud.knowledge_document import knowledge_document_crud
+from app.crud.monitor_target import monitor_target_crud
 from app.crud.permission import permission_crud
 from app.crud.role import role_crud
 from app.crud.user import user_crud
@@ -29,6 +30,7 @@ __all__ = [
     "knowledge_category_crud",
     "knowledge_chunk_crud",
     "knowledge_document_crud",
+    "monitor_target_crud",
     "permission_crud",
     "role_crud",
     "user_crud",
