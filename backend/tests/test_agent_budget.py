@@ -45,11 +45,19 @@ def test_reserve_step_and_record_cost_enforce_limits_separately() -> None:
     budget = Budget(max_steps=2, max_cost_usd=0.50)
 
     budget.reserve_step()
+    budget.reserve_step()
+
+    with pytest.raises(BudgetExceededError) as exc_info:
+        budget.reserve_step()
+    assert exc_info.value.limit_name == "max_steps"
+    assert budget.steps_used == 2
+
     budget.record_cost(0.30)
 
     with pytest.raises(BudgetExceededError) as exc_info:
         budget.record_cost(0.21)
     assert exc_info.value.limit_name == "max_cost_usd"
+    assert budget.cost_used_usd == pytest.approx(0.51)
 
 
 @pytest.mark.parametrize("invalid_cost", [-1.0, float("nan"), float("inf"), float("-inf")])

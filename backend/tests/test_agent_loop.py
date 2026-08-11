@@ -326,12 +326,17 @@ async def test_loop_keeps_final_answer_that_crosses_cost_budget(
     db_session: AsyncSession, test_user: User
 ) -> None:
     session_id = await _make_session(db_session, test_user.id)
-    await append_user_message(db_session, session_id, "expensive question")
+    await append_user_message(db_session, session_id, "root-only-message")
+    await append_user_message(
+        db_session, session_id, "expensive question", agent_id="child-1"
+    )
     await db_session.commit()
+    seen_messages: list[list[tuple[str, str]]] = []
 
     async def expensive_chat(
         model_key: str, messages: list[ChatMessage], **kwargs: Any
     ) -> ChatResult:
+        seen_messages.append([(message.role, message.content) for message in messages])
         return ChatResult(
             content="answer already incurred cost",
             tool_calls=[],
@@ -347,6 +352,8 @@ async def test_loop_keeps_final_answer_that_crosses_cost_budget(
     outcome = await run_loop(
         db_session,
         session_id=session_id,
+        agent_id="child-1",
+        system_prompt="child system",
         model_key="local-chat",
         dispatch_tool=no_tools,
         budget=Budget(max_steps=2, max_cost_usd=0.50),
@@ -356,6 +363,14 @@ async def test_loop_keeps_final_answer_that_crosses_cost_budget(
     assert outcome == LoopOutcome(
         reason="final_answer", final_answer="answer already incurred cost"
     )
+    root_history = await build_model_history(db_session, session_id)
+    child_history = await build_model_history(db_session, session_id, agent_id="child-1")
+    assert seen_messages == [[("system", "child system"), ("user", "expensive question")]]
+    assert [message.content for message in root_history] == ["root-only-message"]
+    assert [message.content for message in child_history] == [
+        "expensive question",
+        "answer already incurred cost",
+    ]
 
 
 async def test_loop_does_not_execute_tool_calls_after_cost_budget_is_crossed(
