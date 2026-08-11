@@ -45,6 +45,14 @@ async def test_kb_read_returns_file_content(tmp_path: Path, monkeypatch: pytest.
     assert result.content == "重启步骤"
 
 
+async def test_kb_glob_rejects_path_traversal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
+
+    result = await kb_glob("*.md", category="../../etc")
+
+    assert result.control == "rejected"
+
+
 async def test_kb_read_rejects_path_traversal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
 

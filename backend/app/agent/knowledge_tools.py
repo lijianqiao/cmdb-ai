@@ -74,6 +74,8 @@ async def kb_grep(
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_RIPGREP_TIMEOUT_SECONDS)
     except TimeoutError:
+        proc.kill()
+        await proc.wait()
         return ToolResult(control="failed", content="kb_grep 超时")
 
     if proc.returncode not in (0, 1):  # 1 = ripgrep ran fine, just no matches

@@ -57,6 +57,12 @@ def write_document_file(
     return str(target.relative_to(KNOWLEDGE_ROOT.resolve())).replace("\\", "/")
 
 
+def delete_document_file(relative_path: str) -> None:
+    """Delete a document's file. A missing file is treated as already-deleted, not an error."""
+    path = resolve_safe_path(relative_path)
+    path.unlink(missing_ok=True)
+
+
 def read_document_file(relative_path: str, *, offset: int = 0, limit: int | None = None) -> str:
     """Read a document's text content, optionally paginated by character offset/limit."""
     path = resolve_safe_path(relative_path)

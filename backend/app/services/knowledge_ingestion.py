@@ -15,7 +15,7 @@ from app.core.llm import embed
 from app.crud.knowledge_chunk import knowledge_chunk_crud
 from app.crud.knowledge_document import knowledge_document_crud
 from app.models.knowledge_document import KnowledgeDocument
-from app.services.knowledge_storage import write_document_file
+from app.services.knowledge_storage import delete_document_file, write_document_file
 
 _DEFAULT_CHUNK_SIZE = 800
 _DEFAULT_CHUNK_OVERLAP = 100
@@ -101,25 +101,29 @@ async def ingest_document(
         filename=original_filename,
         content=content,
     )
-    updated = await knowledge_document_crud.update(db, document.id, {"file_path": relative_path})
-    assert updated is not None  # just created it; cannot be missing
+    try:
+        updated = await knowledge_document_crud.update(db, document.id, {"file_path": relative_path})
+        assert updated is not None  # just created it; cannot be missing
 
-    text = content.decode("utf-8")
-    chunks = chunk_text(text)
-    if chunks:
-        embedding_result = await embed(embedding_model_key, chunks)
-        for index, (chunk_content, vector) in enumerate(
-            zip(chunks, embedding_result.vectors, strict=True)
-        ):
-            await knowledge_chunk_crud.create(
-                db,
-                document_id=document.id,
-                chunk_index=index,
-                content=chunk_content,
-                token_count=len(chunk_content),
-                embedding=vector,
-            )
+        text = content.decode("utf-8")
+        chunks = chunk_text(text)
+        if chunks:
+            embedding_result = await embed(embedding_model_key, chunks)
+            for index, (chunk_content, vector) in enumerate(
+                zip(chunks, embedding_result.vectors, strict=True)
+            ):
+                await knowledge_chunk_crud.create(
+                    db,
+                    document_id=document.id,
+                    chunk_index=index,
+                    content=chunk_content,
+                    token_count=len(chunk_content),
+                    embedding=vector,
+                )
 
-    ready = await knowledge_document_crud.update(db, document.id, {"status": "ready"})
-    assert ready is not None
-    return ready
+        ready = await knowledge_document_crud.update(db, document.id, {"status": "ready"})
+        assert ready is not None
+        return ready
+    except Exception:
+        delete_document_file(relative_path)
+        raise
