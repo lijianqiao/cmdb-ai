@@ -5,6 +5,7 @@ from app.crud.agent_registry import agent_registry_crud
 from app.crud.agent_session import agent_session_crud
 from app.crud.agent_trace_event import agent_trace_event_crud
 from app.crud.audit_log import audit_log_crud
+from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.dashboard import dashboard_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
 from app.crud.knowledge_category import knowledge_category_crud
@@ -20,6 +21,7 @@ __all__ = [
     "agent_session_crud",
     "agent_trace_event_crud",
     "audit_log_crud",
+    "cmdb_asset_crud",
     "dashboard_crud",
     "hitl_proposal_crud",
     "knowledge_category_crud",
