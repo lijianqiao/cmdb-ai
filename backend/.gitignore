@@ -9,3 +9,6 @@ wheels/
 # Virtual environments
 .venv
 .test_venv
+
+# 知识库上传的文档正文（运行时数据，不进版本控制）
+knowledge/
