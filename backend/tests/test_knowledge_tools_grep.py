@@ -66,3 +66,15 @@ async def test_kb_grep_reports_missing_binary_as_failed(
     result = await kb_grep("anything")
 
     assert result.control == "failed"
+
+
+async def test_kb_grep_without_category_uses_live_knowledge_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
+    write_document_file(category_code="sop", document_id=1, filename="a.md", content="重启内容".encode())
+
+    result = await kb_grep("重启")
+
+    assert result.control == "ok"
+    assert "重启内容" in result.content

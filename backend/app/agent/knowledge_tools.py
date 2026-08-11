@@ -10,8 +10,8 @@ import asyncio
 import shutil
 
 from app.agent.loop import ToolResult
+from app.services import knowledge_storage
 from app.services.knowledge_storage import (
-    KNOWLEDGE_ROOT,
     PathTraversalError,
     category_dir,
     glob_documents,
@@ -55,7 +55,7 @@ async def kb_grep(
         return ToolResult(control="failed", content="ripgrep(rg) 未安装或不在 PATH 中")
 
     try:
-        search_root = category_dir(category) if category else KNOWLEDGE_ROOT
+        search_root = category_dir(category) if category else knowledge_storage.KNOWLEDGE_ROOT
     except PathTraversalError:
         return ToolResult(control="rejected", content=f"分类越界: {category}")
 
