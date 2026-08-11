@@ -132,6 +132,24 @@ SEED_PERMISSIONS: tuple[SeedPermission, ...] = (
         "module": "审计日志",
         "description": "查看审计日志",
     },
+    {
+        "name": "查看知识库",
+        "code": "knowledge:read",
+        "module": "知识库",
+        "description": "查看知识库分类与文档",
+    },
+    {
+        "name": "上传知识文档",
+        "code": "knowledge:upload",
+        "module": "知识库",
+        "description": "上传文档到知识库",
+    },
+    {
+        "name": "管理知识库",
+        "code": "knowledge:manage",
+        "module": "知识库",
+        "description": "创建/管理知识库分类",
+    },
 )
 
 

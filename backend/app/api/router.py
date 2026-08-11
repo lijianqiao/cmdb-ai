@@ -8,6 +8,7 @@ from fastapi import APIRouter
 from app.api.v1.audit_logs import router as audit_logs_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.dashboard import router as dashboard_router
+from app.api.v1.knowledge import router as knowledge_router
 from app.api.v1.me import router as me_router
 from app.api.v1.permissions import router as permissions_router
 from app.api.v1.roles import router as roles_router
@@ -23,3 +24,4 @@ api_router.include_router(permissions_router, prefix="/permissions", tags=["权�
 api_router.include_router(me_router, prefix="/me", tags=["个人中心"])
 api_router.include_router(dashboard_router, prefix="/dashboard", tags=["仪表盘"])
 api_router.include_router(audit_logs_router, prefix="/audit-logs", tags=["审计日志"])
+api_router.include_router(knowledge_router, prefix="/knowledge", tags=["知识库"])
