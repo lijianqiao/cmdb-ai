@@ -180,6 +180,20 @@ async def _persist_raw_receipt(
     return child_id
 
 
+async def _persist_raw_completed_receipt(
+    spawn_db: SpawnDatabase,
+    *,
+    budget: dict[str, object],
+) -> str:
+    child_id = await _persist_raw_receipt(spawn_db, budget=budget)
+    async with spawn_db.session_factory() as db:
+        await agent_registry_crud.transition_status(db, child_id, "SPAWNING")
+        await agent_registry_crud.transition_status(db, child_id, "RUNNING")
+        await agent_registry_crud.transition_status(db, child_id, "COMPLETED")
+        await db.commit()
+    return child_id
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -248,6 +262,96 @@ async def test_list_agents_wraps_overflowing_durable_number_as_corruption(
     assert raised.value.child_id == child_id
     assert raised.value.field == "budget.max_cost_usd"
     assert str(oversized_value) not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "max_steps", "steps_used"),
+    [
+        ("budget.max_steps", 10**400, 0),
+        ("budget.steps_used", 10**400, 10**400),
+    ],
+)
+async def test_list_agents_rejects_durable_step_outside_trace_range(
+    spawn_db: SpawnDatabase,
+    field: str,
+    max_steps: int,
+    steps_used: int,
+) -> None:
+    child_id = await _persist_raw_receipt(
+        spawn_db,
+        budget={
+            "max_steps": max_steps,
+            "max_cost_usd": 0.5,
+            "max_wall_time_seconds": 30.0,
+            "steps_used": steps_used,
+            "cost_used_usd": 0.0,
+        },
+    )
+    manager = SpawnManager(spawn_db.session_factory, child_runner=_completed_runner)
+
+    with pytest.raises(ChildReceiptCorruptionError) as raised:
+        await manager.list_agents(spawn_db.session_id)
+
+    assert raised.value.child_id == child_id
+    assert raised.value.field == field
+    assert str(max_steps) not in str(raised.value)
+
+
+async def test_close_rejects_durable_step_above_trace_range_before_trace(
+    spawn_db: SpawnDatabase,
+) -> None:
+    first_unsafe_step = 2_147_483_647
+    child_id = await _persist_raw_completed_receipt(
+        spawn_db,
+        budget={
+            "max_steps": first_unsafe_step,
+            "max_cost_usd": 0.5,
+            "max_wall_time_seconds": 30.0,
+            "steps_used": first_unsafe_step,
+            "cost_used_usd": 0.0,
+        },
+    )
+    manager = SpawnManager(spawn_db.session_factory, child_runner=_completed_runner)
+    corruption: ChildReceiptCorruptionError | None = None
+
+    try:
+        await manager.close_agent(child_id)
+    except ChildReceiptCorruptionError as exc:
+        corruption = exc
+
+    async with spawn_db.session_factory() as db:
+        events = await agent_trace_event_crud.list_for_trace(db, "corrupt-trace")
+    assert events == []
+    assert corruption is not None
+    assert corruption.child_id == child_id
+    assert corruption.field == "budget.steps_used"
+    assert str(first_unsafe_step) not in str(corruption)
+
+
+async def test_close_accepts_largest_trace_safe_durable_step(
+    spawn_db: SpawnDatabase,
+) -> None:
+    largest_safe_step = 2_147_483_646
+    child_id = await _persist_raw_completed_receipt(
+        spawn_db,
+        budget={
+            "max_steps": largest_safe_step,
+            "max_cost_usd": 0.5,
+            "max_wall_time_seconds": 30.0,
+            "steps_used": largest_safe_step,
+            "cost_used_usd": 0.0,
+        },
+    )
+    manager = SpawnManager(spawn_db.session_factory, child_runner=_completed_runner)
+
+    closed = await manager.close_agent(child_id)
+
+    async with spawn_db.session_factory() as db:
+        events = await agent_trace_event_crud.list_for_trace(db, "corrupt-trace")
+    assert closed.status == "CLOSED"
+    assert [(event.control, event.step) for event in events] == [
+        ("CLOSED", 2_147_483_647)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -675,6 +779,71 @@ async def test_budget_override_rejects_negative_nan_infinite_and_nonzero_usage(
 
     assert raised.value.reason == "invalid_child_budget"
     await _assert_no_receipts(manager, spawn_db.session_id)
+
+
+@pytest.mark.parametrize(
+    ("configured_max_steps", "budget"),
+    [
+        pytest.param(2_147_483_647, None, id="configured_limit"),
+        pytest.param(
+            10**400,
+            ChildBudgetSnapshot(2_147_483_647, 0.5, 30.0),
+            id="override",
+        ),
+    ],
+)
+async def test_spawn_rejects_step_limit_outside_trace_range_before_persisting(
+    spawn_db: SpawnDatabase,
+    configured_max_steps: int,
+    budget: ChildBudgetSnapshot | None,
+) -> None:
+    manager = SpawnManager(
+        spawn_db.session_factory,
+        child_runner=_completed_runner,
+        child_max_steps=configured_max_steps,
+    )
+    created: ChildReceipt | None = None
+
+    try:
+        with pytest.raises(SpawnRejectedError) as raised:
+            created = await manager.spawn_agent(
+                session_id=spawn_db.session_id,
+                role="kb_explorer",
+                task_brief="超出 trace Integer 范围",
+                budget=budget,
+            )
+    finally:
+        if created is not None:
+            await manager.wait_agent(created.child_id)
+            await manager.close_agent(created.child_id)
+
+    assert raised.value.reason == "invalid_child_budget"
+    assert raised.value.limit_name == "child_max_steps"
+    await _assert_no_receipts(manager, spawn_db.session_id)
+
+
+async def test_spawn_accepts_largest_trace_safe_step_limit(
+    spawn_db: SpawnDatabase,
+) -> None:
+    largest_safe_step = 2_147_483_646
+    manager = SpawnManager(
+        spawn_db.session_factory,
+        child_runner=_completed_runner,
+        child_max_steps=largest_safe_step,
+    )
+    child = await manager.spawn_agent(
+        session_id=spawn_db.session_id,
+        role="kb_explorer",
+        task_brief="最大安全 step",
+        budget=ChildBudgetSnapshot(largest_safe_step, 0.5, 30.0),
+    )
+
+    try:
+        terminal = await manager.wait_agent(child.child_id)
+        assert terminal.status == "COMPLETED"
+        assert terminal.budget.max_steps == largest_safe_step
+    finally:
+        await manager.close_agent(child.child_id)
 
 
 async def test_two_children_can_be_running_at_the_same_time(

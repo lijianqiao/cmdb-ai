@@ -40,6 +40,8 @@ type ChildErrorClass = Literal["model", "tool", "policy_reject", "infra"]
 _ACTIVE_STATUSES = frozenset({"REQUESTED", "SPAWNING", "RUNNING"})
 _TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED", "CLOSED"})
 _SAFE_ERROR_CLASSES = frozenset({"model", "tool", "policy_reject", "infra"})
+# AgentTraceEvent.step uses PostgreSQL's signed 32-bit Integer; close adds one.
+_MAX_CHILD_STEP = 2_147_483_646
 
 
 class _ChildToolRuntimeError(RuntimeError):
@@ -150,7 +152,11 @@ class _SessionRuntime:
 
 
 def _receipt_step(value: object, *, child_id: str, field: str, minimum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not minimum <= value <= _MAX_CHILD_STEP
+    ):
         raise ChildReceiptCorruptionError(child_id, field=field)
     return value
 
@@ -233,17 +239,17 @@ def _to_receipt(row: AgentRegistry) -> ChildReceipt:
                 row.child_id,
                 field=f"budget.{field}",
             )
-    max_steps = _receipt_step(
-        budget["max_steps"],
-        child_id=row.child_id,
-        field="budget.max_steps",
-        minimum=1,
-    )
     steps_used = _receipt_step(
         budget["steps_used"],
         child_id=row.child_id,
         field="budget.steps_used",
         minimum=0,
+    )
+    max_steps = _receipt_step(
+        budget["max_steps"],
+        child_id=row.child_id,
+        field="budget.max_steps",
+        minimum=1,
     )
     if steps_used > max_steps:
         raise ChildReceiptCorruptionError(
@@ -374,6 +380,7 @@ class SpawnManager:
             isinstance(candidate.max_steps, bool)
             or not isinstance(candidate.max_steps, int)
             or not 1 <= candidate.max_steps <= self._child_max_steps
+            or candidate.max_steps > _MAX_CHILD_STEP
         ):
             raise SpawnRejectedError(
                 "invalid_child_budget", limit_name="child_max_steps"
