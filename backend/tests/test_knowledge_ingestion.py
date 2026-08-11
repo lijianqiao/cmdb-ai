@@ -1,5 +1,6 @@
 """Tests for the knowledge ingestion service (chunking + embed + store)."""
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -11,8 +12,6 @@ from app.crud.knowledge_chunk import knowledge_chunk_crud
 from app.models.user import User
 from app.services.knowledge_ingestion import DuplicateDocumentError, chunk_text, ingest_document
 
-pytestmark = pytest.mark.asyncio
-
 
 def test_chunk_text_splits_with_overlap() -> None:
     text = "0123456789" * 3  # 30 chars
@@ -20,7 +19,6 @@ def test_chunk_text_splits_with_overlap() -> None:
 
     assert chunks[0] == "0123456789"
     assert chunks[1].startswith("89")  # last 2 chars of chunk 0 repeated
-    assert "".join(chunks).replace(chunks[0], "", 1) or True  # chunks overlap, not a clean rejoin
 
 
 def test_chunk_text_rejects_overlap_not_smaller_than_chunk_size() -> None:
@@ -33,11 +31,9 @@ def test_chunk_text_returns_empty_list_for_empty_text() -> None:
 
 
 async def test_ingest_document_stores_file_and_chunks(
-    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(
-        "app.services.knowledge_ingestion.KNOWLEDGE_ROOT_OVERRIDE_FOR_TESTS", None, raising=False
-    )
+    monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
     category = await knowledge_category_crud.create(
         db_session, {"code": "sop", "name": "SOP", "description": ""}
     )
@@ -69,8 +65,9 @@ async def test_ingest_document_stores_file_and_chunks(
 
 
 async def test_ingest_document_rejects_duplicate_content(
-    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
     category = await knowledge_category_crud.create(
         db_session, {"code": "sop", "name": "SOP", "description": ""}
     )
