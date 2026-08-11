@@ -9,21 +9,25 @@ uses both.
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
 
 
 class AgentMessage(Base):
-    """One message (user/assistant/tool) in an agent session's transcript."""
+    """One root- or child-Agent message in a shared user session."""
 
     __tablename__ = "agent_messages"
+    __table_args__ = (
+        Index("ix_agent_messages_session_id_agent_id", "session_id", "agent_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
     tool_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

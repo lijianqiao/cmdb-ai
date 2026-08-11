@@ -22,12 +22,14 @@ class CRUDAgentMessage:
         session_id: int,
         role: str,
         content: str,
+        agent_id: str | None = None,
         tool_call_id: str | None = None,
         tool_calls: list[dict[str, str]] | None = None,
     ) -> AgentMessage:
-        """Append one message to a session's transcript and flush."""
+        """Append one root- or child-scoped message and flush."""
         message = AgentMessage(
             session_id=session_id,
+            agent_id=agent_id,
             role=role,
             content=content,
             tool_call_id=tool_call_id,
@@ -54,6 +56,35 @@ class CRUDAgentMessage:
         messages = list(result.scalars().all())
         if limit is not None:
             return messages[-limit:] if limit else []
+        return messages
+
+    async def list_for_agent(
+        self,
+        db: AsyncSession,
+        session_id: int,
+        *,
+        agent_id: str | None,
+        limit: int | None = None,
+    ) -> list[AgentMessage]:
+        """Return only root (`None`) or one exact child's messages, oldest-first."""
+        agent_filter = (
+            AgentMessage.agent_id.is_(None)
+            if agent_id is None
+            else AgentMessage.agent_id == agent_id
+        )
+        stmt = select(AgentMessage).where(
+            AgentMessage.session_id == session_id, agent_filter
+        )
+        if limit is not None:
+            if limit <= 0:
+                return []
+            stmt = stmt.order_by(AgentMessage.id.desc()).limit(limit)
+        else:
+            stmt = stmt.order_by(AgentMessage.id.asc())
+        result = await db.execute(stmt)
+        messages = list(result.scalars().all())
+        if limit is not None:
+            messages.reverse()
         return messages
 
 

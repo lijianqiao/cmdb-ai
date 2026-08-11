@@ -17,11 +17,17 @@ async def build_model_history(
     db: AsyncSession,
     session_id: int,
     *,
+    agent_id: str | None = None,
+    system_prompt: str | None = None,
     max_messages: int = 40,
 ) -> list[ChatMessage]:
-    """Return this session's most recent messages as model-ready ChatMessages."""
-    rows = await agent_message_crud.list_for_session(db, session_id, limit=max_messages)
+    """Return one exact Agent's bounded history with its code-owned instructions."""
+    rows = await agent_message_crud.list_for_agent(
+        db, session_id, agent_id=agent_id, limit=max_messages
+    )
     history: list[ChatMessage] = []
+    if system_prompt is not None:
+        history.append(ChatMessage(role="system", content=system_prompt))
     for row in rows:
         tool_calls: list[ToolCall] | None = None
         if row.tool_calls:
@@ -40,9 +46,21 @@ async def build_model_history(
     return history
 
 
-async def append_user_message(db: AsyncSession, session_id: int, content: str) -> AgentMessage:
-    """Append one user turn."""
-    return await agent_message_crud.append(db, session_id=session_id, role="user", content=content)
+async def append_user_message(
+    db: AsyncSession,
+    session_id: int,
+    content: str,
+    *,
+    agent_id: str | None = None,
+) -> AgentMessage:
+    """Append one user/root-or-parent input to one exact Agent transcript."""
+    return await agent_message_crud.append(
+        db,
+        session_id=session_id,
+        agent_id=agent_id,
+        role="user",
+        content=content,
+    )
 
 
 async def append_assistant_message(
@@ -50,14 +68,20 @@ async def append_assistant_message(
     session_id: int,
     content: str,
     *,
+    agent_id: str | None = None,
     tool_calls: list[ToolCall] | None = None,
 ) -> AgentMessage:
-    """Append one assistant turn, optionally carrying the tool calls it requested."""
+    """Append one assistant turn to one exact Agent transcript."""
     serialized = None
     if tool_calls:
         serialized = [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls]
     return await agent_message_crud.append(
-        db, session_id=session_id, role="assistant", content=content, tool_calls=serialized
+        db,
+        session_id=session_id,
+        agent_id=agent_id,
+        role="assistant",
+        content=content,
+        tool_calls=serialized,
     )
 
 
@@ -66,8 +90,15 @@ async def append_tool_result(
     session_id: int,
     tool_call_id: str,
     content: str,
+    *,
+    agent_id: str | None = None,
 ) -> AgentMessage:
-    """Append one tool-result turn, correlated back to the call it answers."""
+    """Append one correlated tool result to one exact Agent transcript."""
     return await agent_message_crud.append(
-        db, session_id=session_id, role="tool", content=content, tool_call_id=tool_call_id
+        db,
+        session_id=session_id,
+        agent_id=agent_id,
+        role="tool",
+        content=content,
+        tool_call_id=tool_call_id,
     )

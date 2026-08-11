@@ -71,3 +71,28 @@ async def test_build_model_history_respects_max_messages(
     history = await build_model_history(db_session, session_id, max_messages=2)
 
     assert [m.content for m in history] == ["msg-4", "msg-5"]
+
+
+async def test_build_model_history_scopes_child_and_prepends_system_prompt(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    await append_user_message(db_session, session_id, "root secret")
+    await append_user_message(db_session, session_id, "child task", agent_id="child-1")
+    await append_assistant_message(
+        db_session, session_id, "child answer", agent_id="child-1"
+    )
+    await db_session.commit()
+
+    history = await build_model_history(
+        db_session,
+        session_id,
+        agent_id="child-1",
+        system_prompt="You are the investigator.",
+    )
+
+    assert [(message.role, message.content) for message in history] == [
+        ("system", "You are the investigator."),
+        ("user", "child task"),
+        ("assistant", "child answer"),
+    ]

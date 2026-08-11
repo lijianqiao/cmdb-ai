@@ -88,3 +88,29 @@ async def test_list_for_session_limit_zero_returns_empty(
     messages = await agent_message_crud.list_for_session(db_session, session_id, limit=0)
 
     assert messages == []
+
+
+async def test_list_for_agent_isolates_root_and_two_children(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    await agent_message_crud.append(
+        db_session, session_id=session_id, agent_id=None, role="user", content="root"
+    )
+    await agent_message_crud.append(
+        db_session, session_id=session_id, agent_id="child-a", role="user", content="a"
+    )
+    await agent_message_crud.append(
+        db_session, session_id=session_id, agent_id="child-b", role="user", content="b"
+    )
+    await db_session.commit()
+
+    root = await agent_message_crud.list_for_agent(db_session, session_id, agent_id=None)
+    child_a = await agent_message_crud.list_for_agent(
+        db_session, session_id, agent_id="child-a"
+    )
+    all_rows = await agent_message_crud.list_for_session(db_session, session_id)
+
+    assert [row.content for row in root] == ["root"]
+    assert [row.content for row in child_a] == ["a"]
+    assert [row.content for row in all_rows] == ["root", "a", "b"]

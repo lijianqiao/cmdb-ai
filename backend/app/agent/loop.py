@@ -62,6 +62,8 @@ async def run_loop(
     tools: list[dict[str, Any]] | None = None,
     budget: Budget | None = None,
     chat_fn: ChatFn = chat,
+    agent_id: str | None = None,
+    system_prompt: str | None = None,
 ) -> LoopOutcome:
     """Run one standard agent loop turn against `session_id`'s transcript."""
     active_budget = budget or Budget()
@@ -72,24 +74,41 @@ async def run_loop(
         except BudgetExceededError:
             return LoopOutcome(reason="budget_exceeded", final_answer=None)
 
-        history = await build_model_history(db, session_id)
+        history = await build_model_history(
+            db,
+            session_id,
+            agent_id=agent_id,
+            system_prompt=system_prompt,
+        )
         result: ChatResult = await chat_fn(model_key, history, tools=tools)
 
         if not result.tool_calls:
-            await append_assistant_message(db, session_id, result.content or "")
+            await append_assistant_message(
+                db, session_id, result.content or "", agent_id=agent_id
+            )
             return LoopOutcome(reason="final_answer", final_answer=result.content)
 
         await append_assistant_message(
-            db, session_id, result.content or "", tool_calls=result.tool_calls
+            db,
+            session_id,
+            result.content or "",
+            agent_id=agent_id,
+            tool_calls=result.tool_calls,
         )
 
         for index, tool_call in enumerate(result.tool_calls):
             tool_result = await dispatch_tool(tool_call.name, _parse_arguments(tool_call))
-            await append_tool_result(db, session_id, tool_call.id, tool_result.content)
+            await append_tool_result(
+                db, session_id, tool_call.id, tool_result.content, agent_id=agent_id
+            )
             if tool_result.control in _EARLY_EXIT_CONTROLS:
                 for skipped_call in result.tool_calls[index + 1 :]:
                     await append_tool_result(
-                        db, session_id, skipped_call.id, "已跳过：等待前一个工具调用的处理结果"
+                        db,
+                        session_id,
+                        skipped_call.id,
+                        "已跳过：等待前一个工具调用的处理结果",
+                        agent_id=agent_id,
                     )
                 return LoopOutcome(
                     reason="early_exit", final_answer=None, control=tool_result.control

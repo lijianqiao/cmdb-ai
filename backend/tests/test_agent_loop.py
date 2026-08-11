@@ -223,3 +223,100 @@ async def test_loop_stops_when_budget_exceeded(db_session: AsyncSession, test_us
     )
 
     assert outcome == LoopOutcome(reason="budget_exceeded", final_answer=None)
+
+
+async def test_child_loop_never_reads_or_writes_root_transcript(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    await append_user_message(db_session, session_id, "root-only-message")
+    await append_user_message(
+        db_session, session_id, "child-only-task", agent_id="child-1"
+    )
+    await db_session.commit()
+
+    async def fake_chat(
+        model_key: str, messages: list[ChatMessage], **kwargs: Any
+    ) -> ChatResult:
+        assert model_key == "local-chat"
+        assert [message.content for message in messages] == [
+            "child system",
+            "child-only-task",
+        ]
+        return ChatResult(
+            content="child-only-answer",
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=2,
+            completion_tokens=1,
+        )
+
+    async def no_tools(name: str, args: dict[str, Any]) -> ToolResult:
+        raise AssertionError(f"unexpected tool {name!r} with {args!r}")
+
+    outcome = await run_loop(
+        db_session,
+        session_id=session_id,
+        agent_id="child-1",
+        system_prompt="child system",
+        model_key="local-chat",
+        dispatch_tool=no_tools,
+        chat_fn=fake_chat,
+    )
+    await db_session.commit()
+
+    root_history = await build_model_history(db_session, session_id)
+    child_history = await build_model_history(
+        db_session, session_id, agent_id="child-1"
+    )
+    assert outcome.final_answer == "child-only-answer"
+    assert [message.content for message in root_history] == ["root-only-message"]
+    assert [message.content for message in child_history] == [
+        "child-only-task",
+        "child-only-answer",
+    ]
+
+
+async def test_child_loop_reinjects_one_system_prompt_on_every_model_iteration(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    await append_user_message(db_session, session_id, "inspect", agent_id="child-1")
+    seen: list[list[tuple[str, str]]] = []
+
+    async def fake_chat(
+        model_key: str, messages: list[ChatMessage], **kwargs: Any
+    ) -> ChatResult:
+        seen.append([(item.role, item.content) for item in messages])
+        if len(seen) == 1:
+            return ChatResult(
+                content=None,
+                tool_calls=[ToolCall(id="call-1", name="kb_read", arguments="{}")],
+                finish_reason="tool_calls",
+                prompt_tokens=1,
+                completion_tokens=1,
+            )
+        return ChatResult(
+            content="done",
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    async def dispatch(name: str, args: dict[str, Any]) -> ToolResult:
+        return ToolResult(control="ok", content="evidence")
+
+    await run_loop(
+        db_session,
+        session_id=session_id,
+        agent_id="child-1",
+        system_prompt="owned instructions",
+        model_key="local-chat",
+        dispatch_tool=dispatch,
+        chat_fn=fake_chat,
+    )
+
+    assert len(seen) == 2
+    assert all(history[0] == ("system", "owned instructions") for history in seen)
+    assert all(sum(role == "system" for role, _ in history) == 1 for history in seen)
