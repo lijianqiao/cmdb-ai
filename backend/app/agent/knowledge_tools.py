@@ -9,7 +9,11 @@ wiring itself is out of scope for this plan (see T07's header).
 import asyncio
 import shutil
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.agent.loop import ToolResult
+from app.core.llm import LlmRequestError, embed
+from app.crud.knowledge_chunk import knowledge_chunk_crud
 from app.services import knowledge_storage
 from app.services.knowledge_storage import (
     PathTraversalError,
@@ -82,3 +86,35 @@ async def kb_grep(
         truncated = output.encode("utf-8")[:_MAX_GREP_OUTPUT_BYTES]
         output = truncated.decode("utf-8", errors="ignore") + "\n...(结果已截断)"
     return ToolResult(control="ok", content=output.strip() or "没有匹配")
+
+
+async def kb_semantic_search(
+    db: AsyncSession,
+    query: str,
+    *,
+    category_id: int | None = None,
+    top_k: int = 5,
+    embedding_model_key: str = "local-embedding",
+) -> ToolResult:
+    """Embed `query` and return the top_k most similar knowledge chunks.
+
+    Requires a real Postgres+pgvector backend for `search_similar()` — see
+    app/crud/knowledge_chunk.py.
+    """
+    try:
+        embedding_result = await embed(embedding_model_key, [query])
+    except LlmRequestError as exc:
+        return ToolResult(control="failed", content=f"embedding 失败: {exc}")
+
+    results = await knowledge_chunk_crud.search_similar(
+        db, query_embedding=embedding_result.vectors[0], category_id=category_id, top_k=top_k
+    )
+    if not results:
+        return ToolResult(control="ok", content="没有找到相关内容")
+
+    lines = [
+        f"[document_id={chunk.document_id} chunk_index={chunk.chunk_index} "
+        f"distance={distance:.4f}] {chunk.content}"
+        for chunk, distance in results
+    ]
+    return ToolResult(control="ok", content="\n\n".join(lines))
