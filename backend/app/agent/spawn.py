@@ -132,6 +132,15 @@ class ChildRuntimeUnavailableError(RuntimeError):
         super().__init__(f"child runtime unavailable: {reason}")
 
 
+class ChildReceiptCorruptionError(RuntimeError):
+    """A durable registry row cannot be converted into a safe receipt."""
+
+    def __init__(self, child_id: str, *, field: str) -> None:
+        self.child_id = child_id
+        self.field = field
+        super().__init__(f"child receipt is corrupt: {field}")
+
+
 @dataclass(slots=True)
 class _SessionRuntime:
     lock: asyncio.Lock
@@ -140,10 +149,39 @@ class _SessionRuntime:
     closing_child_counts: dict[str, int]
 
 
-def _number(value: object) -> float:
+def _receipt_step(value: object, *, child_id: str, field: str, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ChildReceiptCorruptionError(child_id, field=field)
+    return value
+
+
+def _receipt_number(
+    value: object,
+    *,
+    child_id: str,
+    field: str,
+    positive: bool,
+) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ValueError("budget number required")
-    return float(value)
+        raise ChildReceiptCorruptionError(child_id, field=field)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        raise ChildReceiptCorruptionError(child_id, field=field) from None
+    if not math.isfinite(number) or (number <= 0 if positive else number < 0):
+        raise ChildReceiptCorruptionError(child_id, field=field)
+    return number
+
+
+def _receipt_strings(value: object, *, child_id: str, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ChildReceiptCorruptionError(child_id, field=field)
+    strings: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ChildReceiptCorruptionError(child_id, field=field)
+        strings.append(item)
+    return tuple(strings)
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -162,9 +200,56 @@ def _create_child_task(
     return asyncio.create_task(coroutine, name=name)
 
 
+async def _await_reconciliation[T](coroutine: Coroutine[Any, Any, T]) -> T:
+    """Finish one cleanup task before propagating any caller cancellation."""
+    task = asyncio.create_task(coroutine)
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+    result = task.result()
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
 def _to_receipt(row: AgentRegistry) -> ChildReceipt:
     """Copy one ORM row into immutable values without retaining session state."""
-    budget = dict(row.budget)
+    if not isinstance(row.budget, dict):
+        raise ChildReceiptCorruptionError(row.child_id, field="budget")
+    budget = row.budget
+    budget_fields = (
+        "max_steps",
+        "max_cost_usd",
+        "max_wall_time_seconds",
+        "steps_used",
+        "cost_used_usd",
+    )
+    for field in budget_fields:
+        if field not in budget:
+            raise ChildReceiptCorruptionError(
+                row.child_id,
+                field=f"budget.{field}",
+            )
+    max_steps = _receipt_step(
+        budget["max_steps"],
+        child_id=row.child_id,
+        field="budget.max_steps",
+        minimum=1,
+    )
+    steps_used = _receipt_step(
+        budget["steps_used"],
+        child_id=row.child_id,
+        field="budget.steps_used",
+        minimum=0,
+    )
+    if steps_used > max_steps:
+        raise ChildReceiptCorruptionError(
+            row.child_id,
+            field="budget.steps_used",
+        )
     return ChildReceipt(
         child_id=row.child_id,
         trace_id=row.trace_id,
@@ -174,19 +259,42 @@ def _to_receipt(row: AgentRegistry) -> ChildReceipt:
         role=row.role,
         role_version=row.role_version,
         model=row.model,
-        tools_allowlist=tuple(str(name) for name in row.tools_allowlist),
+        tools_allowlist=_receipt_strings(
+            row.tools_allowlist,
+            child_id=row.child_id,
+            field="tools_allowlist",
+        ),
         sandbox_mode=row.sandbox_mode,
         task_brief=row.task_brief,
         budget=ChildBudgetSnapshot(
-            max_steps=int(_number(budget["max_steps"])),
-            max_cost_usd=_number(budget["max_cost_usd"]),
-            max_wall_time_seconds=_number(budget["max_wall_time_seconds"]),
-            steps_used=int(_number(budget["steps_used"])),
-            cost_used_usd=_number(budget["cost_used_usd"]),
+            max_steps=max_steps,
+            max_cost_usd=_receipt_number(
+                budget["max_cost_usd"],
+                child_id=row.child_id,
+                field="budget.max_cost_usd",
+                positive=False,
+            ),
+            max_wall_time_seconds=_receipt_number(
+                budget["max_wall_time_seconds"],
+                child_id=row.child_id,
+                field="budget.max_wall_time_seconds",
+                positive=True,
+            ),
+            steps_used=steps_used,
+            cost_used_usd=_receipt_number(
+                budget["cost_used_usd"],
+                child_id=row.child_id,
+                field="budget.cost_used_usd",
+                positive=False,
+            ),
         ),
         status=row.status,
         result_summary=row.result_summary,
-        artifacts=tuple(str(path) for path in row.artifacts),
+        artifacts=_receipt_strings(
+            row.artifacts,
+            child_id=row.child_id,
+            field="artifacts",
+        ),
         created_at=_utc(row.created_at),  # type: ignore[arg-type]
         status_changed_at=_utc(row.status_changed_at),  # type: ignore[arg-type]
         closed_at=_utc(row.closed_at),
@@ -339,8 +447,7 @@ class SpawnManager:
         receipt: ChildReceipt | None = None
         child_id: str | None = None
         slot_acquired = False
-        registry_committed = False
-        post_commit_error: BaseException | None = None
+        persistence_error: BaseException | None = None
 
         async with runtime.lock:
             if not task_brief.strip():
@@ -476,19 +583,18 @@ class SpawnManager:
                         db, child_id, "SPAWNING"
                     )
                     await db.commit()
-                    registry_committed = True
                     receipt = _to_receipt(row)
             except BaseException as exc:
-                if not registry_committed:
+                if not slot_acquired or child_id is None:
                     if slot_acquired:
                         runtime.slots.release()
                         slot_acquired = False
                     raise
-                post_commit_error = exc
+                persistence_error = exc
 
-            if child_id is not None and registry_committed:
+            if child_id is not None and persistence_error is None:
                 runtime.held_child_ids.add(child_id)
-            if post_commit_error is None and child_id is not None:
+            if persistence_error is None and child_id is not None:
                 coroutine = self._execute_child(child_id)
                 try:
                     task = _create_child_task(
@@ -504,24 +610,46 @@ class SpawnManager:
 
         if child_id is None:  # pragma: no cover - guarded by persistence
             raise RuntimeError("spawn persistence did not produce a child id")
-        if post_commit_error is not None:
-            await asyncio.shield(self._compensate_committed_spawn(child_id))
-            if isinstance(post_commit_error, asyncio.CancelledError):
-                raise post_commit_error
-            raise ChildRuntimeUnavailableError(
-                child_id, reason="post_commit_failure"
-            ) from post_commit_error
+        if persistence_error is not None:
+            durable = await _await_reconciliation(
+                self._reconcile_spawn_persistence(session_id, child_id)
+            )
+            if isinstance(persistence_error, asyncio.CancelledError):
+                raise persistence_error
+            if durable:
+                raise ChildRuntimeUnavailableError(
+                    child_id, reason="post_commit_failure"
+                ) from persistence_error
+            raise persistence_error
         if receipt is None:  # pragma: no cover - valid persisted rows always convert
-            await asyncio.shield(self._compensate_committed_spawn(child_id))
+            await _await_reconciliation(self._compensate_committed_spawn(child_id))
             raise ChildRuntimeUnavailableError(
                 child_id, reason="receipt_conversion_failed"
             )
         if create_task_failed:
-            await asyncio.shield(self._compensate_committed_spawn(child_id))
+            await _await_reconciliation(self._compensate_committed_spawn(child_id))
             raise ChildRuntimeUnavailableError(
                 child_id, reason="task_creation_failed"
             )
         return receipt
+
+    async def _reconcile_spawn_persistence(
+        self,
+        session_id: int,
+        child_id: str,
+    ) -> bool:
+        async with self._session_factory() as db:
+            durable = await agent_registry_crud.get(db, child_id)
+        runtime = self._runtime(session_id)
+        if durable is None:
+            async with runtime.lock:
+                runtime.slots.release()
+            return False
+
+        async with runtime.lock:
+            runtime.held_child_ids.add(child_id)
+        await self._compensate_committed_spawn(child_id)
+        return True
 
     async def _compensate_committed_spawn(self, child_id: str) -> None:
         receipt = await self._get_receipt(child_id)
@@ -931,45 +1059,102 @@ class SpawnManager:
         if latest.status == "CLOSED":
             await self._release_owned_slot(latest.session_id, child_id)
             return latest
-        return await self._persist_close(child_id, force_closed=force_closed)
+        closed = await self._persist_close(
+            child_id,
+            force_closed=force_closed,
+            force_detached_task=task if force_closed else None,
+        )
+        if force_closed:
+            self._release_force_detached_ownership(child_id, task)
+        return closed
 
     async def _persist_close(
         self,
         child_id: str,
         *,
         force_closed: bool,
+        force_detached_task: asyncio.Task[None] | None = None,
     ) -> ChildReceipt:
         receipt = await self._get_receipt(child_id)
         runtime = self._runtime(receipt.session_id)
+        closed: ChildReceipt | None = None
+        persistence_error: BaseException | None = None
         async with runtime.lock:
-            async with self._session_factory() as db:
-                row = await agent_registry_crud.get(db, child_id)
-                if row is None:
-                    raise ChildNotFoundError(child_id)
-                changed = row.status != "CLOSED"
-                if changed:
-                    row = await agent_registry_crud.close(
-                        db, child_id, force_closed=force_closed
-                    )
-                    budget = _to_receipt(row).budget
-                    await agent_trace_event_crud.record(
-                        db,
-                        trace_id=row.trace_id,
-                        session_id=row.session_id,
-                        agent_id=row.child_id,
-                        parent_agent_id=row.parent_agent_id,
-                        step=max(2, budget.steps_used + 1),
-                        span_type="close",
-                        control="CLOSED",
-                        cost_usd=budget.cost_used_usd,
-                        error_class="infra" if force_closed else None,
-                    )
-                    await db.commit()
-                closed = _to_receipt(row)
-            if child_id in runtime.held_child_ids:
-                runtime.held_child_ids.remove(child_id)
-                runtime.slots.release()
-            return closed
+            try:
+                async with self._session_factory() as db:
+                    row = await agent_registry_crud.get(db, child_id)
+                    if row is None:
+                        raise ChildNotFoundError(child_id)
+                    changed = row.status != "CLOSED"
+                    if changed:
+                        row = await agent_registry_crud.close(
+                            db, child_id, force_closed=force_closed
+                        )
+                        budget = _to_receipt(row).budget
+                        await agent_trace_event_crud.record(
+                            db,
+                            trace_id=row.trace_id,
+                            session_id=row.session_id,
+                            agent_id=row.child_id,
+                            parent_agent_id=row.parent_agent_id,
+                            step=max(2, budget.steps_used + 1),
+                            span_type="close",
+                            control="CLOSED",
+                            cost_usd=budget.cost_used_usd,
+                            error_class="infra" if force_closed else None,
+                        )
+                        await db.commit()
+                    closed = _to_receipt(row)
+            except BaseException as exc:
+                persistence_error = exc
+            else:
+                if child_id in runtime.held_child_ids:
+                    runtime.held_child_ids.remove(child_id)
+                    runtime.slots.release()
+
+        if persistence_error is not None:
+            await _await_reconciliation(
+                self._reconcile_close_persistence(
+                    receipt.session_id,
+                    child_id,
+                    force_detached_task,
+                )
+            )
+            raise persistence_error
+        if closed is None:  # pragma: no cover - valid rows always convert
+            raise ChildRuntimeUnavailableError(
+                child_id,
+                reason="close_receipt_unavailable",
+            )
+        return closed
+
+    async def _reconcile_close_persistence(
+        self,
+        session_id: int,
+        child_id: str,
+        force_detached_task: asyncio.Task[None] | None,
+    ) -> None:
+        async with self._session_factory() as db:
+            row = await agent_registry_crud.get(db, child_id)
+            durable_closed = row is not None and row.status == "CLOSED"
+            durable_force_closed = (
+                row is not None
+                and row.status == "CLOSED"
+                and row.force_closed is True
+            )
+        if durable_closed:
+            await self._release_owned_slot(session_id, child_id)
+        if durable_force_closed:
+            self._release_force_detached_ownership(child_id, force_detached_task)
+
+    def _release_force_detached_ownership(
+        self,
+        child_id: str,
+        task: asyncio.Task[None] | None,
+    ) -> None:
+        if task is not None and self._tasks.get(child_id) is task:
+            self._tasks.pop(child_id)
+            self._active_budgets.pop(child_id, None)
 
     async def _release_owned_slot(self, session_id: int, child_id: str) -> None:
         runtime = self._runtime(session_id)

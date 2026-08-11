@@ -32,6 +32,7 @@ from app.agent.spawn import (
     ChildBudgetSnapshot,
     ChildNotFoundError,
     ChildReceipt,
+    ChildReceiptCorruptionError,
     ChildRunResult,
     ChildRuntimeUnavailableError,
     ChildWaitTimeoutError,
@@ -145,6 +146,145 @@ def test_child_contracts_are_immutable() -> None:
 
 async def _assert_no_receipts(manager: SpawnManager, session_id: int) -> None:
     assert await manager.list_agents(session_id) == ()
+
+
+async def _persist_raw_receipt(
+    spawn_db: SpawnDatabase,
+    *,
+    budget: dict[str, object],
+    tools_allowlist: list[object] | None = None,
+    artifacts: list[object] | None = None,
+) -> str:
+    child_id = "corrupt-child"
+    async with spawn_db.session_factory() as db:
+        row = await agent_registry_crud.create(
+            db,
+            child_id=child_id,
+            session_id=spawn_db.session_id,
+            trace_id="corrupt-trace",
+            role_version="t09-v1",
+            parent_agent_id=None,
+            agent_path=f"/root/{child_id}",
+            role="kb_explorer",
+            model="local-chat",
+            tools_allowlist=(
+                ["kb_read"] if tools_allowlist is None else tools_allowlist
+            ),  # type: ignore[arg-type]
+            sandbox_mode="read-only",
+            task_brief="corrupt durable payload",
+            budget=budget,
+        )
+        if artifacts is not None:
+            row.artifacts = artifacts  # type: ignore[assignment]
+        await db.commit()
+    return child_id
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_steps", 2.9),
+        ("max_steps", True),
+        ("max_steps", 0),
+        ("steps_used", 1.9),
+        ("steps_used", -1),
+        ("steps_used", 6),
+        ("max_cost_usd", nan),
+        ("max_cost_usd", inf),
+        ("max_cost_usd", -0.1),
+        ("max_cost_usd", "do-not-leak"),
+        ("max_wall_time_seconds", nan),
+        ("max_wall_time_seconds", inf),
+        ("max_wall_time_seconds", 0.0),
+        ("max_wall_time_seconds", -1.0),
+        ("cost_used_usd", nan),
+        ("cost_used_usd", inf),
+        ("cost_used_usd", -0.1),
+    ],
+)
+async def test_list_agents_rejects_corrupt_budget_snapshot(
+    spawn_db: SpawnDatabase,
+    field: str,
+    value: object,
+) -> None:
+    budget: dict[str, object] = {
+        "max_steps": 5,
+        "max_cost_usd": 0.5,
+        "max_wall_time_seconds": 30.0,
+        "steps_used": 0,
+        "cost_used_usd": 0.0,
+    }
+    budget[field] = value
+    child_id = await _persist_raw_receipt(spawn_db, budget=budget)
+    manager = SpawnManager(spawn_db.session_factory, child_runner=_completed_runner)
+
+    with pytest.raises(ChildReceiptCorruptionError) as raised:
+        await manager.list_agents(spawn_db.session_id)
+
+    assert raised.value.child_id == child_id
+    assert raised.value.field == f"budget.{field}"
+    assert "do-not-leak" not in str(raised.value)
+
+
+async def test_list_agents_wraps_overflowing_durable_number_as_corruption(
+    spawn_db: SpawnDatabase,
+) -> None:
+    oversized_value = 10**400
+    child_id = await _persist_raw_receipt(
+        spawn_db,
+        budget={
+            "max_steps": 5,
+            "max_cost_usd": oversized_value,
+            "max_wall_time_seconds": 30.0,
+            "steps_used": 0,
+            "cost_used_usd": 0.0,
+        },
+    )
+    manager = SpawnManager(spawn_db.session_factory, child_runner=_completed_runner)
+
+    with pytest.raises(ChildReceiptCorruptionError) as raised:
+        await manager.list_agents(spawn_db.session_id)
+
+    assert raised.value.child_id == child_id
+    assert raised.value.field == "budget.max_cost_usd"
+    assert str(oversized_value) not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "tools_allowlist", "artifacts"),
+    [
+        ("tools_allowlist", ["kb_read", 7], None),
+        ("tools_allowlist", ["kb_read", {"secret": "do-not-leak"}], None),
+        ("artifacts", None, [7]),
+        ("artifacts", None, [{"secret": "do-not-leak"}]),
+    ],
+)
+async def test_list_agents_rejects_non_string_receipt_collections(
+    spawn_db: SpawnDatabase,
+    field: str,
+    tools_allowlist: list[object] | None,
+    artifacts: list[object] | None,
+) -> None:
+    child_id = await _persist_raw_receipt(
+        spawn_db,
+        budget={
+            "max_steps": 5,
+            "max_cost_usd": 0.5,
+            "max_wall_time_seconds": 30.0,
+            "steps_used": 0,
+            "cost_used_usd": 0.0,
+        },
+        tools_allowlist=tools_allowlist,
+        artifacts=artifacts,
+    )
+    manager = SpawnManager(spawn_db.session_factory, child_runner=_completed_runner)
+
+    with pytest.raises(ChildReceiptCorruptionError) as raised:
+        await manager.list_agents(spawn_db.session_id)
+
+    assert raised.value.child_id == child_id
+    assert raised.value.field == field
+    assert "do-not-leak" not in str(raised.value)
 
 
 @pytest.mark.parametrize("brief", ["", " ", "\n\t"])
@@ -960,6 +1100,56 @@ async def test_close_force_detaches_child_that_swallows_cancellation(
     assert persisted.force_closed is True
 
 
+async def test_force_detach_releases_task_and_budget_ownership(
+    spawn_db: SpawnDatabase,
+) -> None:
+    started = asyncio.Event()
+    cancellation_swallowed = asyncio.Event()
+    release = asyncio.Event()
+    late_finished = asyncio.Event()
+
+    async def permanently_hung_runner(
+        _db: AsyncSession,
+        _receipt: ChildReceipt,
+        budget: Budget,
+    ) -> ChildRunResult:
+        budget.record_step(0.1)
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancellation_swallowed.set()
+            await release.wait()
+        late_finished.set()
+        return ChildRunResult(status="COMPLETED", result_summary="late")
+
+    manager = SpawnManager(
+        spawn_db.session_factory,
+        child_runner=permanently_hung_runner,
+        close_timeout_seconds=0.01,
+    )
+    child = await manager.spawn_agent(
+        session_id=spawn_db.session_id,
+        role="kb_explorer",
+        task_brief="detach local ownership",
+    )
+    await started.wait()
+
+    try:
+        closed = await manager.close_agent(child.child_id)
+
+        assert cancellation_swallowed.is_set()
+        assert closed.status == "CLOSED"
+        assert closed.force_closed is True
+        assert child.child_id not in manager._tasks
+        assert child.child_id not in manager._active_budgets
+        assert not late_finished.is_set()
+    finally:
+        release.set()
+        async with asyncio.timeout(1):
+            await late_finished.wait()
+
+
 async def test_close_parent_closes_descendants_deepest_first(
     spawn_db: SpawnDatabase,
 ) -> None:
@@ -1657,6 +1847,215 @@ class _BlockFirstSessionExitFactory:
         if self._calls == 1:
             return _BlockingSessionExit(session, self._entered)
         return session
+
+
+def _block_next_commit_after_durable_write(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    commit_number: int = 1,
+) -> asyncio.Event:
+    original_commit = AsyncSession.commit
+    durable_commit_finished = asyncio.Event()
+    commit_count = 0
+
+    async def commit_then_block(session: AsyncSession) -> None:
+        nonlocal commit_count
+        await original_commit(session)
+        commit_count += 1
+        if commit_count == commit_number:
+            durable_commit_finished.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(AsyncSession, "commit", commit_then_block)
+    return durable_commit_finished
+
+
+async def test_cancelled_durable_force_close_releases_all_local_ownership(
+    spawn_db: SpawnDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    cancellation_swallowed = asyncio.Event()
+    release = asyncio.Event()
+    late_finished = asyncio.Event()
+
+    async def permanently_hung_runner(
+        _db: AsyncSession,
+        _receipt: ChildReceipt,
+        budget: Budget,
+    ) -> ChildRunResult:
+        budget.record_step(0.1)
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancellation_swallowed.set()
+            await release.wait()
+        late_finished.set()
+        return ChildRunResult(status="COMPLETED", result_summary="late")
+
+    manager = SpawnManager(
+        spawn_db.session_factory,
+        child_runner=permanently_hung_runner,
+        close_timeout_seconds=0.01,
+    )
+    child = await manager.spawn_agent(
+        session_id=spawn_db.session_id,
+        role="kb_explorer",
+        task_brief="cancel durable force close",
+    )
+    await started.wait()
+    durable_close_finished = _block_next_commit_after_durable_write(
+        monkeypatch,
+        commit_number=2,
+    )
+    close_task = asyncio.create_task(manager.close_agent(child.child_id))
+
+    try:
+        async with asyncio.timeout(1):
+            await durable_close_finished.wait()
+        close_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+
+        persisted = (await manager.list_agents(spawn_db.session_id))[0]
+        assert cancellation_swallowed.is_set()
+        assert persisted.status == "CLOSED"
+        assert persisted.force_closed is True
+        assert child.child_id not in manager._runtime(
+            spawn_db.session_id
+        ).held_child_ids
+        assert child.child_id not in manager._tasks
+        assert child.child_id not in manager._active_budgets
+        assert not late_finished.is_set()
+    finally:
+        release.set()
+        async with asyncio.timeout(1):
+            await late_finished.wait()
+
+
+async def test_spawn_reconciles_cancelled_durable_commit_and_releases_slot_once(
+    spawn_db: SpawnDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    durable_commit_finished = _block_next_commit_after_durable_write(monkeypatch)
+    manager = SpawnManager(
+        spawn_db.session_factory,
+        child_runner=_completed_runner,
+        max_concurrent_children=1,
+        max_total_child_cost_usd=10.0,
+    )
+    spawn_task = asyncio.create_task(
+        manager.spawn_agent(
+            session_id=spawn_db.session_id,
+            role="kb_explorer",
+            task_brief="ambiguous durable spawn commit",
+        )
+    )
+    async with asyncio.timeout(1):
+        await durable_commit_finished.wait()
+    spawn_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await spawn_task
+
+    receipts = await manager.list_agents(spawn_db.session_id)
+    replacement: ChildReceipt | None = None
+    try:
+        assert len(receipts) == 1
+        failed_spawn = receipts[0]
+        assert failed_spawn.status == "CLOSED"
+        assert failed_spawn.result_summary is None
+        assert failed_spawn.child_id not in manager._runtime(
+            spawn_db.session_id
+        ).held_child_ids
+        async with spawn_db.session_factory() as db:
+            events = await agent_trace_event_crud.list_for_trace(
+                db, failed_spawn.trace_id
+            )
+        assert [event.control for event in events] == [
+            "REQUESTED",
+            "FAILED",
+            "CLOSED",
+        ]
+        assert events[1].error_class == "infra"
+
+        replacement = await manager.spawn_agent(
+            session_id=spawn_db.session_id,
+            role="kb_explorer",
+            task_brief="replacement owns the only slot",
+        )
+        with pytest.raises(SpawnRejectedError) as raised:
+            await manager.spawn_agent(
+                session_id=spawn_db.session_id,
+                role="kb_explorer",
+                task_brief="slot must not be released twice",
+            )
+        assert raised.value.reason == "max_concurrent_children"
+        await manager.wait_agent(replacement.child_id)
+    finally:
+        for receipt in await manager.list_agents(spawn_db.session_id):
+            if receipt.status != "CLOSED":
+                await manager.close_agent(receipt.child_id)
+
+
+async def test_close_reconciles_cancelled_durable_commit_and_releases_slot_once(
+    spawn_db: SpawnDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = SpawnManager(
+        spawn_db.session_factory,
+        child_runner=_completed_runner,
+        max_concurrent_children=1,
+        max_total_child_cost_usd=10.0,
+    )
+    child = await manager.spawn_agent(
+        session_id=spawn_db.session_id,
+        role="kb_explorer",
+        task_brief="ambiguous durable close commit",
+    )
+    await manager.wait_agent(child.child_id)
+    durable_commit_finished = _block_next_commit_after_durable_write(monkeypatch)
+    close_task = asyncio.create_task(manager.close_agent(child.child_id))
+    async with asyncio.timeout(1):
+        await durable_commit_finished.wait()
+    close_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    persisted = (await manager.list_agents(spawn_db.session_id))[0]
+    replacement: ChildReceipt | None = None
+    try:
+        assert persisted.status == "CLOSED"
+        assert persisted.child_id not in manager._runtime(
+            spawn_db.session_id
+        ).held_child_ids
+        async with spawn_db.session_factory() as db:
+            events = await agent_trace_event_crud.list_for_trace(db, child.trace_id)
+        assert [event.control for event in events] == [
+            "REQUESTED",
+            "COMPLETED",
+            "CLOSED",
+        ]
+
+        replacement = await manager.spawn_agent(
+            session_id=spawn_db.session_id,
+            role="kb_explorer",
+            task_brief="replacement owns the released slot",
+        )
+        with pytest.raises(SpawnRejectedError) as raised:
+            await manager.spawn_agent(
+                session_id=spawn_db.session_id,
+                role="kb_explorer",
+                task_brief="close must not release twice",
+            )
+        assert raised.value.reason == "max_concurrent_children"
+        await manager.wait_agent(replacement.child_id)
+    finally:
+        for receipt in await manager.list_agents(spawn_db.session_id):
+            if receipt.status != "CLOSED":
+                await manager.close_agent(receipt.child_id)
 
 
 async def test_spawn_cancellation_after_commit_compensates_and_reuses_slot(
