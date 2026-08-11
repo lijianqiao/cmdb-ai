@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     LLM_EMBEDDING_API_KEY: SecretStr | None = None
     LLM_EMBEDDING_MODEL: str = "Qwen3-Embedding-0.6B"
 
+    # 运维监控：TCP 探活 + CMDB 差异巡检
+    MONITOR_PROBE_TIMEOUT_SECONDS: float = Field(default=3.0, gt=0, le=30)
+    MONITOR_SWEEP_INTERVAL_SECONDS: float = Field(default=30.0, ge=5, le=3600)
+    CMDB_DIFF_INTERVAL_SECONDS: float = Field(default=3600.0, ge=60, le=86_400)
+
     # JWT / 会话
     SECRET_KEY: SecretStr | None = None
     ALGORITHM: Literal["HS256"] = "HS256"

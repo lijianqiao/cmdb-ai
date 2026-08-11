@@ -1,8 +1,9 @@
 """FastAPI application factory and cross-cutting HTTP policies."""
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -22,6 +23,7 @@ from app.core.security import PasswordHashOverloadedError
 from app.crud.base import RelatedObjectsNotFoundError
 from app.crud.role import RoleInUseError
 from app.crud.user import LastActiveSuperuserError
+from app.services.monitor_sweep import run_monitor_sweep_loop
 
 
 def configure_logging() -> None:
@@ -56,8 +58,12 @@ def _error_content(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Release pooled database connections during graceful shutdown."""
+    """Run the monitor sweep for the app's lifetime, then release pooled connections."""
+    monitor_task = asyncio.create_task(run_monitor_sweep_loop())
     yield
+    monitor_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await monitor_task
     await engine.dispose()
 
 
