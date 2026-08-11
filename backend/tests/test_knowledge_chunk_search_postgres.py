@@ -11,7 +11,10 @@ This test creates its own rows inside a transaction it rolls back — it never
 commits, so it leaves no residue even without per-row cleanup.
 """
 
+import asyncio
 import os
+import selectors
+import sys
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -25,10 +28,20 @@ POSTGRES_DATABASE_URL = os.getenv("TEST_POSTGRES_DATABASE_URL")
 if not POSTGRES_DATABASE_URL:
     pytest.skip("TEST_POSTGRES_DATABASE_URL is not configured", allow_module_level=True)
 
-pytestmark = pytest.mark.asyncio
+
+def _test_loop_factory() -> asyncio.AbstractEventLoop:
+    """Create a local loop without using the deprecated global policy API."""
+    if sys.platform == "win32":
+        return asyncio.SelectorEventLoop(selectors.SelectSelector())
+    return asyncio.SelectorEventLoop()
 
 
-async def test_search_similar_orders_by_cosine_distance() -> None:
+def test_search_similar_orders_by_cosine_distance() -> None:
+    """Run the pgvector search on a psycopg-compatible loop on every supported platform."""
+    asyncio.run(_run_search_similar_test(), loop_factory=_test_loop_factory)
+
+
+async def _run_search_similar_test() -> None:
     engine = create_async_engine(POSTGRES_DATABASE_URL)  # type: ignore[arg-type]
     session_factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
 
