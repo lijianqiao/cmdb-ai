@@ -23,6 +23,7 @@ from app.core.security import PasswordHashOverloadedError
 from app.crud.base import RelatedObjectsNotFoundError
 from app.crud.role import RoleInUseError
 from app.crud.user import LastActiveSuperuserError
+from app.services.cmdb_diff import run_cmdb_diff_loop
 from app.services.monitor_sweep import run_monitor_sweep_loop
 
 
@@ -58,12 +59,14 @@ def _error_content(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Run the monitor sweep for the app's lifetime, then release pooled connections."""
+    """Run the monitor sweep and CMDB diff jobs for the app's lifetime, then release connections."""
     monitor_task = asyncio.create_task(run_monitor_sweep_loop())
+    diff_task = asyncio.create_task(run_cmdb_diff_loop())
     yield
-    monitor_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await monitor_task
+    for task in (monitor_task, diff_task):
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
     await engine.dispose()
 
 
