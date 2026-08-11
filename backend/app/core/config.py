@@ -60,6 +60,26 @@ class Settings(BaseSettings):
     MONITOR_SWEEP_INTERVAL_SECONDS: float = Field(default=30.0, ge=5, le=3600)
     CMDB_DIFF_INTERVAL_SECONDS: float = Field(default=3600.0, ge=60, le=86_400)
 
+    # 子 Agent Spawn 配额与回执回收
+    AGENT_MAX_CONCURRENT_CHILDREN: int = Field(default=5, ge=1)
+    AGENT_MAX_SPAWN_DEPTH: int = Field(default=2, ge=1)
+    AGENT_MAX_CHILDREN_PER_SESSION: int = Field(default=50, ge=1)
+    AGENT_MAX_TOTAL_CHILD_COST_USD: float = Field(
+        default=5.0, ge=0, allow_inf_nan=False
+    )
+    AGENT_CHILD_MAX_STEPS: int = Field(default=20, ge=1)
+    AGENT_CHILD_MAX_COST_USD: float = Field(default=1.0, ge=0, allow_inf_nan=False)
+    AGENT_CHILD_MAX_WALL_TIME_SECONDS: float = Field(
+        default=120.0, gt=0, allow_inf_nan=False
+    )
+    AGENT_CLOSE_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    AGENT_TERMINAL_RECEIPT_TTL_SECONDS: float = Field(
+        default=300.0, ge=0, allow_inf_nan=False
+    )
+    AGENT_RECEIPT_GC_INTERVAL_SECONDS: float = Field(
+        default=60.0, gt=0, allow_inf_nan=False
+    )
+
     # JWT / 会话
     SECRET_KEY: SecretStr | None = None
     ALGORITHM: Literal["HS256"] = "HS256"

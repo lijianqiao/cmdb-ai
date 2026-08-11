@@ -1,6 +1,7 @@
 """Structural tests for the new agent-runtime ORM models."""
 
 from datetime import datetime
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select
@@ -61,6 +62,7 @@ async def test_agent_registry_defaults_to_requested_status(
         parent_agent_id=None,
         agent_path="/root/kb_explorer",
         role="kb_explorer",
+        role_version="2026-08-11",
         model="local-chat",
         tools_allowlist=["kb_grep", "kb_read"],
         sandbox_mode="read-only",
@@ -77,6 +79,10 @@ async def test_agent_registry_defaults_to_requested_status(
     assert stored.status == "REQUESTED"
     assert stored.closed_at is None
     assert stored.tools_allowlist == ["kb_grep", "kb_read"]
+    assert UUID(stored.trace_id).version == 4
+    assert stored.role_version == "2026-08-11"
+    assert stored.status_changed_at.tzinfo is not None
+    assert stored.force_closed is False
 
 
 async def test_hitl_proposal_defaults_to_pending(db_session: AsyncSession, test_user: User) -> None:

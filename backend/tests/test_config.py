@@ -142,3 +142,35 @@ def test_non_production_generates_ephemeral_secret() -> None:
 
     assert len(settings.secret_key) >= 32
     assert settings.migration_database_url == settings.DATABASE_URL
+
+
+def test_spawn_limit_defaults_are_bounded() -> None:
+    value = Settings(_env_file=None, SECRET_KEY="x" * 32)
+
+    assert value.AGENT_MAX_CONCURRENT_CHILDREN == 5
+    assert value.AGENT_MAX_SPAWN_DEPTH == 2
+    assert value.AGENT_MAX_CHILDREN_PER_SESSION == 50
+    assert value.AGENT_MAX_TOTAL_CHILD_COST_USD == 5.0
+    assert value.AGENT_CHILD_MAX_STEPS == 20
+    assert value.AGENT_CHILD_MAX_COST_USD == 1.0
+    assert value.AGENT_CHILD_MAX_WALL_TIME_SECONDS == 120.0
+    assert value.AGENT_CLOSE_TIMEOUT_SECONDS == 5.0
+    assert value.AGENT_TERMINAL_RECEIPT_TTL_SECONDS == 300.0
+    assert value.AGENT_RECEIPT_GC_INTERVAL_SECONDS == 60.0
+
+
+@pytest.mark.parametrize(
+    ("name", "bad"),
+    [
+        ("AGENT_MAX_CONCURRENT_CHILDREN", 0),
+        ("AGENT_MAX_SPAWN_DEPTH", 0),
+        ("AGENT_MAX_TOTAL_CHILD_COST_USD", -0.01),
+        ("AGENT_MAX_TOTAL_CHILD_COST_USD", float("inf")),
+        ("AGENT_CHILD_MAX_COST_USD", float("nan")),
+        ("AGENT_CHILD_MAX_WALL_TIME_SECONDS", 0),
+        ("AGENT_CLOSE_TIMEOUT_SECONDS", 0),
+    ],
+)
+def test_spawn_limits_reject_invalid_values(name: str, bad: object) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, SECRET_KEY="x" * 32, **{name: bad})

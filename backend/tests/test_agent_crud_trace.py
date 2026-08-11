@@ -1,5 +1,7 @@
 """CRUD tests for AgentTraceEvent (append-only observability log)."""
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -78,3 +80,49 @@ async def test_list_for_trace_excludes_other_traces(
     events = await agent_trace_event_crud.list_for_trace(db_session, "trace-a")
 
     assert len(events) == 1
+
+
+async def test_list_for_trace_has_stable_order_within_step(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    first = await agent_trace_event_crud.record(
+        db_session,
+        trace_id="trace-stable",
+        session_id=session_id,
+        agent_id="root",
+        parent_agent_id=None,
+        step=1,
+        span_type="generation",
+    )
+    second = await agent_trace_event_crud.record(
+        db_session,
+        trace_id="trace-stable",
+        session_id=session_id,
+        agent_id="root",
+        parent_agent_id=None,
+        step=1,
+        span_type="tool",
+    )
+    third = await agent_trace_event_crud.record(
+        db_session,
+        trace_id="trace-stable",
+        session_id=session_id,
+        agent_id="root",
+        parent_agent_id=None,
+        step=1,
+        span_type="tool",
+    )
+    timestamp = datetime.now(UTC)
+    first.created_at = timestamp
+    second.created_at = timestamp - timedelta(seconds=1)
+    third.created_at = second.created_at
+    await db_session.commit()
+
+    events = await agent_trace_event_crud.list_for_trace(db_session, "trace-stable")
+
+    assert [(event.step, event.created_at, event.id) for event in events] == [
+        (second.step, second.created_at, second.id),
+        (third.step, third.created_at, third.id),
+        (first.step, first.created_at, first.id),
+    ]

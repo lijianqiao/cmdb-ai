@@ -46,11 +46,15 @@ class CRUDAgentTraceEvent:
         return event
 
     async def list_for_trace(self, db: AsyncSession, trace_id: str) -> list[AgentTraceEvent]:
-        """Return every span for one trace, ordered by step."""
+        """Return every span for one trace in deterministic execution order."""
         stmt = (
             select(AgentTraceEvent)
             .where(AgentTraceEvent.trace_id == trace_id)
-            .order_by(AgentTraceEvent.step.asc())
+            .order_by(
+                AgentTraceEvent.step.asc(),
+                AgentTraceEvent.created_at.asc(),
+                AgentTraceEvent.id.asc(),
+            )
         )
         result = await db.execute(stmt)
         return list(result.scalars().all())

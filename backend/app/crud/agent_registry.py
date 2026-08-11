@@ -7,8 +7,9 @@ the forced-detach escape valve so a hung child can always free its slot.
 """
 
 from datetime import UTC, datetime
+from math import fsum
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent_registry import AgentRegistry
@@ -22,6 +23,21 @@ _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "CANCELLED": {"CLOSED"},
     "CLOSED": set(),
 }
+
+_ACTIVE_STATUSES = {"REQUESTED", "SPAWNING", "RUNNING"}
+_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
+_BUDGET_DEFAULTS: dict[str, int | float] = {
+    "max_steps": 20,
+    "max_cost_usd": 1.0,
+    "max_wall_time_seconds": 120.0,
+    "steps_used": 0,
+    "cost_used_usd": 0.0,
+}
+
+
+def _normalize_budget(budget: dict[str, object]) -> dict[str, object]:
+    """Return the fixed five-key receipt budget while preserving supplied values."""
+    return {key: budget.get(key, default) for key, default in _BUDGET_DEFAULTS.items()}
 
 
 class InvalidAgentStatusTransitionError(ValueError):
@@ -49,6 +65,8 @@ class CRUDAgentRegistry:
         db: AsyncSession,
         *,
         session_id: int,
+        trace_id: str,
+        role_version: str,
         parent_agent_id: str | None,
         agent_path: str,
         role: str,
@@ -57,20 +75,25 @@ class CRUDAgentRegistry:
         sandbox_mode: str,
         task_brief: str,
         budget: dict[str, object],
+        child_id: str | None = None,
     ) -> AgentRegistry:
         """Register a newly spawned child agent in REQUESTED status and flush."""
         registry = AgentRegistry(
             session_id=session_id,
             parent_agent_id=parent_agent_id,
             agent_path=agent_path,
+            trace_id=trace_id,
             role=role,
+            role_version=role_version,
             model=model,
             tools_allowlist=tools_allowlist,
             sandbox_mode=sandbox_mode,
             task_brief=task_brief,
-            budget=budget,
+            budget=_normalize_budget(budget),
             status="REQUESTED",
         )
+        if child_id is not None:
+            registry.child_id = child_id
         db.add(registry)
         await db.flush()
         return registry
@@ -81,6 +104,7 @@ class CRUDAgentRegistry:
         child_id: str,
         target_status: str,
         *,
+        budget: dict[str, object] | None = None,
         result_summary: str | None = None,
         artifacts: list[str] | None = None,
     ) -> AgentRegistry:
@@ -93,25 +117,34 @@ class CRUDAgentRegistry:
         if target_status not in allowed:
             raise InvalidAgentStatusTransitionError(registry.status, target_status)
 
+        changed_at = datetime.now(UTC)
         registry.status = target_status
+        registry.status_changed_at = changed_at
+        if budget is not None:
+            registry.budget = _normalize_budget({**registry.budget, **budget})
         if result_summary is not None:
             registry.result_summary = result_summary
         if artifacts is not None:
             registry.artifacts = artifacts
         if target_status == "CLOSED":
-            registry.closed_at = datetime.now(UTC)
+            registry.closed_at = changed_at
 
         await db.flush()
         return registry
 
-    async def close(self, db: AsyncSession, child_id: str) -> AgentRegistry:
+    async def close(
+        self, db: AsyncSession, child_id: str, *, force_closed: bool = False
+    ) -> AgentRegistry:
         """Idempotently close a child agent, bypassing the normal transition table."""
         registry = await self.get(db, child_id)
         if registry is None:
             raise ValueError(f"agent registry {child_id!r} not found")
         if registry.status != "CLOSED":
+            changed_at = datetime.now(UTC)
             registry.status = "CLOSED"
-            registry.closed_at = datetime.now(UTC)
+            registry.status_changed_at = changed_at
+            registry.closed_at = changed_at
+            registry.force_closed = force_closed
             await db.flush()
         return registry
 
@@ -120,10 +153,106 @@ class CRUDAgentRegistry:
         stmt = (
             select(AgentRegistry)
             .where(AgentRegistry.session_id == session_id, AgentRegistry.status != "CLOSED")
-            .order_by(AgentRegistry.created_at.asc())
+            .order_by(AgentRegistry.created_at.asc(), AgentRegistry.child_id.asc())
         )
         result = await db.execute(stmt)
         return list(result.scalars().all())
+
+    async def list_for_session(
+        self, db: AsyncSession, session_id: int
+    ) -> list[AgentRegistry]:
+        """Return every receipt in a session, including CLOSED rows."""
+        stmt = (
+            select(AgentRegistry)
+            .where(AgentRegistry.session_id == session_id)
+            .order_by(AgentRegistry.created_at.asc(), AgentRegistry.child_id.asc())
+        )
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    async def list_children(
+        self, db: AsyncSession, session_id: int, parent_agent_id: str
+    ) -> list[AgentRegistry]:
+        """Return one receipt's direct children within its session."""
+        stmt = (
+            select(AgentRegistry)
+            .where(
+                AgentRegistry.session_id == session_id,
+                AgentRegistry.parent_agent_id == parent_agent_id,
+            )
+            .order_by(AgentRegistry.created_at.asc(), AgentRegistry.child_id.asc())
+        )
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    async def list_descendants(
+        self,
+        db: AsyncSession,
+        session_id: int,
+        child_id: str,
+        *,
+        deepest_first: bool = False,
+    ) -> list[AgentRegistry]:
+        """Return all descendants, defensively stopping if corrupt rows form a cycle."""
+        receipts = await self.list_for_session(db, session_id)
+        by_parent: dict[str, list[AgentRegistry]] = {}
+        for receipt in receipts:
+            if receipt.parent_agent_id is not None:
+                by_parent.setdefault(receipt.parent_agent_id, []).append(receipt)
+
+        descendants: list[tuple[int, AgentRegistry]] = []
+        visited = {child_id}
+        pending = [(child_id, 0)]
+        while pending:
+            parent_id, parent_depth = pending.pop()
+            for child in by_parent.get(parent_id, []):
+                if child.child_id in visited:
+                    continue
+                visited.add(child.child_id)
+                depth = parent_depth + 1
+                descendants.append((depth, child))
+                pending.append((child.child_id, depth))
+
+        if deepest_first:
+            descendants.sort(key=lambda item: (-item[0], item[1].created_at, item[1].child_id))
+        else:
+            descendants.sort(key=lambda item: (item[1].created_at, item[1].child_id))
+        return [receipt for _depth, receipt in descendants]
+
+    async def count_for_session(self, db: AsyncSession, session_id: int) -> int:
+        """Count all receipts ever created in a session, including CLOSED rows."""
+        stmt = select(func.count()).select_from(AgentRegistry).where(
+            AgentRegistry.session_id == session_id
+        )
+        result = await db.execute(stmt)
+        return int(result.scalar_one())
+
+    async def list_terminal_before(
+        self, db: AsyncSession, cutoff: datetime
+    ) -> list[AgentRegistry]:
+        """Return terminal receipts whose lifecycle clock is older than cutoff."""
+        stmt = (
+            select(AgentRegistry)
+            .where(
+                AgentRegistry.status.in_(_TERMINAL_STATUSES),
+                AgentRegistry.status_changed_at < cutoff,
+            )
+            .order_by(AgentRegistry.created_at.asc(), AgentRegistry.child_id.asc())
+        )
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    async def reserved_cost_for_session(self, db: AsyncSession, session_id: int) -> float:
+        """Return conservative reserved/actual child cost for one session."""
+        receipts = await self.list_for_session(db, session_id)
+        costs: list[float] = []
+        for receipt in receipts:
+            key = "max_cost_usd" if receipt.status in _ACTIVE_STATUSES else "cost_used_usd"
+            value = receipt.budget.get(key, 0.0)
+            if not isinstance(value, int | float):
+                raise ValueError(f"agent budget {key!r} must be numeric")
+            costs.append(float(value))
+        return fsum(costs)
 
 
 agent_registry_crud = CRUDAgentRegistry()
