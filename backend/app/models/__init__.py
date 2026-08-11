@@ -9,10 +9,14 @@ from app.models.agent_session import AgentSession
 from app.models.agent_trace_event import AgentTraceEvent
 from app.models.audit_log import AuditLog
 from app.models.base import Base
+from app.models.cmdb_asset import CmdbAsset
+from app.models.cmdb_asset_dependency import CmdbAssetDependency
 from app.models.hitl_proposal import HitlProposal
 from app.models.knowledge_category import KnowledgeCategory
 from app.models.knowledge_chunk import KnowledgeChunk
 from app.models.knowledge_document import KnowledgeDocument
+from app.models.monitor_status_event import MonitorStatusEvent
+from app.models.monitor_target import MonitorTarget
 from app.models.permission import Permission
 from app.models.refresh_session import RefreshSession
 from app.models.refresh_session_family import RefreshSessionFamily
@@ -37,4 +41,8 @@ __all__ = [
     "KnowledgeCategory",
     "KnowledgeDocument",
     "KnowledgeChunk",
+    "CmdbAsset",
+    "CmdbAssetDependency",
+    "MonitorTarget",
+    "MonitorStatusEvent",
 ]
