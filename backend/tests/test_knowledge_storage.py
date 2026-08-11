@@ -71,3 +71,20 @@ def test_glob_documents_scoped_to_category(tmp_path: Path, monkeypatch: pytest.M
     sop_only = glob_documents("*.md", category_code="sop")
 
     assert sop_only == ["sop/1_a.md"]
+
+
+def test_glob_documents_excludes_matches_outside_knowledge_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
+    write_document_file(category_code="sop", document_id=1, filename="a.md", content=b"x")
+
+    outside_file = tmp_path.parent / "leak.md"
+    outside_file.write_text("secret", encoding="utf-8")
+
+    try:
+        results = glob_documents("../*.md", category_code="sop")
+        assert "leak.md" not in [Path(r).name for r in results]
+        assert all("leak" not in r for r in results)
+    finally:
+        outside_file.unlink()

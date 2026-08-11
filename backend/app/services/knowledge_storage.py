@@ -69,10 +69,20 @@ def read_document_file(relative_path: str, *, offset: int = 0, limit: int | None
 
 
 def glob_documents(pattern: str, *, category_code: str | None = None) -> list[str]:
-    """Return paths (relative to KNOWLEDGE_ROOT) of files matching a glob pattern."""
+    """Return paths (relative to KNOWLEDGE_ROOT) of files matching a glob pattern.
+
+    Matches that resolve outside KNOWLEDGE_ROOT (e.g. via a pattern containing
+    ``..``) are silently excluded, not raised — this is a listing operation.
+    """
     base = category_dir(category_code) if category_code else KNOWLEDGE_ROOT
     base.mkdir(parents=True, exist_ok=True)
     root = KNOWLEDGE_ROOT.resolve()
-    return sorted(
-        str(p.relative_to(root)).replace("\\", "/") for p in base.glob(pattern) if p.is_file()
-    )
+    matches: list[str] = []
+    for candidate in base.glob(pattern):
+        if not candidate.is_file():
+            continue
+        resolved = candidate.resolve()
+        if resolved != root and root not in resolved.parents:
+            continue
+        matches.append(str(resolved.relative_to(root)).replace("\\", "/"))
+    return sorted(matches)
