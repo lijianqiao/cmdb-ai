@@ -131,7 +131,12 @@ async def chat(
     owns_client = client is None
     http_client = client or _build_client(config)
     try:
-        response = await http_client.post("/chat/completions", json=payload)
+        try:
+            response = await http_client.post("/chat/completions", json=payload)
+        except httpx.RequestError as exc:
+            raise LlmRequestError(
+                f"model {model_key!r} transport request failed: {type(exc).__name__}"
+            ) from exc
     finally:
         if owns_client:
             await http_client.aclose()

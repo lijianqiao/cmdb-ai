@@ -115,6 +115,26 @@ async def test_chat_raises_on_non_200() -> None:
             await chat("local-chat", [ChatMessage(role="user", content="hi")], client=fake_client)
 
 
+@pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ReadTimeout])
+async def test_chat_wraps_transport_failures_as_model_errors(
+    error_type: type[httpx.RequestError],
+) -> None:
+    def fail_transport(request: httpx.Request) -> httpx.Response:
+        raise error_type("transport secret", request=request)
+
+    transport = httpx.MockTransport(fail_transport)
+    async with httpx.AsyncClient(transport=transport, base_url="http://fake") as fake_client:
+        with pytest.raises(LlmRequestError) as raised:
+            await chat(
+                "local-chat",
+                [ChatMessage(role="user", content="hi")],
+                client=fake_client,
+            )
+
+    assert "transport secret" not in str(raised.value)
+    assert isinstance(raised.value.__cause__, error_type)
+
+
 async def test_chat_raises_llm_request_error_on_invalid_json_body() -> None:
     transport = httpx.MockTransport(lambda request: httpx.Response(200, text="not json"))
     async with httpx.AsyncClient(transport=transport, base_url="http://fake") as fake_client:
