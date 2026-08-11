@@ -14,7 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.loop import ToolResult
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.cmdb_asset_dependency import cmdb_asset_dependency_crud
+from app.crud.monitor_status_event import monitor_status_event_crud
+from app.crud.monitor_target import monitor_target_crud
 from app.models.cmdb_asset import CmdbAsset
+from app.models.monitor_target import MonitorTarget
 
 
 def _format_asset(asset: CmdbAsset) -> str:
@@ -71,4 +74,56 @@ async def query_cmdb_dependencies(
         for a_id in reached_ids
         if a_id in assets_by_id
     ]
+    return ToolResult(control="ok", content="\n".join(lines))
+
+
+async def query_monitor_status(
+    db: AsyncSession,
+    *,
+    target_ids: list[int] | None = None,
+    ip_prefix: str | None = None,
+    since_limit: int = 5,
+) -> ToolResult:
+    """Report each target's current status derived from its latest event and recent history.
+
+    ``ip_prefix`` is a literal string-prefix match, not CIDR arithmetic. The
+    name deliberately matches ``monitor_target_crud.list_by_ip_prefix``'s
+    behavior instead of promising unsupported CIDR semantics.
+    """
+    targets: list[MonitorTarget]
+    if target_ids is not None:
+        results = [await monitor_target_crud.get(db, target_id) for target_id in target_ids]
+        targets = [target for target in results if target is not None]
+    elif ip_prefix is not None:
+        targets = await monitor_target_crud.list_by_ip_prefix(db, ip_prefix)
+    else:
+        targets = await monitor_target_crud.list_active(db)
+
+    if not targets:
+        return ToolResult(control="ok", content="没有找到匹配的监控目标")
+
+    latest_status = await monitor_status_event_crud.get_latest_status_for_targets(
+        db,
+        [target.id for target in targets],
+    )
+
+    lines: list[str] = []
+    for target in targets:
+        header = f"[id={target.id}] {target.ip_address}:{target.port} ({target.label or '未命名'})"
+        latest = latest_status.get(target.id)
+        if latest is None:
+            lines.append(f"{header} — 尚未探测")
+            continue
+
+        recent = await monitor_status_event_crud.list_recent_for_target(
+            db,
+            target.id,
+            limit=since_limit,
+        )
+        history = ", ".join(f"{event.status}@{event.checked_at:%H:%M:%S}" for event in recent)
+        latency_text = f"{latest.latency_ms}ms" if latest.latency_ms is not None else "—"
+        lines.append(
+            f"{header} — 当前: {latest.status} (延迟 {latency_text}); 最近记录: {history}"
+        )
+
     return ToolResult(control="ok", content="\n".join(lines))
