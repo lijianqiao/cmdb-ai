@@ -18,6 +18,8 @@ import { PermissionsTrashPage } from "@/pages/PermissionsTrashPage"
 import { ProfilePage } from "@/pages/ProfilePage"
 import { RolesPage } from "@/pages/RolesPage"
 import { RolesTrashPage } from "@/pages/RolesTrashPage"
+import { CmdbAssetsPage } from "@/pages/CmdbAssetsPage"
+import { CmdbAssetsTrashPage } from "@/pages/CmdbAssetsTrashPage"
 import { UsersPage } from "@/pages/UsersPage"
 import { UsersTrashPage } from "@/pages/UsersTrashPage"
 
@@ -98,6 +100,22 @@ export function App() {
             element={
               <ProtectedRoute permission={PERMISSIONS.PERMISSION_DELETE}>
                 <PermissionsTrashPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path={ROUTES.CMDB}
+            element={
+              <ProtectedRoute permission={PERMISSIONS.CMDB_READ}>
+                <CmdbAssetsPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path={ROUTES.CMDB_TRASH}
+            element={
+              <ProtectedRoute permission={PERMISSIONS.CMDB_MANAGE}>
+                <CmdbAssetsTrashPage />
               </ProtectedRoute>
             }
           />
