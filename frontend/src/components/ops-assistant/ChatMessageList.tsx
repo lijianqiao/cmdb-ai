@@ -1,14 +1,13 @@
 /** 运维助手消息时间线
 
- * 渲染 useOpsChat 的 OpsChatItem：用户/助手气泡、tool_call Badge、HITL 插槽、错误行。
- * HitlApprovalCard 由 Task 8 接入，此处仅占位展示安全摘要。
+ * 渲染 useOpsChat 的 OpsChatItem：用户/助手气泡、tool_call Badge、HITL 卡片、错误行。
  */
 
 import { useEffect, useRef } from "react"
 
+import { HitlApprovalCard } from "@/components/ops-assistant/HitlApprovalCard"
 import { BubbleChatIcon } from "@/lib/icons"
 import { Badge } from "@/components/ui/badge"
-import { Card, CardContent } from "@/components/ui/card"
 import {
   Empty,
   EmptyDescription,
@@ -26,43 +25,6 @@ export interface ChatMessageListProps {
   messages: OpsChatItem[]
   isLoading?: boolean
   className?: string
-}
-
-/**
- * HITL 审批卡片占位（Task 8 替换为 HitlApprovalCard）。
- *
- * Args:
- *   item: hitl 时间线条目（仅安全摘要字段）
- */
-function HitlApprovalSlot({
-  item,
-}: {
-  item: Extract<OpsChatItem, { kind: "hitl" }>
-}) {
-  return (
-    <Card className="border-dashed bg-card">
-      <CardContent className="flex flex-col gap-2 py-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="outline">待审批</Badge>
-          <Badge variant="secondary">{item.status || "pending"}</Badge>
-          {item.actionType ? (
-            <span className="text-sm text-muted-foreground">
-              {item.actionType}
-            </span>
-          ) : null}
-        </div>
-        {item.reason ? (
-          <p className="text-sm text-foreground">{item.reason}</p>
-        ) : null}
-        {item.assetId != null ? (
-          <p className="text-xs text-muted-foreground">资产 #{item.assetId}</p>
-        ) : null}
-        <p className="text-xs text-muted-foreground">
-          审批操作将在后续版本启用（HitlApprovalCard）
-        </p>
-      </CardContent>
-    </Card>
-  )
 }
 
 /**
@@ -110,7 +72,13 @@ function MessageRow({ item }: { item: OpsChatItem }) {
       return (
         <div className="flex justify-start">
           <div className="w-full max-w-md">
-            <HitlApprovalSlot item={item} />
+            <HitlApprovalCard
+              proposalId={item.proposalId}
+              actionType={item.actionType}
+              status={item.status}
+              reason={item.reason}
+              assetId={item.assetId}
+            />
           </div>
         </div>
       )
