@@ -80,7 +80,11 @@ async def run_loop(
             agent_id=agent_id,
             system_prompt=system_prompt,
         )
-        result: ChatResult = await chat_fn(model_key, history, tools=tools)
+        result: ChatResult = (
+            await chat_fn(model_key, history, tools=tools, db=db)
+            if chat_fn is chat
+            else await chat_fn(model_key, history, tools=tools)
+        )
 
         cost_exceeded = False
         try:

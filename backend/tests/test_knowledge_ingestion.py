@@ -131,3 +131,33 @@ async def test_ingest_document_cleans_up_file_when_embedding_fails(
         )
 
     assert list((tmp_path / "sop").glob("*")) == []
+
+
+async def test_ingest_document_passes_db_to_embed(
+    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
+    category = await knowledge_category_crud.create(
+        db_session, {"code": "sop", "name": "SOP", "description": ""}
+    )
+    await db_session.flush()
+
+    async def fake_embed(model_key: str, inputs: list[str], **kwargs: Any) -> EmbeddingResult:
+        assert kwargs.get("db") is db_session
+        return EmbeddingResult(vectors=[[0.1] * 1024 for _ in inputs], prompt_tokens=10)
+
+    monkeypatch.setattr("app.services.knowledge_ingestion.embed", fake_embed)
+
+    document = await ingest_document(
+        db_session,
+        category_id=category.id,
+        category_code="sop",
+        title="重启流程",
+        original_filename="reboot.md",
+        file_type="md",
+        content="交换机重启的标准流程：第一步...".encode(),
+        uploaded_by=test_user.id,
+    )
+    await db_session.commit()
+
+    assert document.status == "ready"

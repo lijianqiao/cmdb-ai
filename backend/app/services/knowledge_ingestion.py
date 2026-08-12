@@ -108,7 +108,7 @@ async def ingest_document(
         text = content.decode("utf-8")
         chunks = chunk_text(text)
         if chunks:
-            embedding_result = await embed(embedding_model_key, chunks)
+            embedding_result = await embed(embedding_model_key, chunks, db=db)
             for index, (chunk_content, vector) in enumerate(
                 zip(chunks, embedding_result.vectors, strict=True)
             ):

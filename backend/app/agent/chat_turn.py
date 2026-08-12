@@ -123,6 +123,8 @@ async def run_chat_turn(
         call_kwargs = dict(kwargs)
         call_kwargs.pop("stream", None)
         call_kwargs.pop("on_delta", None)
+        if chat_fn is None:
+            call_kwargs["db"] = db
         result = await resolved_chat(
             mk,
             messages,

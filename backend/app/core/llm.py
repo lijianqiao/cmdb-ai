@@ -10,12 +10,15 @@ should construct an HTTP client to a model provider directly.
 
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.data_encryption import DataDecryptError, DataEncryptionKeyMissingError
+from app.services.system_config import get_effective_llm_config
 
 type ChatDeltaCallback = Callable[[str], Awaitable[None]]
 
@@ -115,6 +118,48 @@ def _cost_usd(config: ModelConfig, prompt_tokens: int, completion_tokens: int) -
         prompt_tokens * config.input_cost_per_million_usd
         + completion_tokens * config.output_cost_per_million_usd
     ) / 1_000_000
+
+
+async def _resolve_model_config(
+    model_key: str,
+    db: AsyncSession | None,
+) -> ModelConfig:
+    """
+    按模型键解析本次请求应使用的 ModelConfig。
+
+    有 db 时读取数据库有效配置覆盖 local-chat / local-embedding；
+    无 db 或未知键时回退 MODELS 登记表。
+    """
+    base = MODELS.get(model_key)
+    if base is None:
+        raise LlmRequestError(
+            f"unknown model key {model_key!r}; register it in MODELS first"
+        )
+    if db is None:
+        return base
+
+    try:
+        effective = await get_effective_llm_config(db)
+    except (DataDecryptError, DataEncryptionKeyMissingError) as exc:
+        raise LlmRequestError("读取系统 LLM 配置失败，请检查密钥加密设置") from exc
+
+    if model_key == "local-chat":
+        return replace(
+            base,
+            base_url=effective.chat_base_url,
+            api_key=effective.chat_api_key,
+            request_model=effective.chat_model,
+            input_cost_per_million_usd=effective.chat_input_cost_per_million_usd,
+            output_cost_per_million_usd=effective.chat_output_cost_per_million_usd,
+        )
+    if model_key == "local-embedding":
+        return replace(
+            base,
+            base_url=effective.embedding_base_url,
+            api_key=effective.embedding_api_key,
+            request_model=effective.embedding_model,
+        )
+    return base
 
 
 @dataclass
@@ -265,6 +310,7 @@ async def chat(
     client: httpx.AsyncClient | None = None,
     stream: bool = False,
     on_delta: ChatDeltaCallback | None = None,
+    db: AsyncSession | None = None,
 ) -> ChatResult:
     """
     发送一次 OpenAI 兼容 chat completion，返回助手回合。
@@ -276,13 +322,12 @@ async def chat(
         client: 可注入的 httpx 客户端（单测用）
         stream: False=整段返回（默认，兼容旧调用）；True=SSE 真 token 流
         on_delta: 仅 stream=True 时生效；每段文本增量回调
+        db: 可选数据库会话；传入时读取系统配置覆盖 local-chat
 
     Returns:
         完整 ChatResult（流式时也是聚合结果）
     """
-    config = MODELS.get(model_key)
-    if config is None:
-        raise LlmRequestError(f"unknown model key {model_key!r}; register it in MODELS first")
+    config = await _resolve_model_config(model_key, db)
     if config.capability != "chat":
         raise LlmRequestError(f"model {model_key!r} is not registered for chat")
 
@@ -349,14 +394,21 @@ async def embed(
     inputs: list[str],
     *,
     client: httpx.AsyncClient | None = None,
+    db: AsyncSession | None = None,
 ) -> EmbeddingResult:
-    """Send one OpenAI-compatible embeddings request and return the vectors, input-order.
-
-    `client` is injectable for tests, matching `chat()`'s convention.
     """
-    config = MODELS.get(model_key)
-    if config is None:
-        raise LlmRequestError(f"unknown model key {model_key!r}; register it in MODELS first")
+    发送一次 OpenAI 兼容 embeddings 请求，按输入顺序返回向量。
+
+    Args:
+        model_key: MODELS 登记键
+        inputs: 待嵌入文本列表
+        client: 可注入的 httpx 客户端（单测用）
+        db: 可选数据库会话；传入时读取系统配置覆盖 local-embedding
+
+    Returns:
+        向量与 token 用量
+    """
+    config = await _resolve_model_config(model_key, db)
     if config.capability != "embedding":
         raise LlmRequestError(f"model {model_key!r} is not registered for embedding")
 

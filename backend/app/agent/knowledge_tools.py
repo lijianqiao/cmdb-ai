@@ -104,7 +104,7 @@ async def kb_semantic_search(
     app/crud/knowledge_chunk.py.
     """
     try:
-        embedding_result = await embed(embedding_model_key, [query])
+        embedding_result = await embed(embedding_model_key, [query], db=db)
     except LlmRequestError as exc:
         return ToolResult(control="failed", content=f"embedding 失败: {exc}")
 

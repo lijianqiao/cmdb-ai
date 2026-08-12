@@ -341,3 +341,79 @@ async def test_post_messages_endpoint_uses_chat_turn(
     assert kwargs["session_id"] == session.id
     assert kwargs["actor_user_id"] == test_user.id
     assert kwargs["content"] == "你好"
+
+
+async def test_chat_turn_passes_db_to_default_chat(
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """默认 chat 路径应向 llm.chat 传入 db 会话。"""
+    from app.agent import chat_turn as chat_turn_module
+    from app.agent.chat_turn import run_chat_turn
+
+    session_id = await _make_session(db_session, test_user.id)
+    test_hub = AgentWsHub()
+    ws = FakeWebSocket()
+    await test_hub.connect(session_id, ws)  # type: ignore[arg-type]
+
+    captured: dict[str, Any] = {}
+
+    async def spy_chat(model_key: str, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        captured["db"] = kwargs.get("db")
+        return ChatResult(
+            content="你好",
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    monkeypatch.setattr(chat_turn_module, "chat", spy_chat)
+
+    outcome = await run_chat_turn(
+        db_session,
+        session_id=session_id,
+        actor_user_id=test_user.id,
+        content="你好",
+        hub_instance=test_hub,
+    )
+    await db_session.commit()
+
+    assert outcome.reason == "final_answer"
+    assert captured["db"] is db_session
+
+
+async def test_chat_turn_injected_chat_fn_does_not_receive_db(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """注入的 chat_fn 不应被迫接受 db 关键字。"""
+    from app.agent.chat_turn import run_chat_turn
+
+    session_id = await _make_session(db_session, test_user.id)
+    test_hub = AgentWsHub()
+    ws = FakeWebSocket()
+    await test_hub.connect(session_id, ws)  # type: ignore[arg-type]
+
+    async def fake_chat(model_key: str, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        assert "db" not in kwargs
+        return ChatResult(
+            content="你好",
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    outcome = await run_chat_turn(
+        db_session,
+        session_id=session_id,
+        actor_user_id=test_user.id,
+        content="你好",
+        chat_fn=fake_chat,
+        hub_instance=test_hub,
+    )
+    await db_session.commit()
+
+    assert outcome.reason == "final_answer"

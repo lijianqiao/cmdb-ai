@@ -81,3 +81,25 @@ async def test_kb_semantic_search_reports_embedding_failure(
     result = await kb_semantic_search(db_session, "任意问题")
 
     assert result.control == "failed"
+
+
+async def test_kb_semantic_search_passes_db_to_embed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_embed(model_key: str, inputs: list[str], **kwargs: Any) -> EmbeddingResult:
+        assert kwargs.get("db") is db_session
+        return EmbeddingResult(vectors=[[0.1] * 1024], prompt_tokens=5)
+
+    async def fake_search_similar(
+        db: AsyncSession, *, query_embedding: list[float], category_id: int | None, top_k: int
+    ) -> list[tuple[KnowledgeChunk, float]]:
+        return []
+
+    monkeypatch.setattr("app.agent.knowledge_tools.embed", fake_embed)
+    monkeypatch.setattr(
+        "app.agent.knowledge_tools.knowledge_chunk_crud.search_similar", fake_search_similar
+    )
+
+    result = await kb_semantic_search(db_session, "交换机怎么重启")
+
+    assert result.control == "ok"

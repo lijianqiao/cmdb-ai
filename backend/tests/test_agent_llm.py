@@ -1,13 +1,22 @@
-"""Tests for the unified LLM client (app.core.llm)."""
+"""
+@Author: li
+@Email: lijianqiao2906@live.com
+@FileName: test_agent_llm.py
+@DateTime: 2026-08-13 13:15
+@Docs: 统一 LLM 客户端单测：含数据库覆盖与环境回退。
+"""
 
 import json
 from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.data_encryption import encrypt_secret
 from app.core.llm import MODELS, ChatMessage, LlmRequestError, ModelConfig, ToolCall, chat, embed
+from app.crud.system_config import system_config_crud
 
 pytestmark = pytest.mark.asyncio
 
@@ -404,3 +413,162 @@ async def test_chat_stream_raises_on_non_200() -> None:
                 client=fake_client,
                 stream=True,
             )
+
+
+async def test_chat_uses_database_model_config(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encrypted = encrypt_secret("db-chat-key")
+    await system_config_crud.upsert_values(
+        db_session,
+        {
+            "LLM_CHAT_BASE_URL": "https://db-chat.example/v1",
+            "LLM_CHAT_API_KEY": encrypted,
+            "LLM_CHAT_MODEL": "db-chat-model",
+            "LLM_CHAT_INPUT_COST_PER_MILLION_USD": "2.0",
+            "LLM_CHAT_OUTPUT_COST_PER_MILLION_USD": "4.0",
+        },
+        updated_by_user_id=None,
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url).startswith(
+            "https://db-chat.example/v1/chat/completions"
+        )
+        assert request.headers["Authorization"] == "Bearer db-chat-key"
+        assert json.loads(request.content)["model"] == "db-chat-model"
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "message": {"content": "ok", "tool_calls": []},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+        )
+
+    def fake_build_client(config: ModelConfig) -> httpx.AsyncClient:
+        headers = (
+            {"Authorization": f"Bearer {config.api_key}"}
+            if config.api_key
+            else {}
+        )
+        return httpx.AsyncClient(
+            base_url=config.base_url,
+            headers=headers,
+            timeout=config.timeout_seconds,
+            transport=httpx.MockTransport(handler),
+        )
+
+    monkeypatch.setattr("app.core.llm._build_client", fake_build_client)
+
+    result = await chat(
+        "local-chat",
+        [ChatMessage(role="user", content="hi")],
+        db=db_session,
+    )
+    assert result.cost_usd == pytest.approx(0.00004)
+
+
+async def test_embed_uses_database_model_config(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encrypted = encrypt_secret("db-embed-key")
+    await system_config_crud.upsert_values(
+        db_session,
+        {
+            "LLM_EMBEDDING_BASE_URL": "https://db-embed.example/v1",
+            "LLM_EMBEDDING_API_KEY": encrypted,
+            "LLM_EMBEDDING_MODEL": "db-embed-model",
+        },
+        updated_by_user_id=None,
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url).startswith("https://db-embed.example/v1/embeddings")
+        assert request.headers["Authorization"] == "Bearer db-embed-key"
+        assert json.loads(request.content)["model"] == "db-embed-model"
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"index": 0, "embedding": [0.1, 0.2]}],
+                "usage": {"prompt_tokens": 3},
+            },
+        )
+
+    def fake_build_client(config: ModelConfig) -> httpx.AsyncClient:
+        headers = (
+            {"Authorization": f"Bearer {config.api_key}"}
+            if config.api_key
+            else {}
+        )
+        return httpx.AsyncClient(
+            base_url=config.base_url,
+            headers=headers,
+            timeout=config.timeout_seconds,
+            transport=httpx.MockTransport(handler),
+        )
+
+    monkeypatch.setattr("app.core.llm._build_client", fake_build_client)
+
+    result = await embed("local-embedding", ["测试文本"], db=db_session)
+    assert result.vectors == [[0.1, 0.2]]
+    assert result.prompt_tokens == 3
+
+
+async def test_chat_without_db_uses_models_registry_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["model"] = json.loads(request.content)["model"]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "message": {"content": "ok", "tool_calls": []},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    def fake_build_client(config: ModelConfig) -> httpx.AsyncClient:
+        captured["base_url"] = config.base_url
+        captured["request_model"] = config.request_model
+        return httpx.AsyncClient(
+            base_url=config.base_url,
+            transport=httpx.MockTransport(handler),
+        )
+
+    monkeypatch.setattr("app.core.llm._build_client", fake_build_client)
+
+    await chat("local-chat", [ChatMessage(role="user", content="hi")])
+
+    assert captured["base_url"] == settings.LLM_CHAT_BASE_URL
+    assert captured["request_model"] == settings.LLM_CHAT_MODEL
+    assert captured["url"].startswith(f"{settings.LLM_CHAT_BASE_URL}/chat/completions")
+    assert captured["model"] == settings.LLM_CHAT_MODEL
+
+
+async def test_injected_chat_client_works_without_db_kwarg() -> None:
+    transport = _fake_transport(
+        {
+            "choices": [
+                {"message": {"content": "mock", "tool_calls": []}, "finish_reason": "stop"}
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://fake") as fake_client:
+        result = await chat(
+            "local-chat",
+            [ChatMessage(role="user", content="hi")],
+            client=fake_client,
+        )
+    assert result.content == "mock"
