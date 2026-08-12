@@ -29,6 +29,7 @@ class CmdbAsset(Base, TimestampMixin):
     business_system: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     subnet_cidr: Mapped[str] = mapped_column(String(45), nullable=False, default="")
     notes: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    vendor: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     credential_type: Mapped[str] = mapped_column(String(20), nullable=False, default="none")
     credential_username: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     credential_password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)

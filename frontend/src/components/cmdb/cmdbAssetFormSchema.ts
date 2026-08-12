@@ -2,7 +2,17 @@
 
 import { z } from "zod"
 
-import type { CredentialType } from "@/types/cmdb"
+import type { CredentialType, VendorName } from "@/types/cmdb"
+
+/** 厂商枚举值须与后端 app/agent/device_commands.py::VendorName 手动保持一致，后端才是权威来源 */
+const VENDOR_VALUES = [
+  "cisco_iosxe",
+  "huawei_vrp",
+  "hp_comware",
+  "juniper_junos",
+  "linux",
+  "generic",
+] as const satisfies readonly VendorName[]
 
 /** 切换凭据类型时返回应写入 RHF 的空凭据字段，避免隐藏字段残留导致 zod 失败 */
 export function clearedCredentialFields(): {
@@ -25,6 +35,7 @@ export function createFormSchema(existingCredentialType: CredentialType | null) 
   return z
     .object({
       asset_type: z.string().min(1, "请选择资产类型").max(50),
+      vendor: z.enum(VENDOR_VALUES, { message: "请选择厂商" }),
       hostname: z.string().min(1, "请输入主机名").max(255),
       ip_address: z.string().min(1, "请输入 IP 地址").max(45),
       location: z.string().max(200).optional().default(""),

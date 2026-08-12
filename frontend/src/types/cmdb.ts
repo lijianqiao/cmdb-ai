@@ -2,10 +2,20 @@
 
 export type CredentialType = "none" | "static" | "dynamic"
 
+/** 厂商标识，须与后端 app/agent/device_commands.py::VendorName 手动保持一致 */
+export type VendorName =
+  | "cisco_iosxe"
+  | "huawei_vrp"
+  | "hp_comware"
+  | "juniper_junos"
+  | "linux"
+  | "generic"
+
 /** CMDB 资产（列表/详情响应） */
 export interface CmdbAsset {
   id: number
   asset_type: string
+  vendor: VendorName
   hostname: string
   ip_address: string
   location: string
@@ -23,6 +33,7 @@ export interface CmdbAsset {
 /** 创建资产请求 */
 export interface CmdbAssetCreate {
   asset_type: string
+  vendor: VendorName
   hostname: string
   ip_address: string
   location?: string
@@ -38,6 +49,7 @@ export interface CmdbAssetCreate {
 /** 更新资产请求（部分字段） */
 export interface CmdbAssetUpdate {
   asset_type?: string
+  vendor?: VendorName
   hostname?: string
   ip_address?: string
   location?: string

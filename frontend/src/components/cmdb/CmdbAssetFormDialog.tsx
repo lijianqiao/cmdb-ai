@@ -41,6 +41,7 @@ import type {
   CmdbAssetCreate,
   CmdbAssetUpdate,
   CredentialType,
+  VendorName,
 } from "@/types/cmdb"
 
 import {
@@ -59,6 +60,15 @@ const ASSET_TYPE_ITEMS: { label: string; value: string }[] = [
   { label: "其他", value: "other" },
 ]
 
+const VENDOR_ITEMS: { label: string; value: VendorName }[] = [
+  { label: "通用", value: "generic" },
+  { label: "思科 IOS-XE", value: "cisco_iosxe" },
+  { label: "华为 VRP", value: "huawei_vrp" },
+  { label: "H3C Comware", value: "hp_comware" },
+  { label: "Juniper Junos", value: "juniper_junos" },
+  { label: "Linux", value: "linux" },
+]
+
 const CREDENTIAL_TYPE_ITEMS: { label: string; value: CredentialType }[] = [
   { label: "无", value: "none" },
   { label: "静态密码", value: "static" },
@@ -72,9 +82,25 @@ interface CmdbAssetFormDialogProps {
   onSubmit: (data: CmdbAssetCreate | CmdbAssetUpdate) => Promise<boolean>
 }
 
+function resolveVendor(value: string | undefined): VendorName {
+  const known: readonly VendorName[] = [
+    "cisco_iosxe",
+    "huawei_vrp",
+    "hp_comware",
+    "juniper_junos",
+    "linux",
+    "generic",
+  ]
+  if (value && (known as readonly string[]).includes(value)) {
+    return value as VendorName
+  }
+  return "generic"
+}
+
 function defaultValues(asset?: CmdbAsset | null): CmdbAssetFormValues {
   return {
     asset_type: asset?.asset_type || "server",
+    vendor: resolveVendor(asset?.vendor),
     hostname: asset?.hostname ?? "",
     ip_address: asset?.ip_address ?? "",
     location: asset?.location ?? "",
@@ -120,11 +146,20 @@ export function CmdbAssetFormDialog({
     return [...ASSET_TYPE_ITEMS, { label: current, value: current }]
   }, [asset?.asset_type])
 
+  const vendorItems = useMemo(() => {
+    const current = asset?.vendor
+    if (!current || VENDOR_ITEMS.some((item) => item.value === current)) {
+      return VENDOR_ITEMS
+    }
+    return [...VENDOR_ITEMS, { label: current, value: current }]
+  }, [asset?.vendor])
+
   const handleSubmit = async (data: CmdbAssetFormValues) => {
     const passwordChanged =
       data.credential_type === "static" && data.credential_password !== ""
     const payload: CmdbAssetCreate | CmdbAssetUpdate = {
       asset_type: data.asset_type,
+      vendor: data.vendor,
       hostname: data.hostname,
       ip_address: data.ip_address,
       location: data.location,
@@ -180,6 +215,36 @@ export function CmdbAssetFormDialog({
                       <SelectContent>
                         <SelectGroup>
                           {assetTypeItems.map((item) => (
+                            <SelectItem key={item.value} value={item.value}>
+                              {item.label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                    <FieldError errors={[fieldState.error]} />
+                  </Field>
+                )}
+              />
+              <Controller
+                control={form.control}
+                name="vendor"
+                render={({ field, fieldState }) => (
+                  <Field data-invalid={fieldState.invalid}>
+                    <FieldLabel htmlFor="asset-vendor">厂商</FieldLabel>
+                    <Select
+                      items={vendorItems}
+                      value={field.value}
+                      onValueChange={(value) =>
+                        field.onChange(value ?? "generic")
+                      }
+                    >
+                      <SelectTrigger id="asset-vendor">
+                        <SelectValue placeholder="选择厂商" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          {vendorItems.map((item) => (
                             <SelectItem key={item.value} value={item.value}>
                               {item.label}
                             </SelectItem>

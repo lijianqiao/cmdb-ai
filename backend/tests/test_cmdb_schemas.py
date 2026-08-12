@@ -11,6 +11,7 @@ def _base_create_kwargs(**overrides: object) -> dict[str, object]:
         "asset_type": "server",
         "hostname": "srv-01",
         "ip_address": "10.0.0.1",
+        "vendor": "generic",
     }
     kwargs.update(overrides)
     return kwargs
@@ -85,3 +86,13 @@ def test_response_never_exposes_ciphertext_field() -> None:
     assert "credential_password_encrypted" not in CmdbAssetResponse.model_fields
     assert "credential_password" not in CmdbAssetResponse.model_fields
     assert "credential_password_set" in CmdbAssetResponse.model_fields
+
+
+def test_create_requires_valid_vendor() -> None:
+    with pytest.raises(ValidationError):
+        CmdbAssetCreate.model_validate(_base_create_kwargs(vendor="totally_made_up"))
+
+
+def test_create_accepts_catalog_vendor() -> None:
+    payload = CmdbAssetCreate.model_validate(_base_create_kwargs(vendor="huawei_vrp"))
+    assert payload.vendor == "huawei_vrp"

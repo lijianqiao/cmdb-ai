@@ -77,6 +77,7 @@ async def test_create_asset_with_static_credential_never_echoes_plaintext(
             "asset_type": "server",
             "hostname": "srv-api-01",
             "ip_address": "10.0.9.1",
+            "vendor": "generic",
             "credential_type": "static",
             "credential_username": "admin",
             "credential_password": secret,
@@ -102,6 +103,7 @@ async def test_create_dynamic_credential_stores_username_only(
             "asset_type": "server",
             "hostname": "srv-api-02",
             "ip_address": "10.0.9.2",
+            "vendor": "generic",
             "credential_type": "dynamic",
             "credential_username": "otp-admin",
         },
@@ -130,6 +132,7 @@ async def test_update_without_password_keeps_existing_secret(
             "asset_type": "server",
             "hostname": "srv-api-03",
             "ip_address": "10.0.9.3",
+            "vendor": "generic",
             "credential_type": "static",
             "credential_username": "admin",
             "credential_password": "orig-pwd",
@@ -165,6 +168,7 @@ async def test_update_hostname_with_unchanged_credentials_audit_not_changed(
             "asset_type": "server",
             "hostname": "srv-audit-01",
             "ip_address": "10.0.9.11",
+            "vendor": "generic",
             "credential_type": "static",
             "credential_username": "admin",
             "credential_password": "orig-pwd",
@@ -205,6 +209,7 @@ async def test_update_credential_change_audit_reports_changed(
             "asset_type": "server",
             "hostname": "srv-audit-02",
             "ip_address": "10.0.9.12",
+            "vendor": "generic",
             "credential_type": "static",
             "credential_username": "admin",
             "credential_password": "orig-pwd",
@@ -235,7 +240,12 @@ async def test_switch_to_static_without_password_is_rejected_when_no_existing_se
     await _grant_cmdb_permissions(db_session, test_user)
     create_resp = await client.post(
         "/api/v1/cmdb/assets",
-        json={"asset_type": "server", "hostname": "srv-api-04", "ip_address": "10.0.9.4"},
+        json={
+            "asset_type": "server",
+            "hostname": "srv-api-04",
+            "ip_address": "10.0.9.4",
+            "vendor": "generic",
+        },
         headers=auth_headers,
     )
     asset_id = create_resp.json()["data"]["id"]
@@ -254,7 +264,12 @@ async def test_soft_delete_restore_purge_flow(
     await _grant_cmdb_permissions(db_session, test_user)
     create_resp = await client.post(
         "/api/v1/cmdb/assets",
-        json={"asset_type": "server", "hostname": "srv-api-05", "ip_address": "10.0.9.5"},
+        json={
+            "asset_type": "server",
+            "hostname": "srv-api-05",
+            "ip_address": "10.0.9.5",
+            "vendor": "generic",
+        },
         headers=auth_headers,
     )
     asset_id = create_resp.json()["data"]["id"]
@@ -287,7 +302,12 @@ async def test_read_only_role_cannot_create(
     # test_user 默认没有任何 cmdb 权限（未调用 _grant_cmdb_permissions）
     response = await client.post(
         "/api/v1/cmdb/assets",
-        json={"asset_type": "server", "hostname": "srv-forbidden", "ip_address": "10.0.9.9"},
+        json={
+            "asset_type": "server",
+            "hostname": "srv-forbidden",
+            "ip_address": "10.0.9.9",
+            "vendor": "generic",
+        },
         headers=auth_headers,
     )
     assert response.status_code == 403

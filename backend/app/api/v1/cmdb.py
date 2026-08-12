@@ -26,6 +26,7 @@ def _to_response(asset: CmdbAsset) -> CmdbAssetResponse:
     return CmdbAssetResponse(
         id=asset.id,
         asset_type=asset.asset_type,
+        vendor=asset.vendor,
         hostname=asset.hostname,
         ip_address=asset.ip_address,
         location=asset.location,

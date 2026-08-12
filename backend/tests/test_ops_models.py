@@ -130,3 +130,11 @@ async def test_cmdb_asset_can_store_static_credential_ciphertext(
     assert asset.credential_type == "static"
     assert asset.credential_username == "admin"
     assert asset.credential_password_encrypted == "gAAAAA-fake-ciphertext"
+
+
+async def test_cmdb_asset_vendor_defaults_to_empty_string(db_session: AsyncSession) -> None:
+    asset = CmdbAsset(asset_type="switch", hostname="sw-vendor-01", ip_address="10.0.0.95")
+    db_session.add(asset)
+    await db_session.flush()
+
+    assert asset.vendor == ""

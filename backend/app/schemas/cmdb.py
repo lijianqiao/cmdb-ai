@@ -5,6 +5,7 @@ from typing import Literal, Self
 
 from pydantic import ConfigDict, Field, model_validator
 
+from app.agent.device_commands import VendorName
 from app.schemas.common import ApiModel
 
 type CredentialType = Literal["none", "static", "dynamic"]
@@ -16,6 +17,7 @@ class CmdbAssetCreate(ApiModel):
     """Create a CMDB asset, optionally with a login credential."""
 
     asset_type: str = Field(min_length=1, max_length=50)
+    vendor: VendorName
     hostname: str = Field(min_length=1, max_length=255)
     ip_address: str = Field(min_length=1, max_length=45)
     location: str = Field(default="", max_length=200)
@@ -49,6 +51,7 @@ class CmdbAssetUpdate(ApiModel):
     """Partially update a CMDB asset; unset fields are left untouched."""
 
     asset_type: str | None = Field(default=None, min_length=1, max_length=50)
+    vendor: VendorName | None = None
     hostname: str | None = Field(default=None, min_length=1, max_length=255)
     ip_address: str | None = Field(default=None, min_length=1, max_length=45)
     location: str | None = Field(default=None, max_length=200)
@@ -94,6 +97,7 @@ class CmdbAssetResponse(ApiModel):
 
     id: int
     asset_type: str
+    vendor: str
     hostname: str
     ip_address: str
     location: str

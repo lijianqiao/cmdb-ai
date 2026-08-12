@@ -9,6 +9,7 @@ import {
 
 const baseAssetFields = {
   asset_type: "server",
+  vendor: "generic",
   hostname: "srv-01",
   ip_address: "10.0.0.1",
   location: "",
