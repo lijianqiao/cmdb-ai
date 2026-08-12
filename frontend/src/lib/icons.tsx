@@ -46,6 +46,8 @@ import {
   SentIcon as Sent,
   Alert02Icon as Alert02,
   Upload01Icon as Upload01,
+  ServerStack02Icon as Server02,
+  Database02Icon as Database02,
 } from "@hugeicons/core-free-icons"
 
 type IconProps = Omit<ComponentProps<typeof HugeiconsIcon>, "icon">
@@ -95,3 +97,5 @@ export const BubbleChatIcon = makeIcon(BubbleChat)
 export const SentIcon = makeIcon(Sent)
 export const Alert02Icon = makeIcon(Alert02)
 export const Upload01Icon = makeIcon(Upload01)
+export const Server02Icon = makeIcon(Server02)
+export const Database02Icon = makeIcon(Database02)
