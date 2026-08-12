@@ -33,6 +33,20 @@ class AgentSessionResponse(ApiModel):
     updated_at: datetime
 
 
+class AgentMessageCreate(ApiModel):
+    """发送用户消息并触发一轮 Agent turn。"""
+
+    content: str = Field(min_length=1, max_length=16_000)
+
+
+class AgentChatTurnResponse(ApiModel):
+    """一轮对话结束后的 HTTP 摘要（实时细节走 WebSocket）。"""
+
+    reason: str
+    final_answer: str | None = None
+    control: str | None = None
+
+
 class AgentMessageResponse(ApiModel):
     """根 transcript 中的一条消息（已落库字段）。"""
 

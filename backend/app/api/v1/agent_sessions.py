@@ -3,19 +3,21 @@
 @Email: lijianqiao2906@live.com
 @FileName: agent_sessions.py
 @DateTime: 2026-08-12 12:43
-@Docs: Agent 会话 REST API：创建、列表、详情与根 transcript 历史。
+@Docs: Agent 会话 REST API：创建、列表、详情、历史与发消息触发 chat turn。
 
 实现流程：
 1. 全部端点走 get_current_user 登录校验；Chat 页面对登录用户开放，无额外权限码。
 2. 创建会话时写入当前用户 user_id，status 固定为 active；列表复用 list_for_user 分页。
 3. 详情与消息历史先查会话，非所有者或不存在一律 404，避免枚举他人会话 ID。
 4. 消息历史优先用 list_for_agent(..., agent_id=None) 只返回根 transcript，按 id 升序。
-5. 本文件不含 POST messages / chat turn（留给后续任务）。
+5. POST messages：归属校验后调用 run_chat_turn（复用 run_loop + root dispatcher + WS 推送），
+   整轮结束后一次 commit；异常时仍尽量 commit 已写入的用户消息。
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.chat_turn import run_chat_turn
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.crud.agent_message import agent_message_crud
@@ -23,6 +25,8 @@ from app.crud.agent_session import agent_session_crud
 from app.models.agent_session import AgentSession
 from app.models.user import User
 from app.schemas.agent_session import (
+    AgentChatTurnResponse,
+    AgentMessageCreate,
     AgentMessageResponse,
     AgentSessionCreate,
     AgentSessionResponse,
@@ -142,4 +146,46 @@ async def list_session_messages(
     )
     return success_response(
         [AgentMessageResponse.model_validate(item) for item in messages]
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/messages",
+    response_model=ResponseEnvelope[AgentChatTurnResponse],
+)
+async def post_session_message(
+    session_id: int,
+    body: AgentMessageCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ResponseEnvelope[AgentChatTurnResponse]:
+    """
+    发送用户消息并触发一轮 Agent turn。
+
+    实时事件经 WebSocket 推送；本接口返回 turn 摘要。失败时尽量保留用户消息。
+    """
+    await _owned_session_or_404(db, session_id, current_user.id)
+    try:
+        outcome = await run_chat_turn(
+            db,
+            session_id=session_id,
+            actor_user_id=current_user.id,
+            content=body.content,
+        )
+    except Exception as exc:
+        # 用户消息已在 turn 内写入；先提交再返回 500，避免整轮回滚丢原话
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="本轮对话处理失败，请稍后重试",
+        ) from exc
+
+    await db.commit()
+    return success_response(
+        AgentChatTurnResponse(
+            reason=outcome.reason,
+            final_answer=outcome.final_answer,
+            control=outcome.control,
+        ),
+        message="处理完成",
     )

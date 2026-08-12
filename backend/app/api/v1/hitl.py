@@ -9,7 +9,8 @@
 1. 全部端点以 agent:hitl_approve 门控，审批人可看到完整 action_payload。
 2. 列表与详情直接复用 hitl_proposal_crud 的会话查询与按 ID 读取。
 3. 审批接口调用 decide_proposal；仅在批准时再调用 resume_proposal（拒绝不恢复执行）。
-4. 异常映射：缺失 404、非法迁移/恢复失败 409、提案校验拒绝 400；事务内审计后统一 commit。
+4. decide/resume 注入 WsHitlEventPublisher，把 hitl_resolved / hitl_execution_failed 推到会话 WS。
+5. 异常映射：缺失 404、非法迁移/恢复失败 409、提案校验拒绝 400；事务内审计后统一 commit。
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -21,6 +22,7 @@ from app.agent.hitl import (
     decide_proposal,
     resume_proposal,
 )
+from app.agent.ws_hub import WsHitlEventPublisher
 from app.core.database import get_db
 from app.core.deps import require_permission
 from app.crud.hitl_proposal import InvalidHitlTransitionError, hitl_proposal_crud
@@ -92,18 +94,21 @@ async def decide_hitl_proposal(
     if existing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
 
+    publisher = WsHitlEventPublisher()
     try:
         await decide_proposal(
             db,
             proposal_id=proposal_id,
             approve=body.approve,
             reviewed_by_user_id=current_user.id,
+            publisher=publisher,
         )
         if body.approve:
             await resume_proposal(
                 db,
                 proposal_id=proposal_id,
                 actor_user_id=current_user.id,
+                publisher=publisher,
             )
     except InvalidHitlTransitionError as exc:
         raise HTTPException(
