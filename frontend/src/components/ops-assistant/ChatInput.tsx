@@ -1,6 +1,6 @@
 /** 运维助手输入框
 
- * InputGroup：Textarea 与发送按钮同一行；Enter 发送、Shift+Enter 换行。
+ * InputGroup：Textarea 与发送按钮同一行、等高对齐；Enter 发送、Shift+Enter 换行。
  */
 
 import { useState, type KeyboardEvent } from "react"
@@ -22,7 +22,7 @@ export interface ChatInputProps {
 }
 
 /**
- * 聊天输入与发送按钮（单行布局）。
+ * 聊天输入与发送按钮（单行、等高）。
  *
  * Args:
  *   disabled: 禁用输入（无会话或发送中由页面传入）
@@ -52,7 +52,7 @@ export function ChatInput({
   }
 
   return (
-    <InputGroup className="h-auto min-h-9 items-end border border-border bg-background">
+    <InputGroup className="h-auto min-h-10 items-center border border-border bg-background">
       <InputGroupTextarea
         value={value}
         onChange={(event) => setValue(event.target.value)}
@@ -60,14 +60,18 @@ export function ChatInput({
         placeholder={placeholder}
         disabled={disabled}
         rows={1}
-        className="max-h-32 min-h-9 py-2"
+        className="max-h-32 min-h-10 field-sizing-content py-2.5 leading-5 md:text-sm"
         aria-label="消息输入"
       />
-      <InputGroupAddon align="inline-end" className="shrink-0 self-end py-1.5">
+      <InputGroupAddon
+        align="inline-end"
+        className="h-10 shrink-0 items-center self-center py-0 pr-1.5"
+      >
         <InputGroupButton
           type="button"
           variant="default"
-          size="sm"
+          size="xs"
+          className="h-8 gap-1.5 rounded-md px-2.5 text-sm"
           disabled={disabled || isSending || !value.trim()}
           onClick={() => void submit()}
           aria-label="发送"
