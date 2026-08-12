@@ -1,51 +1,81 @@
 /** 凭据三态切换的字段可见性/必填校验单测，不跑完整 Dialog 渲染栈 */
 
 import { describe, expect, it } from "vitest"
-import { z } from "zod"
 
-// 与 CmdbAssetFormDialog.tsx 内的 schema 保持一致，这里独立复刻校验规则做单测，
-// 避免拖入 base-ui Dialog 的真实渲染依赖（项目里现有表单测试也没有走完整渲染）。
-const credentialSchema = z
-  .object({
-    credential_type: z.enum(["none", "static", "dynamic"]),
-    credential_username: z.string().max(100).optional().default(""),
-    credential_password: z.string().max(256).optional().default(""),
-  })
-  .superRefine((data, ctx) => {
-    if (data.credential_type === "none") {
-      if (data.credential_username || data.credential_password) {
-        ctx.addIssue({ code: "custom", message: "无凭据时不能填写账号或密码" })
-      }
-    } else if (data.credential_type === "static") {
-      if (!data.credential_username) {
-        ctx.addIssue({ code: "custom", message: "静态凭据必须填写账号" })
-      }
-    } else if (data.credential_type === "dynamic") {
-      if (!data.credential_username) {
-        ctx.addIssue({ code: "custom", message: "动态凭据必须填写账号" })
-      }
-      if (data.credential_password) {
-        ctx.addIssue({ code: "custom", message: "动态凭据不允许填写密码" })
-      }
-    }
-  })
+import {
+  clearedCredentialFields,
+  createFormSchema,
+} from "./cmdbAssetFormSchema"
+
+const baseAssetFields = {
+  asset_type: "server",
+  hostname: "srv-01",
+  ip_address: "10.0.0.1",
+  location: "",
+  business_system: "",
+  subnet_cidr: "",
+  notes: "",
+}
 
 describe("CmdbAssetFormDialog 凭据校验规则", () => {
   it("none 类型不允许账号或密码", () => {
-    const result = credentialSchema.safeParse({
+    const result = createFormSchema(false).safeParse({
+      ...baseAssetFields,
       credential_type: "none",
       credential_username: "admin",
     })
     expect(result.success).toBe(false)
   })
 
+  it("none 类型在凭据字段已清空时应通过", () => {
+    const result = createFormSchema(false).safeParse({
+      ...baseAssetFields,
+      credential_type: "none",
+      ...clearedCredentialFields(),
+    })
+    expect(result.success).toBe(true)
+  })
+
   it("static 类型必须有账号", () => {
-    const result = credentialSchema.safeParse({ credential_type: "static" })
+    const result = createFormSchema(false).safeParse({
+      ...baseAssetFields,
+      credential_type: "static",
+    })
     expect(result.success).toBe(false)
   })
 
+  it("新建 static 类型必须有密码", () => {
+    const result = createFormSchema(false).safeParse({
+      ...baseAssetFields,
+      credential_type: "static",
+      credential_username: "admin",
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it("新建 static 类型账号密码齐全时应通过", () => {
+    const result = createFormSchema(false).safeParse({
+      ...baseAssetFields,
+      credential_type: "static",
+      credential_username: "admin",
+      credential_password: "p@ss",
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it("编辑 static 类型允许密码留空（保留原密文）", () => {
+    const result = createFormSchema(true).safeParse({
+      ...baseAssetFields,
+      credential_type: "static",
+      credential_username: "admin",
+      credential_password: "",
+    })
+    expect(result.success).toBe(true)
+  })
+
   it("dynamic 类型允许只填账号", () => {
-    const result = credentialSchema.safeParse({
+    const result = createFormSchema(false).safeParse({
+      ...baseAssetFields,
       credential_type: "dynamic",
       credential_username: "otp-admin",
     })
@@ -53,11 +83,19 @@ describe("CmdbAssetFormDialog 凭据校验规则", () => {
   })
 
   it("dynamic 类型不允许填密码", () => {
-    const result = credentialSchema.safeParse({
+    const result = createFormSchema(false).safeParse({
+      ...baseAssetFields,
       credential_type: "dynamic",
       credential_username: "otp-admin",
       credential_password: "nope",
     })
     expect(result.success).toBe(false)
+  })
+
+  it("切换凭据类型时 clearedCredentialFields 清空残留值", () => {
+    expect(clearedCredentialFields()).toEqual({
+      credential_username: "",
+      credential_password: "",
+    })
   })
 })

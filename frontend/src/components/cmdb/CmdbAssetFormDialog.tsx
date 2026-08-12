@@ -8,7 +8,6 @@
 import { useEffect } from "react"
 import { Controller, useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
-import { z } from "zod"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -43,61 +42,17 @@ import type {
   CredentialType,
 } from "@/types/cmdb"
 
+import {
+  clearedCredentialFields,
+  createFormSchema,
+  type CmdbAssetFormValues,
+} from "./cmdbAssetFormSchema"
+
 const CREDENTIAL_TYPE_ITEMS: { label: string; value: CredentialType }[] = [
   { label: "无", value: "none" },
   { label: "静态密码", value: "static" },
   { label: "动态密码（仅记账号）", value: "dynamic" },
 ]
-
-const formSchema = z
-  .object({
-    asset_type: z.string().min(1, "请输入资产类型").max(50),
-    hostname: z.string().min(1, "请输入主机名").max(255),
-    ip_address: z.string().min(1, "请输入 IP 地址").max(45),
-    location: z.string().max(200).optional().default(""),
-    business_system: z.string().max(100).optional().default(""),
-    subnet_cidr: z.string().max(45).optional().default(""),
-    notes: z.string().max(2000).optional().default(""),
-    credential_type: z.enum(["none", "static", "dynamic"]),
-    credential_username: z.string().max(100).optional().default(""),
-    credential_password: z.string().max(256).optional().default(""),
-  })
-  .superRefine((data, ctx) => {
-    if (data.credential_type === "none") {
-      if (data.credential_username || data.credential_password) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["credential_username"],
-          message: "凭据类型为「无」时不能填写账号或密码",
-        })
-      }
-    } else if (data.credential_type === "static") {
-      if (!data.credential_username) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["credential_username"],
-          message: "静态凭据必须填写账号",
-        })
-      }
-    } else if (data.credential_type === "dynamic") {
-      if (!data.credential_username) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["credential_username"],
-          message: "动态凭据必须填写账号",
-        })
-      }
-      if (data.credential_password) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["credential_password"],
-          message: "动态凭据不需要也不允许填写密码",
-        })
-      }
-    }
-  })
-
-type FormValues = z.infer<typeof formSchema>
 
 interface CmdbAssetFormDialogProps {
   open: boolean
@@ -106,7 +61,7 @@ interface CmdbAssetFormDialogProps {
   onSubmit: (data: CmdbAssetCreate | CmdbAssetUpdate) => Promise<boolean>
 }
 
-function defaultValues(asset?: CmdbAsset | null): FormValues {
+function defaultValues(asset?: CmdbAsset | null): CmdbAssetFormValues {
   return {
     asset_type: asset?.asset_type ?? "",
     hostname: asset?.hostname ?? "",
@@ -128,18 +83,21 @@ export function CmdbAssetFormDialog({
   onSubmit,
 }: CmdbAssetFormDialogProps) {
   const isEdit = !!asset
-  const form = useForm<FormValues>({
-    resolver: zodResolver(formSchema),
+  const form = useForm<CmdbAssetFormValues>({
+    resolver: (data, context, options) =>
+      zodResolver(createFormSchema(isEdit))(data, context, options),
     defaultValues: defaultValues(asset),
   })
 
   useEffect(() => {
-    form.reset(defaultValues(asset))
-  }, [asset, form])
+    if (open) {
+      form.reset(defaultValues(asset))
+    }
+  }, [open, asset, form])
 
   const credentialType = form.watch("credential_type")
 
-  const handleSubmit = async (data: FormValues) => {
+  const handleSubmit = async (data: CmdbAssetFormValues) => {
     const passwordChanged =
       data.credential_type === "static" && data.credential_password !== ""
     const payload: CmdbAssetCreate | CmdbAssetUpdate = {
@@ -246,7 +204,12 @@ export function CmdbAssetFormDialog({
                   <Select
                     items={CREDENTIAL_TYPE_ITEMS}
                     value={field.value}
-                    onValueChange={(value) => field.onChange(value ?? "none")}
+                    onValueChange={(value) => {
+                      field.onChange(value ?? "none")
+                      const cleared = clearedCredentialFields()
+                      form.setValue("credential_username", cleared.credential_username)
+                      form.setValue("credential_password", cleared.credential_password)
+                    }}
                   >
                     <SelectTrigger id="asset-credential-type">
                       <SelectValue />
