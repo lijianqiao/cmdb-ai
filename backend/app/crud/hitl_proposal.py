@@ -33,6 +33,21 @@ class CRUDHitlProposal:
         result = await db.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_for_session(
+        self,
+        db: AsyncSession,
+        session_id: int,
+        *,
+        status: str | None = None,
+    ) -> list[HitlProposal]:
+        """按创建顺序返回会话提案，可选按状态过滤。"""
+        stmt = select(HitlProposal).where(HitlProposal.session_id == session_id)
+        if status is not None:
+            stmt = stmt.where(HitlProposal.status == status)
+        stmt = stmt.order_by(HitlProposal.id.asc())
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
     async def create(
         self,
         db: AsyncSession,

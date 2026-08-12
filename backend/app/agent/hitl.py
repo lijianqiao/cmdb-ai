@@ -1,0 +1,334 @@
+"""
+@Author: li
+@Email: lijianqiao2906@live.com
+@FileName: hitl.py
+@DateTime: 2026-08-12 11:15
+@Docs: HITL 提案编排：校验动作、复用状态机、调度执行器并发布安全事件。
+
+实现流程：
+1. propose_action 先合并顶层 asset_id，再用严格 Pydantic 模型校验动作载荷并检查 CMDB 资产。
+2. 合法提案始终先以 PENDING 追加；只有低风险 notify 可按配置使用真实操作者自动批准并继续执行。
+3. decide_proposal 只复用 CRUD 的审批状态机，不隐式恢复执行，避免人工 API 路径重复执行。
+4. resume_proposal 仅执行 APPROVED 提案；EXECUTED 返回幂等摘要，其他状态明确拒绝。
+5. 对 Agent 和事件发布器只暴露安全摘要，不返回原始 payload，避免设备凭据或未知字段泄露。
+"""
+
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
+from typing import Literal, Protocol, cast
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.agent.executors import NotifyExecutor, NotImplementedExecutor
+from app.core.config import settings
+from app.crud.cmdb_asset import cmdb_asset_crud
+from app.crud.hitl_proposal import hitl_proposal_crud
+from app.models.hitl_proposal import HitlProposal
+from app.utils.audit import log_audit
+
+type ActionType = Literal["notify", "device_control"]
+
+
+class NotifyPayload(BaseModel):
+    """低风险通知动作的严格载荷。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    message: str = Field(min_length=1, max_length=2000)
+
+
+class DeviceControlPayload(BaseModel):
+    """设备管控动作的严格载荷。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    command: Literal["reboot", "shutdown", "port_disable", "port_enable"]
+
+
+class HitlEventPublisher(Protocol):
+    """HITL 状态事件发布协议。"""
+
+    async def publish(
+        self,
+        *,
+        session_id: int,
+        event_type: str,
+        payload: Mapping[str, object],
+    ) -> None:
+        """发布一个不含原始动作载荷的安全事件。"""
+        ...
+
+
+class NoopHitlEventPublisher:
+    """默认空发布器，允许 T11 后续无侵入接入实时事件。"""
+
+    async def publish(
+        self,
+        *,
+        session_id: int,
+        event_type: str,
+        payload: Mapping[str, object],
+    ) -> None:
+        """忽略事件。"""
+        return None
+
+
+class HitlProposalRejectedError(ValueError):
+    """提案在写入前因校验或 CMDB 查询失败而被拒绝。"""
+
+
+class HitlResumeError(ValueError):
+    """提案未处于可恢复状态时抛出。"""
+
+
+@dataclass(frozen=True, slots=True)
+class ProposalSafeSummary:
+    """可安全返回给 Agent 或前端事件层的提案摘要。"""
+
+    proposal_id: int
+    action_type: ActionType
+    status: str
+    reason: str
+    asset_id: int | None
+
+
+_NOTIFY_EXECUTOR = NotifyExecutor()
+_DEVICE_CONTROL_EXECUTOR = NotImplementedExecutor()
+
+
+def _summary(proposal: HitlProposal) -> ProposalSafeSummary:
+    """从持久化对象提取白名单字段，绝不透传完整 payload。"""
+    payload = proposal.action_payload
+    raw_asset_id = payload.get("asset_id")
+    asset_id = raw_asset_id if isinstance(raw_asset_id, int) and not isinstance(raw_asset_id, bool) else None
+    raw_reason = payload.get("proposal_reason")
+    reason = raw_reason if isinstance(raw_reason, str) else ""
+    if proposal.action_type not in ("notify", "device_control"):
+        raise ValueError(f"不支持的 HITL 动作类型：{proposal.action_type}")
+    action_type = cast(ActionType, proposal.action_type)
+    return ProposalSafeSummary(
+        proposal_id=proposal.id,
+        action_type=action_type,
+        status=proposal.status,
+        reason=reason,
+        asset_id=asset_id,
+    )
+
+
+async def _publish(
+    publisher: HitlEventPublisher | None,
+    *,
+    proposal: HitlProposal,
+    event_type: str,
+) -> None:
+    """通过给定发布器发送安全摘要，未提供时使用空实现。"""
+    event_publisher = publisher or NoopHitlEventPublisher()
+    await event_publisher.publish(
+        session_id=proposal.session_id,
+        event_type=event_type,
+        payload=asdict(_summary(proposal)),
+    )
+
+
+def _validated_payload(
+    *,
+    action_type: ActionType,
+    asset_id: int,
+    payload: Mapping[str, object],
+    reason: str,
+) -> dict[str, object]:
+    """执行顶层资产合并规则和严格动作载荷校验。"""
+    if not isinstance(asset_id, int) or isinstance(asset_id, bool):
+        raise HitlProposalRejectedError("asset_id 必须是整数")
+
+    candidate = dict(payload)
+    payload_asset_id = candidate.pop("asset_id", asset_id)
+    if payload_asset_id != asset_id:
+        raise HitlProposalRejectedError("payload.asset_id 与顶层 asset_id 不一致")
+
+    try:
+        if action_type == "notify":
+            validated = NotifyPayload.model_validate(candidate).model_dump()
+        elif action_type == "device_control":
+            validated = DeviceControlPayload.model_validate(candidate).model_dump()
+        else:
+            raise HitlProposalRejectedError(f"不支持的 HITL 动作类型：{action_type}")
+    except ValidationError as exc:
+        raise HitlProposalRejectedError(f"HITL 动作载荷校验失败：{exc}") from exc
+
+    return {**validated, "asset_id": asset_id, "proposal_reason": reason}
+
+
+async def propose_action(
+    db: AsyncSession,
+    *,
+    session_id: int,
+    proposed_by_agent_id: str | None,
+    action_type: ActionType,
+    asset_id: int,
+    payload: Mapping[str, object],
+    reason: str,
+    actor_user_id: int,
+    publisher: HitlEventPublisher | None = None,
+) -> ProposalSafeSummary:
+    """创建经过严格校验的 HITL 提案，并按策略处理低风险通知。
+
+    Args:
+        db: 调用方事务内的数据库会话。
+        session_id: 提案所属 Agent 会话 ID。
+        proposed_by_agent_id: 发起提案的子 Agent ID，可为空。
+        action_type: 支持 notify 或 device_control。
+        asset_id: 顶层 CMDB 资产 ID。
+        payload: 不含资产 ID 的动作参数；允许冗余传入相同资产 ID。
+        reason: Agent 提案原因。
+        actor_user_id: 发起上下文中的真实用户 ID，自动审批时作为审批人。
+        publisher: 可选的安全事件发布器。
+
+    Returns:
+        当前最终状态的安全提案摘要。
+
+    Raises:
+        HitlProposalRejectedError: 用户 ID、动作载荷或 CMDB 资产不合法时。
+    """
+    if not isinstance(actor_user_id, int) or isinstance(actor_user_id, bool):
+        raise HitlProposalRejectedError("actor_user_id 必须是真实整数用户 ID")
+
+    stored_payload = _validated_payload(
+        action_type=action_type,
+        asset_id=asset_id,
+        payload=payload,
+        reason=reason,
+    )
+    asset = await cmdb_asset_crud.get(db, asset_id)
+    if asset is None:
+        raise HitlProposalRejectedError(f"CMDB 资产不存在：{asset_id}")
+
+    proposal = await hitl_proposal_crud.create(
+        db,
+        session_id=session_id,
+        proposed_by_agent_id=proposed_by_agent_id,
+        action_type=action_type,
+        action_payload=stored_payload,
+    )
+    await _publish(publisher, proposal=proposal, event_type="hitl_pending")
+
+    if action_type == "notify" and settings.HITL_NOTIFY_AUTO_APPROVE:
+        await decide_proposal(
+            db,
+            proposal_id=proposal.id,
+            approve=True,
+            reviewed_by_user_id=actor_user_id,
+            publisher=publisher,
+        )
+        return await resume_proposal(
+            db,
+            proposal_id=proposal.id,
+            actor_user_id=actor_user_id,
+            publisher=publisher,
+        )
+
+    return _summary(proposal)
+
+
+async def decide_proposal(
+    db: AsyncSession,
+    *,
+    proposal_id: int,
+    approve: bool,
+    reviewed_by_user_id: int,
+    publisher: HitlEventPublisher | None = None,
+) -> ProposalSafeSummary:
+    """审批提案但不自动恢复执行。
+
+    Args:
+        db: 调用方事务内的数据库会话。
+        proposal_id: 待审批提案 ID。
+        approve: True 表示批准，False 表示拒绝。
+        reviewed_by_user_id: 真实审批用户 ID。
+        publisher: 可选的安全事件发布器。
+
+    Returns:
+        审批后的安全提案摘要。
+    """
+    proposal = await hitl_proposal_crud.decide(
+        db,
+        proposal_id,
+        approve=approve,
+        reviewed_by_user_id=reviewed_by_user_id,
+    )
+    action = "hitl_approved" if approve else "hitl_rejected"
+    await log_audit(
+        db,
+        reviewed_by_user_id,
+        action,
+        target=f"hitl_proposal:{proposal.id}",
+        detail=f"动作类型：{proposal.action_type}",
+    )
+    if not approve:
+        await _publish(publisher, proposal=proposal, event_type="hitl_resolved")
+    return _summary(proposal)
+
+
+async def resume_proposal(
+    db: AsyncSession,
+    *,
+    proposal_id: int,
+    actor_user_id: int | None = None,
+    publisher: HitlEventPublisher | None = None,
+) -> ProposalSafeSummary:
+    """幂等恢复一个已批准提案并调度对应执行器。
+
+    Args:
+        db: 调用方事务内的数据库会话。
+        proposal_id: 待恢复提案 ID。
+        actor_user_id: 触发恢复的用户 ID，可为空。
+        publisher: 可选的安全事件发布器。
+
+    Returns:
+        执行成功后的 EXECUTED 摘要，或执行失败后仍为 APPROVED 的摘要。
+
+    Raises:
+        HitlResumeError: 提案不存在或状态不是 APPROVED/EXECUTED 时。
+    """
+    proposal = await hitl_proposal_crud.get(db, proposal_id)
+    if proposal is None:
+        raise HitlResumeError(f"HITL 提案不存在：{proposal_id}")
+    if proposal.status == "EXECUTED":
+        return _summary(proposal)
+    if proposal.status != "APPROVED":
+        raise HitlResumeError(f"状态 {proposal.status} 的 HITL 提案不可恢复执行")
+
+    if proposal.action_type == "notify":
+        result = await _NOTIFY_EXECUTOR.execute(
+            db,
+            proposal_id=proposal.id,
+            payload=proposal.action_payload,
+            actor_user_id=actor_user_id,
+        )
+    elif proposal.action_type == "device_control":
+        result = await _DEVICE_CONTROL_EXECUTOR.execute(proposal.action_payload)
+    else:
+        raise HitlResumeError(f"不支持的 HITL 动作类型：{proposal.action_type}")
+
+    if result.ok:
+        proposal = await hitl_proposal_crud.mark_executed(db, proposal.id)
+        await log_audit(
+            db,
+            actor_user_id,
+            "hitl_executed",
+            target=f"hitl_proposal:{proposal.id}",
+            detail=f"动作类型：{proposal.action_type}",
+        )
+        await _publish(publisher, proposal=proposal, event_type="hitl_resolved")
+    else:
+        await log_audit(
+            db,
+            actor_user_id,
+            "hitl_execution_failed",
+            target=f"hitl_proposal:{proposal.id}",
+            detail=result.message,
+        )
+        await _publish(publisher, proposal=proposal, event_type="hitl_execution_failed")
+
+    return _summary(proposal)
