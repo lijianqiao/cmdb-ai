@@ -6,10 +6,11 @@
 @Docs: 验证 HITL 提案查询与审批 HTTP API 的权限门控与状态机行为。
 """
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import AsyncClient
+from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -80,6 +81,50 @@ async def _make_pending_proposal(
     )
     await db.commit()
     return session.id, summary.proposal_id
+
+
+async def _make_pending_device_query_proposal(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    credential_type: str = "dynamic",
+) -> tuple[int, int]:
+    """创建动态凭据资产的 PENDING device_query 提案。"""
+    session = await agent_session_crud.create(
+        db,
+        {"user_id": user_id, "title": "HITL device_query 测试", "status": "active"},
+    )
+    asset = await cmdb_asset_crud.create(
+        db,
+        {
+            "asset_type": "switch",
+            "hostname": "sw-hitl-api",
+            "ip_address": "10.0.0.31",
+            "vendor": "cisco_iosxe",
+            "credential_type": credential_type,
+            "credential_username": "admin",
+            "credential_password_encrypted": None,
+        },
+    )
+    await db.flush()
+    summary = await propose_action(
+        db,
+        session_id=session.id,
+        proposed_by_agent_id=None,
+        action_type="device_query",
+        asset_id=asset.id,
+        payload={"command_name": "show_version"},
+        reason="查询设备版本",
+        actor_user_id=user_id,
+    )
+    await db.commit()
+    return session.id, summary.proposal_id
+
+
+def _generate_fernet_key() -> str:
+    from cryptography.fernet import Fernet
+
+    return Fernet.generate_key().decode()
 
 
 async def test_list_proposals_without_permission_returns_403(
@@ -241,3 +286,58 @@ async def test_reject_does_not_resume(
     proposal = await hitl_proposal_crud.get(db_session, proposal_id)
     assert proposal is not None
     assert proposal.status == "REJECTED"
+
+
+async def test_decide_device_query_requires_password_for_dynamic_credential(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """批准动态凭据 device_query 时未提供密码应返回 422。"""
+    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
+    await _grant_hitl_approve(db_session, test_user)
+    _, proposal_id = await _make_pending_device_query_proposal(
+        db_session,
+        user_id=test_user.id,
+    )
+
+    response = await client.post(
+        f"/api/v1/hitl/proposals/{proposal_id}/decide",
+        json={"approve": True},
+        headers=auth_headers,
+    )
+    assert response.status_code == 422, response.text
+
+
+async def test_decide_device_query_with_password_executes(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """批准动态凭据 device_query 并提供密码应执行成功，且响应不含密码。"""
+    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    await _grant_hitl_approve(db_session, test_user)
+    _, proposal_id = await _make_pending_device_query_proposal(
+        db_session,
+        user_id=test_user.id,
+    )
+
+    fake_connection = AsyncMock()
+    fake_connection.send_command = AsyncMock(
+        return_value=type("Resp", (), {"result": "device output", "failed": False})()
+    )
+    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+        response = await client.post(
+            f"/api/v1/hitl/proposals/{proposal_id}/decide",
+            json={"approve": True, "dynamic_credential_password": "one-time-pass"},
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["status"] == "EXECUTED"
+    assert "one-time-pass" not in response.text

@@ -25,6 +25,7 @@ from app.agent.hitl import (
 from app.agent.ws_hub import WsHitlEventPublisher
 from app.core.database import get_db
 from app.core.deps import require_permission
+from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.hitl_proposal import InvalidHitlTransitionError, hitl_proposal_crud
 from app.models.user import User
 from app.schemas.common import ResponseEnvelope, success_response
@@ -94,6 +95,15 @@ async def decide_hitl_proposal(
     if existing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
 
+    if body.approve and existing.action_type == "device_query":
+        raw_asset_id = existing.action_payload.get("asset_id")
+        asset = await cmdb_asset_crud.get(db, raw_asset_id) if isinstance(raw_asset_id, int) else None
+        if asset is not None and asset.credential_type == "dynamic" and not body.dynamic_credential_password:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="该资产使用动态凭据，批准时必须提供本次登录密码",
+            )
+
     publisher = WsHitlEventPublisher()
     try:
         await decide_proposal(
@@ -109,6 +119,7 @@ async def decide_hitl_proposal(
                 proposal_id=proposal_id,
                 actor_user_id=current_user.id,
                 publisher=publisher,
+                dynamic_password=body.dynamic_credential_password,
             )
     except InvalidHitlTransitionError as exc:
         raise HTTPException(

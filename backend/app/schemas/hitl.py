@@ -8,7 +8,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.common import ApiModel
 
@@ -19,6 +19,7 @@ class HitlDecideRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     approve: bool
+    dynamic_credential_password: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class HitlProposalResponse(ApiModel):
