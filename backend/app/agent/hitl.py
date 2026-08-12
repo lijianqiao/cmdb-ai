@@ -31,7 +31,7 @@ from app.crud.hitl_proposal import hitl_proposal_crud
 from app.models.hitl_proposal import HitlProposal
 from app.utils.audit import log_audit
 
-type ActionType = Literal["notify", "device_control"]
+type ActionType = Literal["notify", "device_control", "device_query"]
 
 
 class NotifyPayload(BaseModel):
@@ -48,6 +48,14 @@ class DeviceControlPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     command: Literal["reboot", "shutdown", "port_disable", "port_enable"]
+
+
+class DeviceQueryPayload(BaseModel):
+    """设备诊断查询动作的严格载荷。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    command_name: str = Field(min_length=1, max_length=100)
 
 
 class HitlEventPublisher(Protocol):
@@ -95,6 +103,7 @@ class ProposalSafeSummary:
     status: str
     reason: str
     asset_id: int | None
+    result_excerpt: str | None = None
 
 
 _NOTIFY_EXECUTOR = NotifyExecutor()
@@ -118,15 +127,18 @@ def _summary(proposal: HitlProposal) -> ProposalSafeSummary:
     asset_id = raw_asset_id if isinstance(raw_asset_id, int) and not isinstance(raw_asset_id, bool) else None
     raw_reason = payload.get("proposal_reason")
     reason = raw_reason if isinstance(raw_reason, str) else ""
-    if proposal.action_type not in ("notify", "device_control"):
+    if proposal.action_type not in ("notify", "device_control", "device_query"):
         raise ValueError(f"不支持的 HITL 动作类型：{proposal.action_type}")
     action_type = cast(ActionType, proposal.action_type)
+    raw_result_excerpt = payload.get("last_result_excerpt")
+    result_excerpt = raw_result_excerpt if isinstance(raw_result_excerpt, str) else None
     return ProposalSafeSummary(
         proposal_id=proposal.id,
         action_type=action_type,
         status=proposal.status,
         reason=reason,
         asset_id=asset_id,
+        result_excerpt=result_excerpt,
     )
 
 
@@ -185,6 +197,8 @@ def _validated_payload(
             validated = NotifyPayload.model_validate(candidate).model_dump()
         elif action_type == "device_control":
             validated = DeviceControlPayload.model_validate(candidate).model_dump()
+        elif action_type == "device_query":
+            validated = DeviceQueryPayload.model_validate(candidate).model_dump()
         else:
             raise HitlProposalRejectedError(f"不支持的 HITL 动作类型：{action_type}")
     except ValidationError as exc:

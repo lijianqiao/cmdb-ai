@@ -109,7 +109,14 @@ async def test_propose_merges_matching_asset_id_and_returns_safe_summary(
         "proposal_reason": "监控告警",
     }
     assert summary.status == "PENDING"
-    assert set(asdict(summary)) == {"proposal_id", "action_type", "status", "reason", "asset_id"}
+    assert set(asdict(summary)) == {
+        "proposal_id",
+        "action_type",
+        "status",
+        "reason",
+        "asset_id",
+        "result_excerpt",
+    }
     assert [event[1] for event in publisher.events] == ["hitl_pending"]
     assert set(publisher.events[0][2]) == {
         "proposal_id",
@@ -117,6 +124,7 @@ async def test_propose_merges_matching_asset_id_and_returns_safe_summary(
         "status",
         "reason",
         "asset_id",
+        "result_excerpt",
     }
 
 
@@ -664,3 +672,51 @@ async def test_list_for_session_filters_status(
     )
 
     assert [item.id for item in pending] == [first.proposal_id]
+
+
+async def test_propose_device_query_creates_pending_proposal(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    """device_query 应通过校验并创建 PENDING 提案。"""
+    session_id, asset_id = await _make_context(db_session, test_user.id)
+
+    summary = await propose_action(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="device_query",
+        asset_id=asset_id,
+        payload={"command_name": "show_version"},
+        reason="排查交换机异常",
+        actor_user_id=test_user.id,
+    )
+
+    assert summary.status == "PENDING"
+    assert summary.action_type == "device_query"
+
+
+async def test_propose_device_query_rejects_extra_payload_fields(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    """device_query 载荷含多余字段时应拒绝。"""
+    session_id, asset_id = await _make_context(db_session, test_user.id)
+
+    with pytest.raises(HitlProposalRejectedError):
+        await propose_action(
+            db_session,
+            session_id=session_id,
+            proposed_by_agent_id=None,
+            action_type="device_query",
+            asset_id=asset_id,
+            payload={"command_name": "show_version", "extra_field": "nope"},
+            reason="排查交换机异常",
+            actor_user_id=test_user.id,
+        )
+
+
+async def test_proposal_safe_summary_includes_result_excerpt_field() -> None:
+    """ProposalSafeSummary 应包含 result_excerpt 字段。"""
+    from dataclasses import fields
+
+    field_names = {f.name for f in fields(ProposalSafeSummary)}
+    assert "result_excerpt" in field_names
