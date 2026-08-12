@@ -1,16 +1,17 @@
 /** 运维助手 Chat 页
 
  * 左侧会话列表 + 右侧消息/输入；会话 REST + useOpsChat（含 WS）。
- * 知识库上传入口留给 Task 9；HITL 卡片留给 Task 8（消息列表内占位）。
+ * 有 knowledge:upload 时展示知识库上传入口。
  */
 
 import { useCallback, useEffect, useState } from "react"
 import dayjs from "dayjs"
 import { toast } from "sonner"
 
-import { AiChat01Icon, PlusSignIcon } from "@/lib/icons"
+import { AiChat01Icon, PlusSignIcon, Upload01Icon } from "@/lib/icons"
 import { ChatInput } from "@/components/ops-assistant/ChatInput"
 import { ChatMessageList } from "@/components/ops-assistant/ChatMessageList"
+import { KnowledgeUploadDialog } from "@/components/ops-assistant/KnowledgeUploadDialog"
 import { MonitorAlertBanner } from "@/components/ops-assistant/MonitorAlertBanner"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { Badge } from "@/components/ui/badge"
@@ -27,7 +28,9 @@ import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { useOpsChat } from "@/hooks/use-ops-chat"
+import { usePermission } from "@/hooks/use-permission"
 import { createAgentSession, listAgentSessions } from "@/lib/agent-api"
+import { PERMISSIONS } from "@/lib/constants"
 import { cn } from "@/lib/utils"
 import type { AgentSession } from "@/types/agent"
 
@@ -46,10 +49,13 @@ function wsStatusLabel(
  * 运维助手页面：会话选择、消息时间线、发送输入。
  */
 export function OpsAssistantPage() {
+  const { hasPermission } = usePermission()
   const [sessions, setSessions] = useState<AgentSession[]>([])
   const [sessionsLoading, setSessionsLoading] = useState(true)
   const [creating, setCreating] = useState(false)
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null)
+  const [uploadOpen, setUploadOpen] = useState(false)
+  const canUploadKnowledge = hasPermission(PERMISSIONS.KNOWLEDGE_UPLOAD)
 
   const {
     messages,
@@ -113,20 +119,34 @@ export function OpsAssistantPage() {
         title="运维助手"
         description="通过对话查询与处理运维问题"
         actions={
-          <Button
-            type="button"
-            onClick={() => void handleCreateSession()}
-            disabled={creating}
-          >
-            {creating ? (
-              <Spinner data-icon="inline-start" />
-            ) : (
-              <PlusSignIcon data-icon="inline-start" />
+          <div className="flex flex-wrap items-center gap-2">
+            {canUploadKnowledge && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setUploadOpen(true)}
+              >
+                <Upload01Icon data-icon="inline-start" />
+                上传知识
+              </Button>
             )}
-            新建会话
-          </Button>
+            <Button
+              type="button"
+              onClick={() => void handleCreateSession()}
+              disabled={creating}
+            >
+              {creating ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <PlusSignIcon data-icon="inline-start" />
+              )}
+              新建会话
+            </Button>
+          </div>
         }
       />
+
+      <KnowledgeUploadDialog open={uploadOpen} onOpenChange={setUploadOpen} />
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 md:flex-row">
         <aside className="flex w-full shrink-0 flex-col gap-2 rounded-xl border bg-card md:w-64">
