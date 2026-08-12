@@ -11,10 +11,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any, Literal
 from uuid import uuid4
@@ -33,6 +34,8 @@ from app.crud.agent_registry import agent_registry_crud
 from app.crud.agent_trace_event import agent_trace_event_crud
 from app.models.agent_registry import AgentRegistry
 from app.models.agent_session import AgentSession
+
+logger = logging.getLogger(__name__)
 
 type ChildTerminalStatus = Literal["COMPLETED", "FAILED"]
 type ChildErrorClass = Literal["model", "tool", "policy_reject", "infra"]
@@ -335,6 +338,8 @@ class SpawnManager:
         child_max_cost_usd: float = settings.AGENT_CHILD_MAX_COST_USD,
         child_max_wall_time_seconds: float = settings.AGENT_CHILD_MAX_WALL_TIME_SECONDS,
         close_timeout_seconds: float = settings.AGENT_CLOSE_TIMEOUT_SECONDS,
+        terminal_receipt_ttl_seconds: float = settings.AGENT_TERMINAL_RECEIPT_TTL_SECONDS,
+        receipt_gc_interval_seconds: float = settings.AGENT_RECEIPT_GC_INTERVAL_SECONDS,
     ) -> None:
         self._session_factory = session_factory
         self._child_runner = child_runner
@@ -347,6 +352,8 @@ class SpawnManager:
         self._child_max_cost_usd = child_max_cost_usd
         self._child_max_wall_time_seconds = child_max_wall_time_seconds
         self._close_timeout_seconds = close_timeout_seconds
+        self.terminal_receipt_ttl_seconds = terminal_receipt_ttl_seconds
+        self.receipt_gc_interval_seconds = receipt_gc_interval_seconds
         self._session_runtimes: dict[int, _SessionRuntime] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._active_budgets: dict[str, Budget] = {}
@@ -1081,6 +1088,7 @@ class SpawnManager:
         *,
         force_closed: bool,
         force_detached_task: asyncio.Task[None] | None = None,
+        error_class: ChildErrorClass | None = None,
     ) -> ChildReceipt:
         receipt = await self._get_receipt(child_id)
         runtime = self._runtime(receipt.session_id)
@@ -1108,7 +1116,7 @@ class SpawnManager:
                             span_type="close",
                             control="CLOSED",
                             cost_usd=budget.cost_used_usd,
-                            error_class="infra" if force_closed else None,
+                            error_class="infra" if force_closed else error_class,
                         )
                         await db.commit()
                     closed = _to_receipt(row)
@@ -1175,6 +1183,133 @@ class SpawnManager:
         async with self._session_factory() as db:
             rows = await agent_registry_crud.list_for_session(db, session_id)
             return tuple(_to_receipt(row) for row in rows)
+
+    @staticmethod
+    def _path_depth(agent_path: str) -> int:
+        return len([part for part in agent_path.split("/") if part])
+
+    async def _recover_close_one(
+        self,
+        child_id: str,
+        *,
+        error_class: ChildErrorClass | None,
+    ) -> ChildReceipt:
+        """Close one durable row without assuming this process ran its task.
+
+        Shared by `reconcile_startup` (every row is an orphan this fresh
+        manager never held) and `collect_expired_receipts` (a row may or may
+        not be locally owned). An active row is legal-transitioned to
+        CANCELLED before CLOSED; a terminal row goes straight to CLOSED.
+        Never touches `self._tasks`/`self._active_budgets`, and only releases
+        a concurrency slot when `child_id` is already in this manager's
+        `held_child_ids` — empty for every orphan, populated only for a row
+        this same process actually ran and never closed.
+        """
+        latest = await self._get_receipt(child_id)
+        if latest.status == "CLOSED":
+            await self._release_owned_slot(latest.session_id, child_id)
+            return latest
+        if latest.status in _ACTIVE_STATUSES:
+            persisted = await self._persist_terminal(
+                child_id,
+                status="CANCELLED",
+                budget=latest.budget,
+                result_summary=None,
+                artifacts=latest.artifacts,
+                error_class=error_class,
+            )
+            if persisted is not None:
+                latest = persisted
+        if latest.status == "CLOSED":
+            await self._release_owned_slot(latest.session_id, child_id)
+            return latest
+        return await self._persist_close(
+            child_id, force_closed=False, error_class=error_class
+        )
+
+    async def reconcile_startup(self) -> tuple[ChildReceipt, ...]:
+        """Close every non-CLOSED row at process boot; this fresh manager owns no tasks.
+
+        Every row returned by the cross-session query is by definition an
+        orphan: a brand-new `SpawnManager` has an empty `_tasks` map and an
+        empty `held_child_ids` set for every session, so no row here can be
+        one this process is actually running. Descendants close before their
+        parents. Every recovery close is tagged `error_class="infra"` because
+        the process genuinely lost runtime ownership of the row.
+        """
+        async with self._session_factory() as db:
+            rows = await agent_registry_crud.list_active(db)
+        ordered = sorted(
+            rows,
+            key=lambda row: (-self._path_depth(row.agent_path), row.created_at, row.child_id),
+        )
+        closed = [
+            await self._recover_close_one(row.child_id, error_class="infra")
+            for row in ordered
+        ]
+        return tuple(closed)
+
+    async def collect_expired_receipts(
+        self, now: datetime | None = None
+    ) -> tuple[ChildReceipt, ...]:
+        """Close terminal receipts whose lifecycle clock is older than the TTL.
+
+        Registry rows and message transcripts are never deleted — this is
+        lifecycle cleanup (freeing held concurrency slots and marking rows
+        CLOSED), not physical deletion. Unlike `reconcile_startup`, a
+        collected row may be one this same process ran to completion, so the
+        close trace is not tagged `error_class="infra"`.
+        """
+        reference = now if now is not None else datetime.now(UTC)
+        cutoff = reference - timedelta(seconds=self.terminal_receipt_ttl_seconds)
+        async with self._session_factory() as db:
+            rows = await agent_registry_crud.list_terminal_before(db, cutoff)
+        closed = [
+            await self._recover_close_one(row.child_id, error_class=None) for row in rows
+        ]
+        return tuple(closed)
+
+    async def shutdown(self) -> None:
+        """Cancel and close every child this process still owns; safe to call twice.
+
+        Closing a locally held root cascades through `close_agent` to its
+        descendants, so one pass over the roots handles most local children;
+        a second pass over whatever remains catches any id a root's cascade
+        didn't reach. Once every local task and held slot is gone, a repeat
+        call finds nothing to do and returns immediately.
+        """
+        local_ids = set(self._tasks)
+        for runtime in self._session_runtimes.values():
+            local_ids |= runtime.held_child_ids
+        if not local_ids:
+            return
+
+        receipts = {child_id: await self._get_receipt(child_id) for child_id in local_ids}
+        roots = [
+            child_id
+            for child_id in local_ids
+            if receipts[child_id].parent_agent_id is None
+            or receipts[child_id].parent_agent_id not in local_ids
+        ]
+        for child_id in roots:
+            await self.close_agent(child_id)
+        for child_id in local_ids - set(roots):
+            await self.close_agent(child_id)
+
+        assert not self._tasks
+        assert all(not runtime.held_child_ids for runtime in self._session_runtimes.values())
+
+
+async def run_receipt_gc_loop(manager: SpawnManager) -> None:
+    """Run `collect_expired_receipts` forever, sleeping `receipt_gc_interval_seconds` between rounds."""
+    while True:
+        try:
+            await manager.collect_expired_receipts()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("子 Agent 回执 GC 失败")
+        await asyncio.sleep(manager.receipt_gc_interval_seconds)
 
 
 spawn_manager = SpawnManager(AsyncSessionLocal)

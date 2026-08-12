@@ -228,6 +228,21 @@ class CRUDAgentRegistry:
         result = await db.execute(stmt)
         return int(result.scalar_one())
 
+    async def list_active(self, db: AsyncSession) -> list[AgentRegistry]:
+        """Return every non-CLOSED row across all sessions, oldest-first.
+
+        Used by SpawnManager.reconcile_startup() at process boot, before any
+        session context exists — unlike list_active_children, this is
+        deliberately not scoped to one session_id.
+        """
+        stmt = (
+            select(AgentRegistry)
+            .where(AgentRegistry.status != "CLOSED")
+            .order_by(AgentRegistry.created_at.asc(), AgentRegistry.child_id.asc())
+        )
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
     async def list_terminal_before(
         self, db: AsyncSession, cutoff: datetime
     ) -> list[AgentRegistry]:

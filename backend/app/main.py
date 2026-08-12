@@ -16,6 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from app.agent.spawn import run_receipt_gc_loop, spawn_manager
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.database import engine
@@ -59,14 +60,23 @@ def _error_content(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Run the monitor sweep and CMDB diff jobs for the app's lifetime, then release connections."""
+    """Reconcile crashed child-agent state, run background jobs, then release resources.
+
+    Startup order: close every orphaned child-agent row this fresh process
+    doesn't own before starting the monitor sweep, CMDB diff, and receipt GC
+    loops. Shutdown order: cancel and await all three loops, close every
+    child this process still owns, then dispose the database engine last.
+    """
+    await spawn_manager.reconcile_startup()
     monitor_task = asyncio.create_task(run_monitor_sweep_loop())
     diff_task = asyncio.create_task(run_cmdb_diff_loop())
+    gc_task = asyncio.create_task(run_receipt_gc_loop(spawn_manager))
     yield
-    for task in (monitor_task, diff_task):
+    for task in (monitor_task, diff_task, gc_task):
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+    await spawn_manager.shutdown()
     await engine.dispose()
 
 
