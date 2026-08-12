@@ -17,6 +17,7 @@ from app.api.v1.knowledge import router as knowledge_router
 from app.api.v1.me import router as me_router
 from app.api.v1.permissions import router as permissions_router
 from app.api.v1.roles import router as roles_router
+from app.api.v1.system_config import router as system_config_router
 from app.api.v1.users import router as users_router
 
 api_router = APIRouter()
@@ -39,3 +40,8 @@ api_router.include_router(knowledge_router, prefix="/knowledge", tags=["知识�
 api_router.include_router(hitl_router, prefix="/hitl", tags=["HITL 审批"])
 api_router.include_router(agent_sessions_router, prefix="/agent", tags=["Agent 会话"])
 api_router.include_router(agent_ws_router, prefix="/ws", tags=["Agent WebSocket"])
+api_router.include_router(
+    system_config_router,
+    prefix="/system-config",
+    tags=["系统配置"],
+)
