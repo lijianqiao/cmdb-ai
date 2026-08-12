@@ -157,6 +157,8 @@ class Settings(BaseSettings):
         """在启动时校验密钥格式，避免录入了一个格式错误的值等到真正使用才报错。"""
         if value is None:
             return None
+        if not value.get_secret_value().strip():
+            return None
         try:
             Fernet(value.get_secret_value().encode("utf-8"))
         except Exception as exc:

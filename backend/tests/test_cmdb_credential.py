@@ -31,6 +31,15 @@ def test_encrypt_raises_when_key_missing(monkeypatch: pytest.MonkeyPatch) -> Non
         encrypt_credential_password("whatever")
 
 
+def test_encrypt_raises_when_key_is_empty_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pydantic import SecretStr
+
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(""))
+
+    with pytest.raises(CmdbCredentialKeyMissingError):
+        encrypt_credential_password("whatever")
+
+
 def test_decrypt_raises_when_key_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", None)
 

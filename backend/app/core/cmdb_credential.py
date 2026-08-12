@@ -28,7 +28,7 @@ class CmdbCredentialDecryptError(RuntimeError):
 
 def _fernet() -> Fernet:
     key = settings.CMDB_CREDENTIAL_KEY
-    if key is None:
+    if key is None or not key.get_secret_value().strip():
         raise CmdbCredentialKeyMissingError(
             "CMDB_CREDENTIAL_KEY 未配置，无法保存或读取静态密码"
         )

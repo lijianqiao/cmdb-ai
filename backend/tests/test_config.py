@@ -144,6 +144,12 @@ def test_non_production_generates_ephemeral_secret() -> None:
     assert settings.migration_database_url == settings.DATABASE_URL
 
 
+def test_empty_cmdb_credential_key_treated_as_unset() -> None:
+    settings = Settings(_env_file=None, SECRET_KEY="x" * 32, CMDB_CREDENTIAL_KEY="")
+
+    assert settings.CMDB_CREDENTIAL_KEY is None
+
+
 def test_spawn_limit_defaults_are_bounded() -> None:
     value = Settings(_env_file=None, SECRET_KEY="x" * 32)
 
