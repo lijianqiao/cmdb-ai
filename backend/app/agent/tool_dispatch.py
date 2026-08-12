@@ -20,6 +20,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.device_commands import CommandName
 from app.agent.hitl import HitlEventPublisher
 from app.agent.hitl_tools import (
     get_device_query_result,
@@ -107,7 +108,7 @@ class ProposeRemediationArgs(_Args):
 
 class QueryDeviceCommandArgs(_Args):
     asset_id: int = Field(ge=1)
-    command_name: str = Field(min_length=1, max_length=100)
+    command_name: CommandName
     reason: str = Field(min_length=1, max_length=2000)
 
 
@@ -257,6 +258,10 @@ def root_tool_schemas() -> list[dict[str, Any]]:
     propose_parameters.pop("title", None)
     query_parameters = deepcopy(QueryDeviceCommandArgs.model_json_schema())
     query_parameters.pop("title", None)
+    # command_name: CommandName 是具名 type 别名，Pydantic 会生成 $defs + $ref
+    # 间接引用；内联展开成跟 action_type 一样的直接 enum，不依赖模型端点
+    # 是否正确解析 $ref。
+    query_parameters["properties"]["command_name"] = query_parameters.pop("$defs")["CommandName"]
     result_parameters = deepcopy(GetDeviceQueryResultArgs.model_json_schema())
     result_parameters.pop("title", None)
     return [
@@ -277,7 +282,10 @@ def root_tool_schemas() -> list[dict[str, Any]]:
                 "name": "query_device_command",
                 "description": (
                     f"[{ROOT_TOOL_SCHEMA_VERSION}] 对已配置凭据的资产发起只读诊断命令查询"
-                    "（白名单自动执行，否则需要人工审批）。"
+                    "（白名单自动执行，否则需要人工审批）。command_name 必须是 show_version"
+                    "（版本信息）/show_running_config（当前配置）/show_interfaces（接口状态）"
+                    "/ping（连通性测试）之一——这是命令目录里的语义 key，不是某个厂商的原始 "
+                    "CLI 语法，真实命令字符串由平台按资产厂商自动转换。"
                 ),
                 "parameters": query_parameters,
             },

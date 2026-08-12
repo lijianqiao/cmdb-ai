@@ -33,7 +33,7 @@ type CommandName = Literal[
 ]
 type CommandType = Literal["read_only", "state_changing"]
 
-DEVICE_COMMAND_CATALOG_VERSION = "t12-v1"
+DEVICE_COMMAND_CATALOG_VERSION = "t12-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +49,10 @@ class DeviceCommandDefinition:
 
 class UnknownDeviceCommandError(ValueError):
     """请求的命令名不在目录里，在分配任何资源前就该拒绝。"""
+
+
+class UnsupportedVendorError(ValueError):
+    """命令存在，但目录里没有为这个厂商登记模板——跟"未知命令名"是两种不同原因。"""
 
 
 _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
@@ -93,14 +97,20 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
     "ping": DeviceCommandDefinition(
         name="ping",
         version=DEVICE_COMMAND_CATALOG_VERSION,
-        description="从设备本机发起连通性测试（固定测试网关，不接受任意目标参数，避免被当探测跳板）",
+        description=(
+            "从设备本机发起连通性测试："
+            "Linux/generic 解析本机默认网关；"
+            "网络厂商固定探测 1.1.1.1（非用户参数，避免被当探测跳板）"
+        ),
         command_type="read_only",
         templates={
             "generic": "ping -c 4 -W 2 $(ip route | awk '/default/ {print $3}')",
             "linux": "ping -c 4 -W 2 $(ip route | awk '/default/ {print $3}')",
-            "cisco_iosxe": "ping <gateway>",
-            "huawei_vrp": "ping <gateway>",
-            "hp_comware": "ping <gateway>",
+            # 网络设备 CLI 无法在单条命令里可靠解析默认网关；v1 用固定公网探测地址，
+            # 禁止 <placeholder> 原样下发（见 test_templates_have_no_angle_bracket_placeholders）。
+            "cisco_iosxe": "ping 1.1.1.1",
+            "huawei_vrp": "ping 1.1.1.1",
+            "hp_comware": "ping 1.1.1.1",
         },
     ),
 }
@@ -123,3 +133,19 @@ def command_supports_vendor(command_name: str, vendor: str) -> bool:
     if command_name not in _DEVICE_COMMAND_CATALOG:
         return False
     return vendor in _DEVICE_COMMAND_CATALOG[command_name].templates
+
+
+def get_command_template(command_name: str, vendor: str) -> str:
+    """返回 (命令名, 厂商) 组合对应的真实命令字符串。
+
+    分两步失败，让调用方能给出精确原因：先确认命令名在目录里（否则
+    UnknownDeviceCommandError），再确认这个厂商有登记模板（否则
+    UnsupportedVendorError）——不像 command_supports_vendor 那样把两种
+    情况都折叠成同一个 False。
+    """
+    definition = get_device_command(command_name)
+    if vendor not in definition.templates:
+        raise UnsupportedVendorError(
+            f"vendor {vendor!r} has no template for command {command_name!r}"
+        )
+    return definition.templates[vendor]  # type: ignore[index]

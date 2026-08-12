@@ -188,8 +188,14 @@ async def restore_policy(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("device_command_policy:manage")),
 ) -> ResponseEnvelope[DeviceCommandPolicyResponse]:
-    """Restore a soft-deleted policy from the recycle bin."""
-    restored = await device_command_policy_crud.restore(db, policy_id)
+    """从回收站恢复策略；与已有活跃策略冲突时返回 409。"""
+    try:
+        restored = await device_command_policy_crud.restore(db, policy_id)
+    except DuplicateDeviceCommandPolicyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     if restored is None:
         raise HTTPException(status_code=404, detail="回收站中不存在该策略")
 

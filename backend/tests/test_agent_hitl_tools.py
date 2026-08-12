@@ -239,6 +239,12 @@ def test_root_schema_adds_strict_propose_remediation_definition() -> None:
     query_params = query_cmd["parameters"]
     assert query_params["additionalProperties"] is False
     assert set(query_params["required"]) == {"asset_id", "command_name", "reason"}
+    assert set(query_params["properties"]["command_name"]["enum"]) == {
+        "show_version",
+        "show_running_config",
+        "show_interfaces",
+        "ping",
+    }
 
     get_result = functions["get_device_query_result"]
     result_params = get_result["parameters"]
@@ -325,6 +331,28 @@ async def test_root_dispatcher_rejects_invalid_remediation_arguments(
     )
 
     result = await dispatch("propose_remediation", arguments)
+
+    assert result.control == "clarification"
+
+
+async def test_root_dispatcher_rejects_command_name_outside_catalog_enum(
+    db_session: AsyncSession,
+) -> None:
+    """command_name 不在目录枚举里应在校验阶段被拒绝，不进入 propose_action。"""
+    dispatch = build_root_tool_dispatcher(
+        db_session,
+        session_id=21,
+        actor_user_id=22,
+    )
+
+    result = await dispatch(
+        "query_device_command",
+        {
+            "asset_id": 1,
+            "command_name": "show running-config",
+            "reason": "猜测的真实 CLI 语法，不是目录里的语义 key",
+        },
+    )
 
     assert result.control == "clarification"
 

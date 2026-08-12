@@ -207,6 +207,52 @@ async def test_soft_delete_restore_purge_flow(
     assert purge_again.status_code == 404
 
 
+async def test_restore_conflict_returns_409(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user,  # noqa: ANN001
+    auth_headers: Headers,
+) -> None:
+    """软删后新建同目标策略，再恢复旧策略应 409，不能制造重复活跃行。"""
+    await _grant_policy_permissions(db_session, test_user)
+    first = await client.post(
+        "/api/v1/device-command-policies/policies",
+        json={
+            "scope": "asset_type",
+            "asset_type": "firewall",
+            "command_name": "show_version",
+            "decision": "whitelist",
+        },
+        headers=auth_headers,
+    )
+    assert first.status_code == 201, first.text
+    first_id = first.json()["data"]["id"]
+
+    delete_resp = await client.delete(
+        f"/api/v1/device-command-policies/policies/{first_id}",
+        headers=auth_headers,
+    )
+    assert delete_resp.status_code == 200, delete_resp.text
+
+    second = await client.post(
+        "/api/v1/device-command-policies/policies",
+        json={
+            "scope": "asset_type",
+            "asset_type": "firewall",
+            "command_name": "show_version",
+            "decision": "blacklist",
+        },
+        headers=auth_headers,
+    )
+    assert second.status_code == 201, second.text
+
+    restore_resp = await client.post(
+        f"/api/v1/device-command-policies/policies/{first_id}/restore",
+        headers=auth_headers,
+    )
+    assert restore_resp.status_code == 409, restore_resp.text
+
+
 async def test_create_and_update_write_audit(
     client: AsyncClient,
     db_session: AsyncSession,

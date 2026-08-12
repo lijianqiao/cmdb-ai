@@ -24,7 +24,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.device_commands import command_supports_vendor
+from app.agent.device_commands import (
+    UnknownDeviceCommandError,
+    UnsupportedVendorError,
+    get_command_template,
+)
 from app.agent.executors import (
     DeviceQueryExecutor,
     ExecutionResult,
@@ -266,8 +270,12 @@ async def propose_action(
             raise HitlProposalRejectedError("该资产未配置登录凭据，无法执行设备命令")
         if not asset.vendor:
             raise HitlProposalRejectedError("资产未配置厂商信息，无法确定命令语法")
-        if not command_supports_vendor(command_name, asset.vendor):
-            raise HitlProposalRejectedError("该设备厂商不支持这个命令")
+        try:
+            get_command_template(command_name, asset.vendor)
+        except UnknownDeviceCommandError as exc:
+            raise HitlProposalRejectedError(f"未知命令名：{command_name}") from exc
+        except UnsupportedVendorError as exc:
+            raise HitlProposalRejectedError("该设备厂商不支持这个命令") from exc
         policy_decision = await device_command_policy_crud.resolve_policy(
             db, asset_id=asset.id, asset_type=asset.asset_type, command_name=command_name
         )

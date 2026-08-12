@@ -140,3 +140,34 @@ async def test_soft_delete_restore_and_hard_delete_round_trip(db_session: AsyncS
 
     assert await device_command_policy_crud.soft_delete(db_session, policy.id) is True
     assert await device_command_policy_crud.hard_delete(db_session, policy.id) is True
+
+
+async def test_restore_rejects_when_active_conflict_exists(db_session: AsyncSession) -> None:
+    """软删后若已有同目标活跃策略，恢复必须失败，避免 resolve_policy 撞到多行。"""
+    original = await device_command_policy_crud.create(
+        db_session,
+        {
+            "scope": "asset_type",
+            "asset_type": "firewall",
+            "command_name": "show_version",
+            "decision": "whitelist",
+        },
+    )
+    assert await device_command_policy_crud.soft_delete(db_session, original.id) is True
+
+    await device_command_policy_crud.create(
+        db_session,
+        {
+            "scope": "asset_type",
+            "asset_type": "firewall",
+            "command_name": "show_version",
+            "decision": "blacklist",
+        },
+    )
+
+    with pytest.raises(DuplicateDeviceCommandPolicyError):
+        await device_command_policy_crud.restore(db_session, original.id)
+
+    # 原策略仍应留在回收站，不能被半恢复
+    still_deleted = await device_command_policy_crud.get_deleted_multi(db_session)
+    assert any(item.id == original.id for item in still_deleted[0])

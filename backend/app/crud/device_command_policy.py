@@ -90,7 +90,7 @@ class CRUDDeviceCommandPolicy(CRUDBase[DeviceCommandPolicy]):
         return policies, total
 
     async def restore(self, db: AsyncSession, id: int) -> DeviceCommandPolicy | None:
-        """Restore a soft-deleted policy."""
+        """恢复软删策略；若同目标已有活跃策略则拒绝，避免 resolve_policy 撞到多行。"""
         stmt = (
             select(DeviceCommandPolicy)
             .where(DeviceCommandPolicy.id == id, DeviceCommandPolicy.is_deleted.is_(True))
@@ -100,6 +100,20 @@ class CRUDDeviceCommandPolicy(CRUDBase[DeviceCommandPolicy]):
         policy = (await db.execute(stmt)).scalar_one_or_none()
         if policy is None:
             return None
+        conflict = await self._find_conflicting(
+            db,
+            {
+                "scope": policy.scope,
+                "asset_type": policy.asset_type,
+                "asset_id": policy.asset_id,
+                "command_name": policy.command_name,
+            },
+        )
+        if conflict is not None:
+            raise DuplicateDeviceCommandPolicyError(
+                f"该目标已有一条 {policy.command_name!r} 的策略（决定：{conflict.decision}），"
+                "请先处理冲突后再从回收站恢复"
+            )
         policy.is_deleted = False
         await db.flush()
         return policy

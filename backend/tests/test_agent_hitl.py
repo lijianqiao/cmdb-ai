@@ -88,6 +88,7 @@ async def _make_query_asset(
     credential_type: str = "static",
     credential_username: str = "admin",
     credential_password_encrypted: str | None = "placeholder",
+    vendor: str = "cisco_iosxe",
 ) -> int:
     """创建带厂商与凭据字段的交换机资产，供 device_query 策略测试使用。"""
     asset = await cmdb_asset_crud.create(
@@ -96,7 +97,7 @@ async def _make_query_asset(
             "asset_type": "switch",
             "hostname": "sw-hitl-01",
             "ip_address": "10.0.0.99",
-            "vendor": "cisco_iosxe",
+            "vendor": vendor,
             "credential_type": credential_type,
             "credential_username": credential_username,
             "credential_password_encrypted": credential_password_encrypted,
@@ -777,13 +778,14 @@ async def test_device_query_rejects_when_asset_has_no_credential(
         )
 
 
-async def test_device_query_rejects_unsupported_command_for_vendor(
+async def test_device_query_rejects_unknown_command_name(
     db_session: AsyncSession, test_user: User
 ) -> None:
+    """命令名根本不在目录里，报错要明确说"未知命令名"，不能跟厂商不支持混为一谈。"""
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     asset_id = await _make_query_asset(db_session)
 
-    with pytest.raises(HitlProposalRejectedError):
+    with pytest.raises(HitlProposalRejectedError) as exc_info:
         await propose_action(
             db_session,
             session_id=session_id,
@@ -794,6 +796,32 @@ async def test_device_query_rejects_unsupported_command_for_vendor(
             reason="test",
             actor_user_id=test_user.id,
         )
+
+    assert "未知命令名" in str(exc_info.value)
+
+
+async def test_device_query_rejects_command_unsupported_by_vendor(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    """命令存在，但目录里没给这个厂商登记模板——报错要明确说"厂商不支持"，不是"未知命令名"。"""
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    # ping 命令目录里没有 juniper_junos 的模板（见 device_commands.py）
+    asset_id = await _make_query_asset(db_session, vendor="juniper_junos")
+
+    with pytest.raises(HitlProposalRejectedError) as exc_info:
+        await propose_action(
+            db_session,
+            session_id=session_id,
+            proposed_by_agent_id=None,
+            action_type="device_query",
+            asset_id=asset_id,
+            payload={"command_name": "ping"},
+            reason="test",
+            actor_user_id=test_user.id,
+        )
+
+    assert "该设备厂商不支持这个命令" in str(exc_info.value)
+    assert "未知命令名" not in str(exc_info.value)
 
 
 async def test_device_query_blacklist_rejects_without_creating_proposal(

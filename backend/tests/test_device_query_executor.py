@@ -134,6 +134,53 @@ async def test_long_output_is_truncated(
     assert len(result.detail["output"]) < 10_000
 
 
+async def test_unknown_command_name_gives_specific_message(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    ciphertext = encrypt_credential_password("whatever")
+    asset_id = await _make_asset(
+        db_session,
+        credential_type="static",
+        credential_username="admin",
+        credential_password_encrypted=ciphertext,
+    )
+    asset = await cmdb_asset_crud.get(db_session, asset_id)
+    assert asset is not None
+
+    executor = DeviceQueryExecutor()
+    result = await executor.execute(
+        db_session, asset=asset, command_name="drop_table", dynamic_password=None
+    )
+
+    assert result.ok is False
+    assert result.message == "未知命令名"
+
+
+async def test_vendor_unsupported_command_gives_specific_message(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    ciphertext = encrypt_credential_password("whatever")
+    asset_id = await _make_asset(
+        db_session,
+        credential_type="static",
+        credential_username="admin",
+        credential_password_encrypted=ciphertext,
+    )
+    asset = await cmdb_asset_crud.get(db_session, asset_id)
+    assert asset is not None
+    asset.vendor = "juniper_junos"  # ping 目录里没有 juniper_junos 模板
+
+    executor = DeviceQueryExecutor()
+    result = await executor.execute(
+        db_session, asset=asset, command_name="ping", dynamic_password=None
+    )
+
+    assert result.ok is False
+    assert result.message == "该设备厂商不支持这个命令"
+
+
 def _generate_fernet_key() -> str:
     from cryptography.fernet import Fernet
 

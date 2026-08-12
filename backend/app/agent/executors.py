@@ -20,7 +20,11 @@ from scrapli.driver.generic import AsyncGenericDriver
 from scrapli_community.huawei.vrp.async_driver import AsyncHuaweiVRPDriver
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.device_commands import command_supports_vendor, get_device_command
+from app.agent.device_commands import (
+    UnknownDeviceCommandError,
+    UnsupportedVendorError,
+    get_command_template,
+)
 from app.core.cmdb_credential import decrypt_credential_password
 from app.core.config import settings
 from app.models.cmdb_asset import CmdbAsset
@@ -165,10 +169,15 @@ class DeviceQueryExecutor:
         else:
             return ExecutionResult(ok=False, message="资产未配置登录凭据")
 
-        if not command_supports_vendor(command_name, asset.vendor):
+        try:
+            template = get_command_template(command_name, asset.vendor)
+        except UnknownDeviceCommandError:
+            return ExecutionResult(ok=False, message="未知命令名")
+        except UnsupportedVendorError:
             return ExecutionResult(ok=False, message="该设备厂商不支持这个命令")
-        definition = get_device_command(command_name)
-        template = definition.templates[asset.vendor]  # type: ignore[index]
+        # 防御：目录若误留 <placeholder>，禁止原样下发到设备。
+        if "<" in template or ">" in template:
+            return ExecutionResult(ok=False, message="命令模板含未解析占位符")
 
         connection = None
         try:
