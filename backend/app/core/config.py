@@ -82,7 +82,8 @@ class Settings(BaseSettings):
         default=60.0, gt=0, allow_inf_nan=False
     )
     HITL_NOTIFY_AUTO_APPROVE: bool = False
-    # CMDB 设备凭据：静态密码对称加密密钥；留空则相关功能在使用时报错，不强制所有部署配置
+    # 数据库可逆秘密值的共享 Fernet 密钥：同时保护 CMDB 静态密码和 LLM API Key。
+    # 泄露、丢失或轮换会同时影响两类密文；必须稳定备份，禁止与 JWT SECRET_KEY 混用。
     CMDB_CREDENTIAL_KEY: SecretStr | None = None
 
     # JWT / 会话

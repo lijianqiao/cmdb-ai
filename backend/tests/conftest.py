@@ -32,6 +32,9 @@ os.environ["ALLOWED_HOSTS"] = "localhost,127.0.0.1,test"
 # embedding are independently configurable, not silently sharing one base_url.
 os.environ["LLM_CHAT_BASE_URL"] = "http://test-chat.invalid/v1"
 os.environ["LLM_EMBEDDING_BASE_URL"] = "http://test-embedding.invalid/v1"
+os.environ["CMDB_CREDENTIAL_KEY"] = (
+    "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
+)
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:

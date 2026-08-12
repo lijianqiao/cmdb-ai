@@ -13,6 +13,19 @@ from app.core.cmdb_credential import (
 from app.core.config import settings
 
 
+def test_existing_fernet_cmdb_ciphertext_needs_no_data_migration() -> None:
+    key = settings.CMDB_CREDENTIAL_KEY
+    assert key is not None
+    legacy_ciphertext = Fernet(
+        key.get_secret_value().encode("utf-8")
+    ).encrypt(b"existing-device-password").decode("utf-8")
+
+    assert (
+        decrypt_credential_password(legacy_ciphertext)
+        == "existing-device-password"
+    )
+
+
 def test_encrypt_then_decrypt_round_trips(monkeypatch: pytest.MonkeyPatch) -> None:
     from pydantic import SecretStr
 
