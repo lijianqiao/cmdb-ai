@@ -27,6 +27,24 @@
 
 ## 3. 数据模型
 
+### 3.0 `CmdbAsset` 新增 `vendor` 字段
+
+`asset_type`（server/switch/router/...）是设备大类，不含厂商信息；同样是 switch，思科、华为、H3C 的命令语法完全不同（思科是 `show version`，华为/H3C 的 VRP/Comware 是 `display version`，且默认开分页，不关掉会截断长输出）。命令目录要能选对语法，必须知道厂商，所以给 `CmdbAsset` 单独加一个字段，跟 `asset_type` 平行：
+
+```python
+vendor: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+```
+
+跟 `asset_type` 的处理方式不同：`asset_type` 在后端 schema 里是自由字符串（前端下拉限定，后端不强校验），但 `vendor` 直接决定"connector 用哪个 Scrapli 平台驱动连接 + 命令目录里查哪一列模板"，填错会导致这台资产的命令查询在真正执行时才发现选错了驱动/模板，所以 `vendor` 在 Pydantic Create/Update schema 里用 `Literal` 强校验（跟 `credential_type` 一样的做法），不接受目录之外的值：
+
+```python
+type VendorName = Literal["cisco_iosxe", "huawei_vrp", "hp_comware", "juniper_junos", "linux", "generic"]
+```
+
+`generic` 是兜底选项：厂商不在这个列表里，或者设备是普通 Linux 主机、没有网络设备那一套命令行交互（分页、特权模式）时选它，命令目录里 `generic` 对应的模板按 POSIX shell 语法写。这个列表会随着实际接入的设备厂商增长，改动方式是加代码（跟命令目录本身一样，改列表要走 review），不做成数据库配置——厂商是"这台设备究竟是什么"的客观事实，不是可以由管理员随意定义的策略。
+
+迁移：给 `cmdb_assets` 加一列，`down_revision` 接在 §3.2 新表的迁移之前，或者跟 §3.2 合并成一次迁移一起做（两处都是 DDL，没有先后依赖，实施计划里可以合并成一个 Task）。
+
 ### 3.1 `HitlProposal.action_type` 扩展
 
 ```python
@@ -101,7 +119,7 @@ class DeviceCommandDefinition:
     version: str
     description: str          # 给管理员在策略管理页看的说明
     command_type: CommandType
-    templates: Mapping[str, str]  # asset_type -> 真实要在设备上跑的命令字符串
+    templates: Mapping[VendorName, str]  # vendor -> 真实要在设备上跑的命令字符串
 
 _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
     "show_version": DeviceCommandDefinition(
@@ -110,10 +128,12 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
         description="查看设备/系统版本信息",
         command_type="read_only",
         templates={
-            "server": "cat /etc/os-release && uname -a",
-            "switch": "show version",
-            "router": "show version",
-            "firewall": "show version",
+            "generic": "cat /etc/os-release && uname -a",
+            "linux": "cat /etc/os-release && uname -a",
+            "cisco_iosxe": "show version",
+            "huawei_vrp": "display version",
+            "hp_comware": "display version",
+            "juniper_junos": "show version",
         },
     ),
     "show_running_config": DeviceCommandDefinition(
@@ -122,9 +142,10 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
         description="查看当前生效配置（可能包含敏感信息，建议默认不进白名单）",
         command_type="read_only",
         templates={
-            "switch": "show running-config",
-            "router": "show running-config",
-            "firewall": "show running-config",
+            "cisco_iosxe": "show running-config",
+            "huawei_vrp": "display current-configuration",
+            "hp_comware": "display current-configuration",
+            "juniper_junos": "show configuration",
         },
     ),
     "show_interfaces": DeviceCommandDefinition(
@@ -133,9 +154,10 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
         description="查看接口状态",
         command_type="read_only",
         templates={
-            "switch": "show interfaces status",
-            "router": "show interfaces",
-            "firewall": "show interfaces",
+            "cisco_iosxe": "show interfaces status",
+            "huawei_vrp": "display interface brief",
+            "hp_comware": "display interface brief",
+            "juniper_junos": "show interfaces terse",
         },
     ),
     "ping": DeviceCommandDefinition(
@@ -144,14 +166,17 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
         description="从设备本机发起连通性测试（固定测试网关，不接受任意目标参数，避免被当探测跳板）",
         command_type="read_only",
         templates={
-            "server": "ping -c 4 -W 2 $(ip route | awk '/default/ {print $3}')",
-            "switch": "ping <gateway>",
+            "generic": "ping -c 4 -W 2 $(ip route | awk '/default/ {print $3}')",
+            "linux": "ping -c 4 -W 2 $(ip route | awk '/default/ {print $3}')",
+            "cisco_iosxe": "ping <gateway>",
+            "huawei_vrp": "ping <gateway>",
+            "hp_comware": "ping <gateway>",
         },
     ),
 }
 ```
 
-`get_device_command(name) -> DeviceCommandDefinition`、`list_device_commands() -> tuple[...]`，跟 `roles.py` 的 `get_role`/`list_roles` 同款失败关闭（未知命令名 → `UnknownDeviceCommandError`，不是 `KeyError`）。
+`get_device_command(name) -> DeviceCommandDefinition`、`list_device_commands() -> tuple[...]`，跟 `roles.py` 的 `get_role`/`list_roles` 同款失败关闭（未知命令名 → `UnknownDeviceCommandError`，不是 `KeyError`）。一个命令不是每个厂商都支持（比如上面 `ping` 没给 `juniper_junos` 模板）——`templates` 里没有当前资产 `vendor` 对应的键，视为"该资产不支持这个命令"，跟 §5 步骤 2 的校验失败处理方式一致。
 
 **这是这个设计最核心的安全边界，必须在实施计划里反复强调**：`device_command_policies`（数据库、管理员可改）只决定"这条命令要不要过 HITL"，**不能决定命令内容本身**——真正会在设备上跑的字符串永远来自这个代码层目录，改目录要走代码 review。管理员在白名单页面上能做的，只是从目录已有的命令里勾选"哪些设备/设备类型免审批"，不能凭空发明一条新命令。`ping` 之类接受参数的命令，v1 先不支持自由参数（模板里固定死目标，如上面 `ping` 的例子），避免命令拼接注入——这条限制写进 Out of Scope，作为后续如果要支持参数化命令时的显式待办。
 
@@ -176,18 +201,30 @@ async def query_device_command(
 内部调用 `propose_action(action_type="device_query", ...)`。`propose_action` 里新增的校验/分支（`_validated_payload` 之后，创建 `PENDING` 行之前）：
 
 1. 查询 `CmdbAsset`；不存在 → 沿用现有 `HitlProposalRejectedError`。
-2. `command_name` 必须在 `device_commands.py` 目录里，且该命令的 `templates` 包含这个资产的 `asset_type` → 否则拒绝（"该资产类型不支持这个命令"）。
+2. `command_name` 必须在 `device_commands.py` 目录里，且该命令的 `templates` 包含这个资产的 `vendor` → 否则拒绝（"该设备厂商不支持这个命令"）。
 3. `asset.credential_type == "none"` → 拒绝（"该资产未配置登录凭据，无法执行设备命令"）——不建提案，因为不管审批多少次都执行不了。
-4. 查策略（§3.2 的解析顺序）：
+4. `asset.vendor` 为空（还没有人填过这台资产的厂商）→ 同样拒绝，理由是"资产未配置厂商信息，无法确定命令语法"。
+5. 查策略（§3.2 的解析顺序）：
    - `blacklist` → 拒绝，不建提案。
    - 其它情况（`whitelist` 或未分类）→ 正常 `hitl_proposal_crud.create(...)`，`PENDING`。
-5. 创建后：
+6. 创建后：
    - 策略是 `whitelist` **且** `asset.credential_type != "dynamic"` → 立即 `decide_proposal(approve=True, reviewed_by_user_id=actor_user_id)` + `resume_proposal(...)`，跟 `notify` 的自动批准分支结构一致。
    - 否则（未分类，或者虽然白名单但资产是动态凭据）→ 停在 `PENDING`，返回 `pending_approval`。
 
 **动态凭据资产永远不会自动执行**，不管策略是不是白名单——没有人在场就拿不到密码，这条在 §6 展开，是本设计里唯一一处"策略说可以，但代码层仍然强制人工介入"的例外，需要在实施计划的测试里专门覆盖（"资产是 dynamic + 命中白名单 → 仍然停在 PENDING"这个组合容易被漏测）。
 
-## 6. 凭据解析与 SSH 连接
+## 6. 凭据解析与设备连接
+
+### 6.1 连接库：Scrapli
+
+多厂商命令行交互（分页符处理、进入特权模式、提示符识别）是网络自动化里已经被解决过的问题，不在这次自己用裸 `asyncssh` 重新实现。选用 [Scrapli](https://github.com/carlmontanari/scrapli)：
+
+- 原生 async driver，跟项目现有 FastAPI + SQLAlchemy async 的全异步架构直接契合，不需要像 Netmiko 那样额外包一层 `asyncio.to_thread`。
+- 核心包（`scrapli`）自带 `cisco_iosxe`/`cisco_iosxr`/`cisco_nxos`/`arista_eos`/`juniper_junos` 平台驱动 + 一个 `generic` 通用驱动（无特定平台优化，纯粹按提示符做基本交互，能覆盖 `vendor="generic"`/`"linux"` 这两种场景）。
+- 华为/H3C 等平台驱动在社区维护包 `scrapli_community` 里（`huawei_vrp` 等），新依赖要同时 `uv add scrapli scrapli-community`（实施阶段用 `uv add` 时确认一下 PyPI 上的准确包名/extras 写法，这两个包一直在活跃维护，具体 extras 语法以当时最新文档为准）。
+- §3.0 定义的 `VendorName` 取值要跟 Scrapli 的平台驱动名对齐（`cisco_iosxe`/`huawei_vrp`/`juniper_junos` 直接是 Scrapli 的 platform 字符串；`hp_comware` 目前 Scrapli 生态里没有独立驱动，实施阶段先映射到 `generic` 驱动 + 使用 `hp_comware` 那一列的命令模板，如果后续 Scrapli/社区补齐了专门驱动再切换，属于纯内部实现调整，不影响这次定义的对外行为）。
+
+### 6.2 执行器
 
 新增 `app/agent/executors.py::DeviceQueryExecutor`：
 
@@ -205,10 +242,10 @@ class DeviceQueryExecutor:
 
 - `credential_type == "static"`：`decrypt_credential_password(asset.credential_password_encrypted)` 拿明文。
 - `credential_type == "dynamic"`：明文只能来自 `dynamic_password` 参数；为 `None` 时直接 `ok=False`（理论上不应该发生，因为 §5 已经保证动态凭据资产不会走自动执行分支；这里是防御性兜底，不是主路径）。
-- 用 `asyncssh` 建连接（新依赖，`uv add asyncssh`；原生 async，跟项目现有全异步架构直接契合，不需要像密码哈希那样包一层 `asyncio.to_thread`），超时参照 `MONITOR_PROBE_TIMEOUT_SECONDS` 的思路新增一个 `DEVICE_COMMAND_TIMEOUT_SECONDS` 配置项。
-- 从 `device_commands.py` 目录按 `asset.asset_type` 取真实命令模板，执行，读 `stdout`/`stderr`/退出码。
+- 按 `asset.vendor` 选 Scrapli 平台驱动（见 §6.1 的映射关系）建连接，超时参照 `MONITOR_PROBE_TIMEOUT_SECONDS` 的思路新增一个 `DEVICE_COMMAND_TIMEOUT_SECONDS` 配置项，传给 Scrapli 的 `timeout_ops`/`timeout_socket`。
+- 从 `device_commands.py` 目录按 `(command_name, asset.vendor)` 取真实命令模板，用 Scrapli 的 `send_command()` 执行（Scrapli 自己处理分页符/提示符匹配，不需要我们手写等待逻辑），读返回的 `result`/`failed` 状态。
 - 输出截断（参照 T09 `orchestration.py::_truncate` 的做法，截断后加"…(截断)"），塞进 `ExecutionResult.detail = {"output": ..., "truncated": bool}`。
-- 连接/认证/超时失败 → `ok=False`，`message` 只给分类信息（如"连接超时""认证失败"），**不把 `asyncssh` 抛出的原始异常文本吐给调用方**，防止把设备侧的错误信息（可能带主机名、内部拓扑细节）意外泄漏给非审批角色能看到的地方——这个顾虑对齐现有 `hitl_tools.py`/`tool_dispatch.py` 里"意外异常仅暴露异常类型"的一贯做法。
+- 连接/认证/超时失败 → `ok=False`，`message` 只给分类信息（如"连接超时""认证失败"），**不把 Scrapli 抛出的原始异常文本吐给调用方**，防止把设备侧的错误信息（可能带主机名、内部拓扑细节）意外泄漏给非审批角色能看到的地方——这个顾虑对齐现有 `hitl_tools.py`/`tool_dispatch.py` 里"意外异常仅暴露异常类型"的一贯做法。
 
 `resume_proposal` 签名新增可选参数 `dynamic_password: str | None = None`，只有 `proposal.action_type == "device_query"` 时才会真正用到，透传给 `DeviceQueryExecutor.execute`。
 
@@ -281,8 +318,9 @@ async def get_device_query_result(
 
 | 文件 | 改动 |
 | :--- | :--- |
+| `backend/app/models/cmdb_asset.py` | 新增 `vendor` 字段 |
 | `backend/app/models/device_command_policy.py` | 新建 |
-| `backend/alembic/versions/...` | 新建：`device_command_policies` 表 |
+| `backend/alembic/versions/...` | 新建：`cmdb_assets.vendor` 列 + `device_command_policies` 表（可合并成一次迁移） |
 | `backend/app/crud/device_command_policy.py` | 新建：CRUD + 策略解析查询（含 §3.2 的优先级逻辑）+ 回收站方法 |
 | `backend/app/agent/device_commands.py` | 新建：命令目录 |
 | `backend/app/agent/executors.py` | 新增 `DeviceQueryExecutor` |
@@ -296,9 +334,13 @@ async def get_device_query_result(
 | `backend/app/api/v1/device_command_policies.py` | 新建：策略管理 CRUD API |
 | `backend/app/api/router.py` | 注册新路由 |
 | `backend/app/core/config.py` | 新增 `DEVICE_COMMAND_TIMEOUT_SECONDS` |
+| `backend/app/schemas/cmdb.py` | `CmdbAssetCreate`/`Update`/`Response` 加 `vendor: VendorName` |
+| `backend/app/api/v1/cmdb.py` | 建/改资产时校验、透传 `vendor` |
 | `backend/init_db.py` | `SEED_PERMISSIONS` 加两条权限码 |
-| `backend/pyproject.toml` | `uv add asyncssh` |
+| `backend/pyproject.toml` | `uv add scrapli scrapli-community`（具体包名/extras 以实施时 PyPI 现状为准） |
 | `frontend/src/types/device-command-policy.ts` | 新建 |
+| `frontend/src/types/cmdb.ts` | `CmdbAsset`/`Create`/`Update` 加 `vendor` |
+| `frontend/src/components/cmdb/CmdbAssetFormDialog.tsx` | 表单加"厂商"下拉（跟资产类型平级） |
 | `frontend/src/pages/DeviceCommandPoliciesPage.tsx` | 新建 |
 | `frontend/src/components/ops-assistant/HitlApprovalCard.tsx` | 展示 `result_excerpt`；动态凭据资产的批准表单加密码输入框 |
 | `frontend/src/lib/constants.ts` | 新增路由/权限常量 |
