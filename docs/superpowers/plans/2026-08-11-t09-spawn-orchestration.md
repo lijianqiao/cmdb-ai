@@ -2240,7 +2240,7 @@ git commit -m "接入子 Agent 启动对账与回执回收
   - `investigate_root_cause(...) -> RootCauseOutcome`;
   - bounded waves sized by `controller.max_concurrent_children` and leak-free `finally` close.
 
-- [ ] **Step 1: Define failing strict-schema tests**
+- [x] **Step 1: Define failing strict-schema tests**
 
 Create `backend/tests/test_agent_orchestration.py`. Test the following Pydantic models with `ConfigDict(extra="forbid", strict=True)`:
 
@@ -2294,7 +2294,7 @@ class ReviewSynthesis(_StrictWorkflowModel):
 
 Add parse tests rejecting extra keys, numeric strings such as `"0.9"`, missing keys, invalid confidence, non-object JSON, and reviewer JSON with the wrong shape.
 
-- [ ] **Step 2: Add fake-controller tests for batch classification**
+- [x] **Step 2: Add fake-controller tests for batch classification**
 
 The fake controller records spawn/wait/close calls and exposes a configurable `max_concurrent_children`. Add:
 
@@ -2312,7 +2312,7 @@ async def test_close_failure_still_closes_siblings_and_prevents_success(...): ..
 
 For wave tests, assert the sixth classifier is not spawned until the first five have all been waited and closed. The threshold is exactly `< 0.80`; `0.80` itself is not low confidence. A category outside a nonempty `allowed_categories` set is a new-category suggestion and requires review. The outcome preserves `failed_child_ids`, parse failures with a safely truncated raw summary, and all successfully parsed suggestions.
 
-- [ ] **Step 3: Add fake-controller tests for root-cause investigation**
+- [x] **Step 3: Add fake-controller tests for root-cause investigation**
 
 Add:
 
@@ -2335,7 +2335,7 @@ uv run pytest tests/test_agent_orchestration.py -v
 
 Expected: collection fails because `app.agent.orchestration` does not exist.
 
-- [ ] **Step 4: Define the controller boundary and immutable workflow outcomes**
+- [x] **Step 4: Define the controller boundary and immutable workflow outcomes**
 
 Use this narrow protocol; workflows must not reach `_tasks`, semaphores, CRUD, or SQLAlchemy:
 
@@ -2378,7 +2378,7 @@ class SpawnRequest:
 
 It does not use an untyped `**kwargs` bag. Outcomes include `trace_id`, successful structured results, every child ID, failed child IDs, parse failures, optional reviewer result, and optional `workflow_failure`. Do not return ORM rows.
 
-- [ ] **Step 5: Implement one bounded wave helper**
+- [x] **Step 5: Implement one bounded wave helper**
 
 Implement one private helper used by both workflows:
 
@@ -2398,7 +2398,7 @@ Implement cleanup as a separate `_close_all()` that always attempts every spawne
 
 `WaveResult` contains successfully retrieved receipts plus safe `(child_id, failure_kind)` wait failures. Chunk requests by `controller.max_concurrent_children`; never optimistically issue a sixth Spawn and wait for capacity. If Spawn itself fails after earlier receipts were created, close all already-created receipts before propagating a typed workflow failure.
 
-- [ ] **Step 6: Implement batch classification**
+- [x] **Step 6: Implement batch classification**
 
 Use this public signature:
 
@@ -2416,7 +2416,7 @@ Define `CLASSIFICATION_LOW_CONFIDENCE_THRESHOLD = 0.80`; it is a versioned workf
 
 Spawn a root-level reviewer only when at least one valid classification exists and any result is low-confidence, flagged, outside allowed categories, disputed, or accompanied by a failure/parse failure. Reviewer input contains bounded classification summaries, failure markers, and evidence paths—not child transcripts. Strictly parse its `ClassificationReview`. This workflow is advisory and must contain no knowledge-document update or filesystem move.
 
-- [ ] **Step 7: Implement multi-branch root-cause investigation**
+- [x] **Step 7: Implement multi-branch root-cause investigation**
 
 Use:
 
@@ -2434,7 +2434,7 @@ async def investigate_root_cause(
 
 Reject blank incident context, fewer than two branches, duplicate/blank branch names, and blank objectives before Spawn. Spawn one investigator per branch in bounded waves, strictly parse summaries, and validate that each returned `branch` matches its assignment. If all fail, set `workflow_failure` and skip reviewer. Otherwise spawn one root-level reviewer with only bounded findings/failures, parse `ReviewSynthesis`, and report malformed/missing review as an explicit workflow failure while preserving successful findings.
 
-- [ ] **Step 8: Verify workflows and commit**
+- [x] **Step 8: Verify workflows and commit**
 
 Run:
 
@@ -2468,7 +2468,7 @@ git commit -m "新增两个有界并行 Agent 编排范式
 - Consumes: the complete T09 runtime and both workflows.
 - Produces: a repeatable SQLite/fake-runner acceptance test and a clean full-suite/static/migration-head verification record, with no real API or Docker database use.
 
-- [ ] **Step 1: Write one real-manager integration harness**
+- [x] **Step 1: Write one real-manager integration harness**
 
 Create `backend/tests/test_agent_spawn_integration.py` using:
 
@@ -2480,7 +2480,7 @@ Create `backend/tests/test_agent_spawn_integration.py` using:
 
 Do not patch registry CRUD, message CRUD, the default child runner, workflow parsing, or manager lifecycle methods in this test. The fake chat must increment observable concurrency with event gates, return complete `ChatResult` usage/cost fields, and never perform HTTP.
 
-- [ ] **Step 2: Add the batch-classification invariant test**
+- [x] **Step 2: Add the batch-classification invariant test**
 
 Run six classification inputs so two waves are required, with one low-confidence result that triggers reviewer. After the workflow returns, assert:
 
@@ -2494,11 +2494,11 @@ assert await agent_registry_crud.list_active_children(db, session_id) == []
 
 Also assert root message history contains neither classifier task briefs nor child summaries; every classifier's captured history contains its own task brief and none of its siblings' file paths; every receipt has spawn, terminal, and close traces; and its final budget JSON contains actual usage.
 
-- [ ] **Step 3: Add the root-cause partial-failure invariant test**
+- [x] **Step 3: Add the root-cause partial-failure invariant test**
 
 Make one investigator fail and two return valid findings. Assert sibling work continues, reviewer receives only bounded structured findings/failure markers, outcome preserves the failed child ID, all children including reviewer become CLOSED, and a second idempotent close does not change trace count or release a slot twice.
 
-- [ ] **Step 4: Run the integration test and repair only T09 defects**
+- [x] **Step 4: Run the integration test and repair only T09 defects**
 
 Run:
 
@@ -2508,7 +2508,7 @@ uv run pytest tests/test_agent_spawn_integration.py -v
 
 Expected: pass. If it exposes a defect, first add the smallest focused regression test in the owning Task 1–8 test module, observe it fail, fix the owning module, then rerun both that module and the integration test. Do not refactor adjacent RBAC/CMDB/knowledge code.
 
-- [ ] **Step 5: Run the complete automated verification**
+- [x] **Step 5: Run the complete automated verification**
 
 From `backend/`, run exactly:
 
@@ -2526,7 +2526,7 @@ Expected:
 - Alembic reports exactly `d6a1b4c9f235 (head)`;
 - no pending `asyncio.Task` warnings or unclosed SQLAlchemy/httpx resources appear.
 
-- [ ] **Step 6: Review the final diff against both architecture documents**
+- [x] **Step 6: Review the final diff against both architecture documents**
 
 Run:
 
@@ -2546,7 +2546,7 @@ Audit every changed line against these acceptance points:
 6. both workflows are bounded, strict, partial-failure aware, and advisory;
 7. no real `.env`, secret, generated database, cache, or coverage artifact is staged.
 
-- [ ] **Step 7: Commit integration acceptance**
+- [x] **Step 7: Commit integration acceptance**
 
 ```bash
 git add backend/tests/test_agent_spawn_integration.py docs/superpowers/specs/2026-08-11-t09-spawn-orchestration-design.md docs/superpowers/plans/2026-08-11-t09-spawn-orchestration.md
