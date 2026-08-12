@@ -153,10 +153,15 @@ async def _load_system_config_response(db: AsyncSession) -> SystemConfigResponse
         脱敏后的系统配置响应
 
     Raises:
-        HTTPException: 密文无法解密时返回 500
+        HTTPException: 加密密钥缺失时返回 422；密文无法解密时返回 500
     """
     try:
         return await build_system_config_response(db)
+    except DataEncryptionKeyMissingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=_ENCRYPTION_KEY_MISSING_DETAIL,
+        ) from exc
     except DataDecryptError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

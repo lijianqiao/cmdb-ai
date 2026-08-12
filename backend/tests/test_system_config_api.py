@@ -320,6 +320,28 @@ async def test_missing_encryption_key_returns_422_on_llm_write(
     assert "sk-new-key" not in response.text
 
 
+async def test_missing_encryption_key_returns_422_on_read(
+    client: AsyncClient,
+    superuser_headers: Headers,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ciphertext = encrypt_secret("sk-stored-key")
+    await system_config_crud.upsert_values(
+        db_session,
+        {"LLM_CHAT_API_KEY": ciphertext},
+        updated_by_user_id=None,
+    )
+    await db_session.commit()
+
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", None)
+    response = await client.get("/api/v1/system-config", headers=superuser_headers)
+    assert response.status_code == 422
+    assert "CMDB_CREDENTIAL_KEY" in response.text
+    assert ciphertext not in response.text
+    assert "sk-stored-key" not in response.text
+
+
 async def test_decrypt_error_on_read_returns_500_without_ciphertext(
     client: AsyncClient,
     superuser_headers: Headers,
