@@ -2,7 +2,7 @@
 @Author: li
 @Email: lijianqiao2906@live.com
 @FileName: init_db.py
-@DateTime: 2026-08-10
+@DateTime: 2026-08-13
 @Docs: 初始化超级管理员与系统权限种子数据
 """
 
@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal, engine
 from app.core.security import hash_password_async
+from app.crud.system_config import system_config_crud
 from app.models.permission import Permission
 from app.models.user import User
 from app.schemas.auth import UserRegister
@@ -192,6 +193,12 @@ SEED_PERMISSIONS: tuple[SeedPermission, ...] = (
         "module": "Agent",
         "description": "审批或驳回 Agent 提出的 HITL 提案",
     },
+    {
+        "name": "管理系统配置",
+        "code": "system_config:manage",
+        "module": "系统配置",
+        "description": "查看并修改 LLM、HITL 与监控运行配置",
+    },
 )
 
 
@@ -274,6 +281,53 @@ async def seed_permissions() -> int:
     return created
 
 
+def _system_config_seed_values() -> dict[str, str]:
+    """
+    从当前 Settings 构建四项运行配置种子值。
+
+    Returns:
+        仅包含 HITL 与监控相关键的默认字符串映射
+    """
+    return {
+        "HITL_NOTIFY_AUTO_APPROVE": (
+            "true" if settings.HITL_NOTIFY_AUTO_APPROVE else "false"
+        ),
+        "MONITOR_PROBE_TIMEOUT_SECONDS": str(
+            settings.MONITOR_PROBE_TIMEOUT_SECONDS
+        ),
+        "MONITOR_SWEEP_INTERVAL_SECONDS": str(
+            settings.MONITOR_SWEEP_INTERVAL_SECONDS
+        ),
+        "CMDB_DIFF_INTERVAL_SECONDS": str(settings.CMDB_DIFF_INTERVAL_SECONDS),
+    }
+
+
+async def seed_system_configs() -> int:
+    """
+    幂等写入 HITL 与监控运行配置种子（不触碰 LLM/Embedding 键）。
+
+    Returns:
+        新插入的配置条数
+    """
+    async with AsyncSessionLocal() as db:
+        created = await system_config_crud.create_missing(
+            db,
+            _system_config_seed_values(),
+            updated_by_user_id=None,
+        )
+        if created:
+            await log_audit(
+                db,
+                user_id=None,
+                action="bootstrap_system_configs",
+                target="system_configs",
+                detail=f"种子写入 {created} 条运行配置",
+                ip="local",
+            )
+        await db.commit()
+        return created
+
+
 async def _superuser_exists() -> bool:
     """判断系统中是否已有超级管理员。"""
     async with AsyncSessionLocal() as db:
@@ -348,6 +402,12 @@ async def bootstrap() -> None:
             print(f"权限种子：新增 {created_permissions} 条（共 {len(SEED_PERMISSIONS)} 条定义）")
         else:
             print(f"权限种子：已齐全，跳过写入（共 {len(SEED_PERMISSIONS)} 条定义）")
+
+        created_configs = await seed_system_configs()
+        if created_configs:
+            print(f"运行配置种子：新增 {created_configs} 条")
+        else:
+            print("运行配置种子：已齐全，跳过写入")
 
         has_init_credentials = (
             settings.INIT_SUPERUSER_USERNAME is not None

@@ -11,6 +11,7 @@ REQUIRED = {
     "monitor:read",
     "monitor:manage",
     "agent:hitl_approve",
+    "system_config:manage",
 }
 
 
