@@ -112,7 +112,22 @@ export function CmdbAssetsPage() {
     () => [
       { accessorKey: "hostname", header: "主机名" },
       { accessorKey: "ip_address", header: "IP 地址" },
-      { accessorKey: "asset_type", header: "类型" },
+      {
+        accessorKey: "asset_type",
+        header: "类型",
+        cell: ({ row }) => {
+          const labels: Record<string, string> = {
+            server: "服务器",
+            switch: "交换机",
+            router: "路由器",
+            firewall: "防火墙",
+            load_balancer: "负载均衡",
+            storage: "存储",
+            other: "其他",
+          }
+          return labels[row.original.asset_type] ?? row.original.asset_type
+        },
+      },
       {
         accessorKey: "business_system",
         header: "业务系统",

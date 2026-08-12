@@ -13,7 +13,7 @@ export function clearedCredentialFields(): {
 export function createFormSchema(isEdit: boolean) {
   return z
     .object({
-      asset_type: z.string().min(1, "请输入资产类型").max(50),
+      asset_type: z.string().min(1, "请选择资产类型").max(50),
       hostname: z.string().min(1, "请输入主机名").max(255),
       ip_address: z.string().min(1, "请输入 IP 地址").max(45),
       location: z.string().max(200).optional().default(""),
