@@ -92,3 +92,41 @@ async def test_monitor_status_event_round_trip(db_session: AsyncSession) -> None
     ).scalar_one()
     assert stored.status == "up"
     assert stored.latency_ms == 12
+
+
+async def test_cmdb_asset_credential_fields_default_to_none_type(
+    db_session: AsyncSession,
+) -> None:
+    """新建资产不填凭据字段时，应落在安全的默认值上。"""
+    asset = CmdbAsset(
+        asset_type="server",
+        hostname="srv-cred-01",
+        ip_address="10.0.0.90",
+    )
+    db_session.add(asset)
+    await db_session.flush()
+
+    assert asset.credential_type == "none"
+    assert asset.credential_username == ""
+    assert asset.credential_password_encrypted is None
+
+
+async def test_cmdb_asset_can_store_static_credential_ciphertext(
+    db_session: AsyncSession,
+) -> None:
+    """静态凭据把密文原样存取，模型层不关心加密细节。"""
+    asset = CmdbAsset(
+        asset_type="server",
+        hostname="srv-cred-02",
+        ip_address="10.0.0.91",
+        credential_type="static",
+        credential_username="admin",
+        credential_password_encrypted="gAAAAA-fake-ciphertext",
+    )
+    db_session.add(asset)
+    await db_session.flush()
+    await db_session.refresh(asset)
+
+    assert asset.credential_type == "static"
+    assert asset.credential_username == "admin"
+    assert asset.credential_password_encrypted == "gAAAAA-fake-ciphertext"
