@@ -23,8 +23,23 @@ from app.schemas.system_config import (
 from app.services.system_config import (
     build_system_config_response,
     get_effective_llm_config,
+    get_effective_operations_config,
     save_llm_config,
+    save_operations_config,
 )
+
+
+def _llm_update_payload(**overrides: object) -> LlmSystemConfigUpdate:
+    payload = {
+        "chat_base_url": "https://llm.example/v1",
+        "chat_model": "chat-model",
+        "chat_input_cost_per_million_usd": 0.0,
+        "chat_output_cost_per_million_usd": 0.0,
+        "embedding_base_url": "https://embedding.example/v1",
+        "embedding_model": "embedding-model",
+    }
+    payload.update(overrides)
+    return LlmSystemConfigUpdate.model_validate(payload)
 
 
 @pytest.mark.asyncio
@@ -66,6 +81,101 @@ async def test_explicit_null_api_key_blocks_environment_fallback(
 
 
 @pytest.mark.asyncio
+async def test_explicit_null_embedding_api_key_blocks_environment_fallback(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "LLM_EMBEDDING_API_KEY",
+        SecretStr("env-embedding-key-should-not-apply"),
+    )
+    await system_config_crud.upsert_values(
+        db_session,
+        {"LLM_EMBEDDING_API_KEY": None},
+        updated_by_user_id=None,
+    )
+    config = await get_effective_llm_config(db_session)
+    assert config.embedding_api_key == ""
+    assert config.embedding_api_key_source == "database"
+    assert config.embedding_api_key_configured is False
+
+
+@pytest.mark.asyncio
+async def test_save_llm_config_without_api_key_fields_retains_existing_key(
+    db_session: AsyncSession,
+) -> None:
+    encrypted = encrypt_secret("existing-chat-key")
+    await system_config_crud.upsert_values(
+        db_session,
+        {"LLM_CHAT_API_KEY": encrypted},
+        updated_by_user_id=None,
+    )
+    await save_llm_config(
+        db_session,
+        _llm_update_payload(
+            chat_base_url="https://updated.example/v1",
+            chat_model="updated-model",
+        ),
+        updated_by_user_id=None,
+    )
+    config = await get_effective_llm_config(db_session)
+    assert config.chat_api_key == "existing-chat-key"
+    assert config.chat_api_key_source == "database"
+    assert config.chat_api_key_configured is True
+    assert config.chat_base_url == "https://updated.example/v1"
+    assert config.chat_model == "updated-model"
+
+
+@pytest.mark.asyncio
+async def test_get_effective_llm_config_rejects_invalid_db_base_url(
+    db_session: AsyncSession,
+) -> None:
+    await system_config_crud.upsert_values(
+        db_session,
+        {"LLM_CHAT_BASE_URL": "ftp://bad-host/v1"},
+        updated_by_user_id=None,
+    )
+    with pytest.raises(ValidationError):
+        await get_effective_llm_config(db_session)
+
+
+@pytest.mark.asyncio
+async def test_save_and_read_operations_config_round_trip(
+    db_session: AsyncSession,
+) -> None:
+    payload = OperationsSystemConfigUpdate(
+        hitl_notify_auto_approve=True,
+        monitor_probe_timeout_seconds=5.0,
+        monitor_sweep_interval_seconds=60.0,
+        cmdb_diff_interval_seconds=7200.0,
+    )
+    await save_operations_config(
+        db_session,
+        payload,
+        updated_by_user_id=None,
+    )
+    config = await get_effective_operations_config(db_session)
+    assert config.hitl_notify_auto_approve is True
+    assert config.monitor_probe_timeout_seconds == 5.0
+    assert config.monitor_sweep_interval_seconds == 60.0
+    assert config.cmdb_diff_interval_seconds == 7200.0
+
+
+@pytest.mark.asyncio
+async def test_get_effective_operations_config_rejects_invalid_db_timeout(
+    db_session: AsyncSession,
+) -> None:
+    await system_config_crud.upsert_values(
+        db_session,
+        {"MONITOR_PROBE_TIMEOUT_SECONDS": "0"},
+        updated_by_user_id=None,
+    )
+    with pytest.raises(ValidationError):
+        await get_effective_operations_config(db_session)
+
+
+@pytest.mark.asyncio
 async def test_environment_fallback_used_when_database_row_missing(
     db_session: AsyncSession,
 ) -> None:
@@ -97,16 +207,9 @@ async def test_response_never_exposes_api_key_plaintext(
     secret = "sk-do-not-leak-this"
     await save_llm_config(
         db_session,
-        LlmSystemConfigUpdate(
+        _llm_update_payload(
             chat_base_url="https://llm.example/v1",
             chat_api_key=SecretStr(secret),
-            clear_chat_api_key=False,
-            chat_model="chat-model",
-            chat_input_cost_per_million_usd=0.0,
-            chat_output_cost_per_million_usd=0.0,
-            embedding_base_url="https://embedding.example/v1",
-            clear_embedding_api_key=False,
-            embedding_model="embedding-model",
         ),
         updated_by_user_id=None,
     )

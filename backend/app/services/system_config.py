@@ -21,7 +21,6 @@ from app.schemas.system_config import (
     OperationsSystemConfigResponse,
     OperationsSystemConfigUpdate,
     SystemConfigResponse,
-    normalize_base_url,
 )
 
 KEY_LLM_CHAT_BASE_URL = "LLM_CHAT_BASE_URL"
@@ -97,16 +96,10 @@ class EffectiveOperationsConfig:
 def _resolve_string_value(
     row: SystemConfig | None,
     fallback: str,
-    *,
-    normalize_url: bool = False,
 ) -> str:
     if row is None or row.value is None:
-        raw = fallback
-    else:
-        raw = row.value
-    if normalize_url:
-        return normalize_base_url(raw)
-    return raw
+        return fallback
+    return row.value
 
 
 def _resolve_float_value(row: SystemConfig | None, fallback: float) -> float:
@@ -153,14 +146,11 @@ async def get_effective_llm_config(db: AsyncSession) -> EffectiveLlmConfig:
         rows.get(KEY_LLM_EMBEDDING_API_KEY),
         settings.llm_embedding_api_key,
     )
-    return EffectiveLlmConfig(
+    validated = LlmSystemConfigUpdate(
         chat_base_url=_resolve_string_value(
             rows.get(KEY_LLM_CHAT_BASE_URL),
             settings.LLM_CHAT_BASE_URL,
-            normalize_url=True,
         ),
-        chat_api_key=chat_api_key,
-        chat_api_key_source=chat_api_key_source,
         chat_model=_resolve_string_value(
             rows.get(KEY_LLM_CHAT_MODEL),
             settings.LLM_CHAT_MODEL,
@@ -176,14 +166,23 @@ async def get_effective_llm_config(db: AsyncSession) -> EffectiveLlmConfig:
         embedding_base_url=_resolve_string_value(
             rows.get(KEY_LLM_EMBEDDING_BASE_URL),
             settings.LLM_EMBEDDING_BASE_URL,
-            normalize_url=True,
         ),
-        embedding_api_key=embedding_api_key,
-        embedding_api_key_source=embedding_api_key_source,
         embedding_model=_resolve_string_value(
             rows.get(KEY_LLM_EMBEDDING_MODEL),
             settings.LLM_EMBEDDING_MODEL,
         ),
+    )
+    return EffectiveLlmConfig(
+        chat_base_url=validated.chat_base_url,
+        chat_api_key=chat_api_key,
+        chat_api_key_source=chat_api_key_source,
+        chat_model=validated.chat_model,
+        chat_input_cost_per_million_usd=validated.chat_input_cost_per_million_usd,
+        chat_output_cost_per_million_usd=validated.chat_output_cost_per_million_usd,
+        embedding_base_url=validated.embedding_base_url,
+        embedding_api_key=embedding_api_key,
+        embedding_api_key_source=embedding_api_key_source,
+        embedding_model=validated.embedding_model,
     )
 
 
