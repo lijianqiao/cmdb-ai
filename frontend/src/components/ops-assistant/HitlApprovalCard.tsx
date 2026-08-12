@@ -3,6 +3,7 @@
  * WS 只带安全摘要；有 agent:hitl_approve 时再 HTTP 拉完整 payload。
  * 批准/拒绝走 /hitl/proposals/{id}/decide；拒绝二次确认。
  * device_control stub 失败后状态停留 APPROVED → 展示「已批准但未执行」。
+ * device_query + 动态凭据：批准前需输入本次登录密码（不落库、不进审计）。
  */
 
 import { useEffect, useState } from "react"
@@ -20,6 +21,8 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
 import { usePermission } from "@/hooks/use-permission"
 import { Cancel01Icon, Tick02Icon } from "@/lib/icons"
@@ -30,6 +33,11 @@ import {
 } from "@/lib/hitl-api"
 import { PERMISSIONS } from "@/lib/constants"
 import { cn } from "@/lib/utils"
+import {
+  isApproveButtonDisabled,
+  needsDynamicCredentialPassword,
+  shouldShowResultExcerpt,
+} from "@/components/ops-assistant/hitlApprovalCardUtils"
 
 export interface HitlApprovalCardProps {
   proposalId: number
@@ -37,6 +45,8 @@ export interface HitlApprovalCardProps {
   status: string
   reason: string
   assetId: number | null
+  /** WS 安全摘要可能携带的执行结果片段（无审批权限时展示用） */
+  resultExcerpt?: string | null
   className?: string
 }
 
@@ -115,6 +125,7 @@ function readPayloadMeta(proposal: HitlProposal): {
  *
  * Args:
  *   proposalId / actionType / status / reason / assetId: WS 安全摘要字段
+ *   resultExcerpt: WS 可能携带的执行结果片段
  *   className: 外层 Card class
  */
 export function HitlApprovalCard({
@@ -123,6 +134,7 @@ export function HitlApprovalCard({
   status,
   reason,
   assetId,
+  resultExcerpt,
   className,
 }: HitlApprovalCardProps) {
   const { hasPermission } = usePermission()
@@ -134,6 +146,7 @@ export function HitlApprovalCard({
   const [deciding, setDeciding] = useState(false)
   const [rejectOpen, setRejectOpen] = useState(false)
   const [localStatus, setLocalStatus] = useState<string | null>(null)
+  const [dynamicPassword, setDynamicPassword] = useState("")
 
   const displayStatus = localStatus ?? status
   const normalized = displayStatus.trim().toUpperCase()
@@ -144,10 +157,29 @@ export function HitlApprovalCard({
   const displayReason = meta?.reason || reason
   const displayAssetId = meta?.assetId ?? assetId
 
+  const needsDynamicPassword = needsDynamicCredentialPassword(
+    displayActionType,
+    detail?.asset_credential_type,
+  )
+
+  const resolvedResultExcerpt = detail?.result_excerpt ?? resultExcerpt ?? null
+  const showResultExcerpt = shouldShowResultExcerpt(
+    displayStatus,
+    resolvedResultExcerpt,
+  )
+
+  const approveDisabled = isApproveButtonDisabled(
+    deciding,
+    detailLoading,
+    needsDynamicPassword,
+    dynamicPassword,
+  )
+
   useEffect(() => {
     setLocalStatus(null)
     setDetail(null)
     setDetailError(null)
+    setDynamicPassword("")
   }, [proposalId])
 
   useEffect(() => {
@@ -182,12 +214,19 @@ export function HitlApprovalCard({
   }, [canApprove, proposalId])
 
   const handleApprove = async (): Promise<void> => {
-    if (!canApprove || !isPending || deciding) return
+    if (!canApprove || !isPending || deciding || approveDisabled) return
     setDeciding(true)
     try {
-      const updated = await decideHitlProposal(proposalId, { approve: true })
+      const body: { approve: true; dynamic_credential_password?: string } = {
+        approve: true,
+      }
+      if (needsDynamicPassword) {
+        body.dynamic_credential_password = dynamicPassword.trim()
+      }
+      const updated = await decideHitlProposal(proposalId, body)
       setDetail(updated)
       setLocalStatus(updated.status)
+      setDynamicPassword("")
       toast.success(
         updated.status.trim().toUpperCase() === "APPROVED" && !updated.executed_at
           ? "已批准但未执行"
@@ -250,6 +289,18 @@ export function HitlApprovalCard({
             <p className="text-xs text-muted-foreground">资产 #{displayAssetId}</p>
           ) : null}
 
+          {showResultExcerpt ? (
+            <div className="flex flex-col gap-1">
+              <p className="text-xs font-medium text-muted-foreground">执行结果</p>
+              <pre
+                className="max-h-48 overflow-auto rounded-md bg-muted p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words"
+                data-testid="hitl-result-excerpt"
+              >
+                {resolvedResultExcerpt}
+              </pre>
+            </div>
+          ) : null}
+
           {canApprove ? (
             detailLoading ? (
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -267,30 +318,50 @@ export function HitlApprovalCard({
         </CardContent>
 
         {canApprove && isPending ? (
-          <CardFooter className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              size="sm"
-              disabled={deciding || detailLoading}
-              onClick={() => void handleApprove()}
-            >
-              {deciding ? (
-                <Spinner data-icon="inline-start" />
-              ) : (
-                <Tick02Icon data-icon="inline-start" />
-              )}
-              批准
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="destructive"
-              disabled={deciding || detailLoading}
-              onClick={() => setRejectOpen(true)}
-            >
-              <Cancel01Icon data-icon="inline-start" />
-              拒绝
-            </Button>
+          <CardFooter className="flex flex-col items-stretch gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+            {needsDynamicPassword ? (
+              <div className="flex min-w-[200px] flex-1 flex-col gap-1.5">
+                <Label htmlFor={`hitl-dynamic-password-${proposalId}`}>
+                  动态凭据密码
+                </Label>
+                <Input
+                  id={`hitl-dynamic-password-${proposalId}`}
+                  type="password"
+                  autoComplete="off"
+                  placeholder="批准时输入本次登录密码"
+                  value={dynamicPassword}
+                  disabled={deciding}
+                  onChange={(event) => setDynamicPassword(event.target.value)}
+                  data-testid="hitl-dynamic-password"
+                />
+              </div>
+            ) : null}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                disabled={approveDisabled}
+                onClick={() => void handleApprove()}
+                data-testid="hitl-approve-button"
+              >
+                {deciding ? (
+                  <Spinner data-icon="inline-start" />
+                ) : (
+                  <Tick02Icon data-icon="inline-start" />
+                )}
+                批准
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                disabled={deciding || detailLoading}
+                onClick={() => setRejectOpen(true)}
+              >
+                <Cancel01Icon data-icon="inline-start" />
+                拒绝
+              </Button>
+            </div>
           </CardFooter>
         ) : null}
       </Card>

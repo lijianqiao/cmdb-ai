@@ -37,3 +37,5 @@ class HitlProposalResponse(ApiModel):
     reviewed_at: datetime | None
     executed_at: datetime | None
     created_at: datetime
+    result_excerpt: str | None = None
+    asset_credential_type: str | None = None

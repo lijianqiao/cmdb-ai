@@ -34,9 +34,28 @@ from app.schemas.hitl import HitlDecideRequest, HitlProposalResponse
 router = APIRouter()
 
 
-def _to_response(proposal: object) -> HitlProposalResponse:
-    """将 ORM 提案转为审批人 DTO。"""
-    return HitlProposalResponse.model_validate(proposal)
+async def _to_response(db: AsyncSession, proposal: object) -> HitlProposalResponse:
+    """将 ORM 提案转为审批人 DTO，并附带执行摘要与资产凭据类型。"""
+    payload = getattr(proposal, "action_payload", None)
+    payload_dict = payload if isinstance(payload, dict) else {}
+
+    raw_result_excerpt = payload_dict.get("last_result_excerpt")
+    result_excerpt = raw_result_excerpt if isinstance(raw_result_excerpt, str) else None
+
+    asset_credential_type: str | None = None
+    raw_asset_id = payload_dict.get("asset_id")
+    if isinstance(raw_asset_id, int) and not isinstance(raw_asset_id, bool):
+        asset = await cmdb_asset_crud.get(db, raw_asset_id)
+        if asset is not None:
+            asset_credential_type = asset.credential_type
+
+    base = HitlProposalResponse.model_validate(proposal)
+    return base.model_copy(
+        update={
+            "result_excerpt": result_excerpt,
+            "asset_credential_type": asset_credential_type,
+        },
+    )
 
 
 @router.get(
@@ -61,7 +80,10 @@ async def list_proposals(
         session_id,
         status=status_filter,
     )
-    return success_response([_to_response(item) for item in proposals])
+    responses: list[HitlProposalResponse] = []
+    for item in proposals:
+        responses.append(await _to_response(db, item))
+    return success_response(responses)
 
 
 @router.get(
@@ -77,7 +99,7 @@ async def get_proposal(
     proposal = await hitl_proposal_crud.get(db, proposal_id)
     if proposal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
-    return success_response(_to_response(proposal))
+    return success_response(await _to_response(db, proposal))
 
 
 @router.post(

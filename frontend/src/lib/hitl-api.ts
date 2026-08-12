@@ -15,10 +15,13 @@ export interface HitlProposal {
   reviewed_at: string | null
   executed_at: string | null
   created_at: string
+  result_excerpt?: string | null
+  asset_credential_type?: string | null
 }
 
 export interface HitlDecideRequest {
   approve: boolean
+  dynamic_credential_password?: string
 }
 
 export interface ListHitlProposalsParams {
