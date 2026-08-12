@@ -21,7 +21,30 @@ from app.agent.tool_dispatch import (
 )
 from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
+from app.crud.hitl_proposal import hitl_proposal_crud
 from app.models.user import User
+
+
+async def _make_session_and_asset(
+    db: AsyncSession, user_id: int
+) -> tuple[int, int]:
+    """创建 Agent 会话与 CMDB 资产，供设备命令工具测试使用。"""
+    session = await agent_session_crud.create(
+        db,
+        {"user_id": user_id, "title": "设备命令工具测试", "status": "active"},
+    )
+    asset = await cmdb_asset_crud.create(
+        db,
+        {
+            "asset_type": "server",
+            "hostname": "srv-device-query",
+            "ip_address": "10.0.0.50",
+            "business_system": "测试系统",
+            "subnet_cidr": "",
+        },
+    )
+    await db.flush()
+    return session.id, asset.id
 
 
 async def test_propose_remediation_returns_pending_without_payload(
@@ -200,17 +223,27 @@ async def test_propose_remediation_hides_unexpected_exception_detail(
 
 
 def test_root_schema_adds_strict_propose_remediation_definition() -> None:
-    """根工具 Schema 应包含七个只读工具和一个严格写工具。"""
+    """根工具 Schema 应包含七个只读工具和三个根写/查询工具。"""
     schemas = root_tool_schemas()
     functions = {item["function"]["name"]: item["function"] for item in schemas}
 
-    assert len(functions) == 8
+    assert len(functions) == 10
     remediation = functions["propose_remediation"]
     parameters = remediation["parameters"]
     assert parameters["additionalProperties"] is False
     assert set(parameters["required"]) == {"asset_id", "action_type", "payload", "reason"}
     assert parameters["properties"]["action_type"]["enum"] == ["notify", "device_control"]
     assert parameters["properties"]["payload"]["type"] == "object"
+
+    query_cmd = functions["query_device_command"]
+    query_params = query_cmd["parameters"]
+    assert query_params["additionalProperties"] is False
+    assert set(query_params["required"]) == {"asset_id", "command_name", "reason"}
+
+    get_result = functions["get_device_query_result"]
+    result_params = get_result["parameters"]
+    assert result_params["additionalProperties"] is False
+    assert set(result_params["required"]) == {"proposal_id"}
 
 
 async def test_root_dispatcher_binds_context_to_remediation(
@@ -314,3 +347,94 @@ async def test_child_dispatcher_never_exposes_remediation(
 
     assert result.control == "rejected"
     assert "未知工具" in result.content
+
+
+async def test_query_device_command_returns_pending_when_not_executed(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """待审批设备命令查询应停止循环并返回提案 ID。"""
+
+    async def fake_propose_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
+        return ProposalSafeSummary(
+            proposal_id=51,
+            action_type="device_query",
+            status="PENDING",
+            reason="排查交换机",
+            asset_id=9,
+        )
+
+    monkeypatch.setattr(hitl_tools, "propose_action", fake_propose_action)
+
+    result = await hitl_tools.query_device_command(
+        db_session,
+        session_id=1,
+        actor_user_id=2,
+        proposed_by_agent_id=None,
+        asset_id=9,
+        command_name="show_version",
+        reason="排查交换机",
+    )
+
+    assert result.control == "pending_approval"
+    assert "51" in result.content
+
+
+async def test_query_device_command_returns_ok_with_result_when_auto_executed(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """白名单自动执行时应直接返回设备输出。"""
+
+    async def fake_propose_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
+        return ProposalSafeSummary(
+            proposal_id=52,
+            action_type="device_query",
+            status="EXECUTED",
+            reason="排查交换机",
+            asset_id=9,
+            result_excerpt="fake device output",
+        )
+
+    monkeypatch.setattr(hitl_tools, "propose_action", fake_propose_action)
+
+    result = await hitl_tools.query_device_command(
+        db_session,
+        session_id=1,
+        actor_user_id=2,
+        proposed_by_agent_id=None,
+        asset_id=9,
+        command_name="show_version",
+        reason="排查交换机",
+    )
+
+    assert result.control == "ok"
+    assert "fake device output" in result.content
+
+
+async def test_get_device_query_result_scopes_to_session(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """回查结果必须按会话隔离，不匹配时当作不存在。"""
+    session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
+    other_session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+
+    proposal = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="device_query",
+        action_payload={"asset_id": asset_id, "command_name": "show_version"},
+    )
+    await db_session.commit()
+
+    same_session = await hitl_tools.get_device_query_result(
+        db_session, session_id=session_id, proposal_id=proposal.id
+    )
+    assert "不存在" not in same_session.content
+
+    other_session = await hitl_tools.get_device_query_result(
+        db_session, session_id=other_session_id, proposal_id=proposal.id
+    )
+    assert other_session.control == "rejected"

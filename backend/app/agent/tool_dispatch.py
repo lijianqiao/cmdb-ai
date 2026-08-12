@@ -21,7 +21,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.hitl import HitlEventPublisher
-from app.agent.hitl_tools import propose_remediation
+from app.agent.hitl_tools import (
+    get_device_query_result,
+    propose_remediation,
+    query_device_command,
+)
 from app.agent.knowledge_tools import kb_glob, kb_grep, kb_read, kb_semantic_search
 from app.agent.loop import ToolDispatcher, ToolResult
 from app.agent.ops_tools import query_cmdb, query_cmdb_dependencies, query_monitor_status
@@ -99,6 +103,16 @@ class ProposeRemediationArgs(_Args):
     action_type: Literal["notify", "device_control"]
     payload: dict[str, object]
     reason: str = Field(min_length=1, max_length=2000)
+
+
+class QueryDeviceCommandArgs(_Args):
+    asset_id: int = Field(ge=1)
+    command_name: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class GetDeviceQueryResultArgs(_Args):
+    proposal_id: int = Field(ge=1)
 
 
 _ARGUMENT_MODELS: dict[ToolName, type[_Args]] = {
@@ -234,13 +248,17 @@ _ROOT_READ_ONLY_TOOLS: tuple[ToolName, ...] = (
 
 
 def root_tool_schemas() -> list[dict[str, Any]]:
-    """返回根 Agent 的七个只读工具和整改提案工具 Schema。
+    """返回根 Agent 的七个只读工具、整改提案工具和两个设备命令工具 Schema。
 
     Returns:
-        OpenAI 兼容的八个严格函数工具定义。
+        OpenAI 兼容的十个严格函数工具定义。
     """
-    parameters = deepcopy(ProposeRemediationArgs.model_json_schema())
-    parameters.pop("title", None)
+    propose_parameters = deepcopy(ProposeRemediationArgs.model_json_schema())
+    propose_parameters.pop("title", None)
+    query_parameters = deepcopy(QueryDeviceCommandArgs.model_json_schema())
+    query_parameters.pop("title", None)
+    result_parameters = deepcopy(GetDeviceQueryResultArgs.model_json_schema())
+    result_parameters.pop("title", None)
     return [
         *tool_schemas_for(_ROOT_READ_ONLY_TOOLS),
         {
@@ -250,7 +268,28 @@ def root_tool_schemas() -> list[dict[str, Any]]:
                 "description": (
                     f"[{ROOT_TOOL_SCHEMA_VERSION}] 为指定资产创建需人工审批的整改提案。"
                 ),
-                "parameters": parameters,
+                "parameters": propose_parameters,
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_device_command",
+                "description": (
+                    f"[{ROOT_TOOL_SCHEMA_VERSION}] 对已配置凭据的资产发起只读诊断命令查询"
+                    "（白名单自动执行，否则需要人工审批）。"
+                ),
+                "parameters": query_parameters,
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_device_query_result",
+                "description": (
+                    f"[{ROOT_TOOL_SCHEMA_VERSION}] 回查一个已提交的设备命令查询提案的当前结果。"
+                ),
+                "parameters": result_parameters,
             },
         },
     ]
@@ -274,15 +313,58 @@ def build_root_tool_dispatcher(
         publisher: 可选的 HITL 安全事件发布器。
 
     Returns:
-        可调用七个只读工具和整改提案工具的调度函数。
+        可调用七个只读工具、整改提案工具和两个设备命令工具的调度函数。
     """
     read_dispatch = build_tool_dispatcher(db, _ROOT_READ_ONLY_TOOLS)
 
     async def dispatch(name: str, arguments: dict[str, Any]) -> ToolResult:
+        if name == "query_device_command":
+            try:
+                query_args = QueryDeviceCommandArgs.model_validate(arguments)
+            except ValidationError as exc:
+                return ToolResult(
+                    control="clarification",
+                    content=f"工具 {name!r} 参数无效: {exc.error_count()} 处错误",
+                )
+            try:
+                return await query_device_command(
+                    db,
+                    session_id=session_id,
+                    actor_user_id=actor_user_id,
+                    proposed_by_agent_id=proposed_by_agent_id,
+                    asset_id=query_args.asset_id,
+                    command_name=query_args.command_name,
+                    reason=query_args.reason,
+                    publisher=publisher,
+                )
+            except Exception as exc:
+                return ToolResult(
+                    control="failed",
+                    content=f"工具 {name!r} 执行失败: {type(exc).__name__}",
+                )
+        if name == "get_device_query_result":
+            try:
+                result_args = GetDeviceQueryResultArgs.model_validate(arguments)
+            except ValidationError as exc:
+                return ToolResult(
+                    control="clarification",
+                    content=f"工具 {name!r} 参数无效: {exc.error_count()} 处错误",
+                )
+            try:
+                return await get_device_query_result(
+                    db,
+                    session_id=session_id,
+                    proposal_id=result_args.proposal_id,
+                )
+            except Exception as exc:
+                return ToolResult(
+                    control="failed",
+                    content=f"工具 {name!r} 执行失败: {type(exc).__name__}",
+                )
         if name != "propose_remediation":
             return await read_dispatch(name, arguments)
         try:
-            parsed = ProposeRemediationArgs.model_validate(arguments)
+            remediation_args = ProposeRemediationArgs.model_validate(arguments)
         except ValidationError as exc:
             return ToolResult(
                 control="clarification",
@@ -294,10 +376,10 @@ def build_root_tool_dispatcher(
                 session_id=session_id,
                 actor_user_id=actor_user_id,
                 proposed_by_agent_id=proposed_by_agent_id,
-                asset_id=parsed.asset_id,
-                action_type=parsed.action_type,
-                payload=parsed.payload,
-                reason=parsed.reason,
+                asset_id=remediation_args.asset_id,
+                action_type=remediation_args.action_type,
+                payload=remediation_args.payload,
+                reason=remediation_args.reason,
                 publisher=publisher,
             )
         except Exception as exc:

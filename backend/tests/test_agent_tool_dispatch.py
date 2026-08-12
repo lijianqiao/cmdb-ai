@@ -223,3 +223,40 @@ async def test_dispatch_hides_internal_exception_detail(
     assert result.control == "failed"
     assert "RuntimeError" in result.content
     assert "secret database address" not in result.content
+
+
+async def test_child_dispatcher_rejects_query_device_command(
+    db_session: AsyncSession,
+) -> None:
+    """子角色调度器不得暴露或执行 query_device_command。"""
+    dispatch = build_tool_dispatcher(
+        db_session,
+        ("query_monitor_status", "query_device_command"),
+    )
+
+    result = await dispatch(
+        "query_device_command",
+        {
+            "asset_id": 1,
+            "command_name": "show_version",
+            "reason": "越权尝试",
+        },
+    )
+
+    assert result.control == "rejected"
+    assert "未知工具" in result.content
+
+
+async def test_child_dispatcher_rejects_get_device_query_result(
+    db_session: AsyncSession,
+) -> None:
+    """子角色调度器不得暴露或执行 get_device_query_result。"""
+    dispatch = build_tool_dispatcher(
+        db_session,
+        ("query_monitor_status", "get_device_query_result"),
+    )
+
+    result = await dispatch("get_device_query_result", {"proposal_id": 1})
+
+    assert result.control == "rejected"
+    assert "未知工具" in result.content
