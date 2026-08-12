@@ -13,10 +13,17 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
+from scrapli.driver.core import AsyncIOSXEDriver, AsyncJunosDriver
+from scrapli.driver.generic import AsyncGenericDriver
+from scrapli_community.huawei.vrp.async_driver import AsyncHuaweiVRPDriver
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.device_commands import command_supports_vendor, get_device_command
+from app.core.cmdb_credential import decrypt_credential_password
+from app.core.config import settings
+from app.models.cmdb_asset import CmdbAsset
 from app.utils.audit import log_audit
 
 
@@ -83,4 +90,104 @@ class NotifyExecutor:
             ok=True,
             message="通知已记录",
             detail={"proposal_id": proposal_id, "message": message},
+        )
+
+
+_OUTPUT_TRUNCATE_LIMIT = 4000
+
+
+def _truncate_output(text: str, *, limit: int = _OUTPUT_TRUNCATE_LIMIT) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+    return text[:limit] + "…(截断)", True
+
+
+def _scrapli_driver_class_for_vendor(vendor: str) -> type[Any]:
+    """按 CMDB 厂商字段选择 Scrapli 异步驱动类。"""
+    if vendor == "cisco_iosxe":
+        return AsyncIOSXEDriver
+    if vendor == "juniper_junos":
+        return AsyncJunosDriver
+    if vendor == "huawei_vrp":
+        return AsyncHuaweiVRPDriver
+    return AsyncGenericDriver
+
+
+async def _open_scrapli_connection(
+    *, host: str, vendor: str, username: str, password: str, timeout_seconds: float
+) -> Any:
+    """建立一个已认证的 Scrapli 异步连接；抽成独立函数方便测试打桩。"""
+    driver_class = _scrapli_driver_class_for_vendor(vendor)
+    connection = driver_class(
+        host=host,
+        auth_username=username,
+        auth_password=password,
+        auth_strict_key=False,
+        timeout_socket=timeout_seconds,
+        timeout_transport=timeout_seconds,
+    )
+    await connection.open()
+    return connection
+
+
+class DeviceQueryExecutor:
+    """只读诊断命令执行器：解析凭据、按厂商选真实命令、跑 Scrapli、截断输出。"""
+
+    async def execute(
+        self,
+        db: AsyncSession,
+        *,
+        asset: CmdbAsset,
+        command_name: str,
+        dynamic_password: str | None,
+    ) -> ExecutionResult:
+        """执行一次设备诊断命令查询并返回安全结果。
+
+        Args:
+            db: 当前事务的数据库会话（目前未使用，保留是为了跟其它执行器
+                签名一致，也方便未来加执行前后的额外落库操作）。
+            asset: 目标 CMDB 资产，须已配置 vendor 与凭据。
+            command_name: 目录里的命令名，调用方保证已通过白名单/校验。
+            dynamic_password: 动态凭据时的一次性明文密码；静态凭据时忽略。
+
+        Returns:
+            ok=True 时 detail 含 output/truncated；ok=False 时 message 只给
+            分类信息，不透传任何原始异常文本或设备侧细节。
+        """
+        if asset.credential_type == "static":
+            if not asset.credential_password_encrypted:
+                return ExecutionResult(ok=False, message="资产未配置静态密码")
+            password = decrypt_credential_password(asset.credential_password_encrypted)
+        elif asset.credential_type == "dynamic":
+            if not dynamic_password:
+                return ExecutionResult(ok=False, message="动态凭据缺少本次输入的密码")
+            password = dynamic_password
+        else:
+            return ExecutionResult(ok=False, message="资产未配置登录凭据")
+
+        if not command_supports_vendor(command_name, asset.vendor):
+            return ExecutionResult(ok=False, message="该设备厂商不支持这个命令")
+        definition = get_device_command(command_name)
+        template = definition.templates[asset.vendor]  # type: ignore[index]
+
+        try:
+            connection = await _open_scrapli_connection(
+                host=asset.ip_address,
+                vendor=asset.vendor,
+                username=asset.credential_username,
+                password=password,
+                timeout_seconds=settings.DEVICE_COMMAND_TIMEOUT_SECONDS,
+            )
+            response = await connection.send_command(template)
+        except Exception:
+            return ExecutionResult(ok=False, message="连接或执行命令失败")
+
+        if getattr(response, "failed", False):
+            return ExecutionResult(ok=False, message="设备返回命令执行失败")
+
+        output, truncated = _truncate_output(str(response.result))
+        return ExecutionResult(
+            ok=True,
+            message="命令执行完成",
+            detail={"output": output, "truncated": truncated},
         )
