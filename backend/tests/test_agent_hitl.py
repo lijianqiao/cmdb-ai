@@ -6,16 +6,20 @@
 @Docs: 验证 HITL 编排层的严格校验、状态迁移、执行幂等性与安全事件。
 """
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import asdict
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.agent import hitl
+from app.agent.executors import ExecutionResult
 from app.agent.hitl import (
     HitlProposalRejectedError,
     HitlResumeError,
+    ProposalSafeSummary,
     decide_proposal,
     propose_action,
     resume_proposal,
@@ -383,6 +387,84 @@ async def test_resume_rejects_pending_and_rejected(
             proposal_id=proposal.proposal_id,
             actor_user_id=test_user.id,
         )
+
+
+async def test_concurrent_resume_executes_successful_action_once(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """两个独立会话并发恢复时，执行器只能成功调用一次。"""
+    session_id, asset_id = await _make_context(db_session, test_user.id)
+    proposal = await propose_action(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="notify",
+        asset_id=asset_id,
+        payload={"message": "并发通知"},
+        reason="并发幂等测试",
+        actor_user_id=test_user.id,
+    )
+    await decide_proposal(
+        db_session,
+        proposal_id=proposal.proposal_id,
+        approve=True,
+        reviewed_by_user_id=test_user.id,
+    )
+    await db_session.commit()
+
+    first_started = asyncio.Event()
+    allow_execution = asyncio.Event()
+    execute_count = 0
+
+    class BlockingNotifyExecutor:
+        """暂停首次执行，为第二个独立数据库会话制造并发窗口。"""
+
+        async def execute(
+            self,
+            db: AsyncSession,
+            *,
+            proposal_id: int,
+            payload: Mapping[str, object],
+            actor_user_id: int | None,
+        ) -> ExecutionResult:
+            """记录调用次数，并在测试允许后返回成功。"""
+            nonlocal execute_count
+            execute_count += 1
+            first_started.set()
+            await allow_execution.wait()
+            return ExecutionResult(ok=True, message="测试执行成功")
+
+    monkeypatch.setattr(hitl, "_NOTIFY_EXECUTOR", BlockingNotifyExecutor())
+    session_factory = async_sessionmaker(
+        db_engine,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+
+    async def resume_and_commit() -> ProposalSafeSummary:
+        """使用独立会话恢复提案并提交事务。"""
+        async with session_factory() as independent_session:
+            summary = await resume_proposal(
+                independent_session,
+                proposal_id=proposal.proposal_id,
+                actor_user_id=test_user.id,
+            )
+            await independent_session.commit()
+            return summary
+
+    first_task = asyncio.create_task(resume_and_commit())
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    second_task = asyncio.create_task(resume_and_commit())
+    await asyncio.sleep(0.05)
+    allow_execution.set()
+    first_summary, second_summary = await asyncio.gather(first_task, second_task)
+
+    assert execute_count == 1
+    assert first_summary == second_summary
+    assert first_summary.status == "EXECUTED"
 
 
 async def test_device_control_stub_failure_stays_approved(

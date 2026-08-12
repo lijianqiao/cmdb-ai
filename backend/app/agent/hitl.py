@@ -13,11 +13,14 @@
 5. 对 Agent 和事件发布器只暴露安全摘要，不返回原始 payload，避免设备凭据或未知字段泄露。
 """
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Literal, Protocol, cast
+from weakref import WeakValueDictionary
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.executors import NotifyExecutor, NotImplementedExecutor
@@ -95,6 +98,16 @@ class ProposalSafeSummary:
 
 _NOTIFY_EXECUTOR = NotifyExecutor()
 _DEVICE_CONTROL_EXECUTOR = NotImplementedExecutor()
+_EXECUTION_LOCKS: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
+
+
+def _execution_lock(proposal_id: int) -> asyncio.Lock:
+    """返回进程内提案锁，补足 SQLite 不支持行锁的测试与单进程场景。"""
+    lock = _EXECUTION_LOCKS.get(proposal_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _EXECUTION_LOCKS[proposal_id] = lock
+    return lock
 
 
 def _summary(proposal: HitlProposal) -> ProposalSafeSummary:
@@ -291,44 +304,52 @@ async def resume_proposal(
     Raises:
         HitlResumeError: 提案不存在或状态不是 APPROVED/EXECUTED 时。
     """
-    proposal = await hitl_proposal_crud.get(db, proposal_id)
-    if proposal is None:
-        raise HitlResumeError(f"HITL 提案不存在：{proposal_id}")
-    if proposal.status == "EXECUTED":
+    async with _execution_lock(proposal_id):
+        stmt = (
+            select(HitlProposal)
+            .where(HitlProposal.id == proposal_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        result = await db.execute(stmt)
+        proposal = result.scalar_one_or_none()
+        if proposal is None:
+            raise HitlResumeError(f"HITL 提案不存在：{proposal_id}")
+        if proposal.status == "EXECUTED":
+            return _summary(proposal)
+        if proposal.status != "APPROVED":
+            raise HitlResumeError(f"状态 {proposal.status} 的 HITL 提案不可恢复执行")
+
+        if proposal.action_type == "notify":
+            execution_result = await _NOTIFY_EXECUTOR.execute(
+                db,
+                proposal_id=proposal.id,
+                payload=proposal.action_payload,
+                actor_user_id=actor_user_id,
+            )
+        elif proposal.action_type == "device_control":
+            execution_result = await _DEVICE_CONTROL_EXECUTOR.execute(proposal.action_payload)
+        else:
+            raise HitlResumeError(f"不支持的 HITL 动作类型：{proposal.action_type}")
+
+        if execution_result.ok:
+            proposal = await hitl_proposal_crud.mark_executed(db, proposal.id)
+            await log_audit(
+                db,
+                actor_user_id,
+                "hitl_executed",
+                target=f"hitl_proposal:{proposal.id}",
+                detail=f"动作类型：{proposal.action_type}",
+            )
+            await _publish(publisher, proposal=proposal, event_type="hitl_resolved")
+        else:
+            await log_audit(
+                db,
+                actor_user_id,
+                "hitl_execution_failed",
+                target=f"hitl_proposal:{proposal.id}",
+                detail=execution_result.message,
+            )
+            await _publish(publisher, proposal=proposal, event_type="hitl_execution_failed")
+
         return _summary(proposal)
-    if proposal.status != "APPROVED":
-        raise HitlResumeError(f"状态 {proposal.status} 的 HITL 提案不可恢复执行")
-
-    if proposal.action_type == "notify":
-        result = await _NOTIFY_EXECUTOR.execute(
-            db,
-            proposal_id=proposal.id,
-            payload=proposal.action_payload,
-            actor_user_id=actor_user_id,
-        )
-    elif proposal.action_type == "device_control":
-        result = await _DEVICE_CONTROL_EXECUTOR.execute(proposal.action_payload)
-    else:
-        raise HitlResumeError(f"不支持的 HITL 动作类型：{proposal.action_type}")
-
-    if result.ok:
-        proposal = await hitl_proposal_crud.mark_executed(db, proposal.id)
-        await log_audit(
-            db,
-            actor_user_id,
-            "hitl_executed",
-            target=f"hitl_proposal:{proposal.id}",
-            detail=f"动作类型：{proposal.action_type}",
-        )
-        await _publish(publisher, proposal=proposal, event_type="hitl_resolved")
-    else:
-        await log_audit(
-            db,
-            actor_user_id,
-            "hitl_execution_failed",
-            target=f"hitl_proposal:{proposal.id}",
-            detail=result.message,
-        )
-        await _publish(publisher, proposal=proposal, event_type="hitl_execution_failed")
-
-    return _summary(proposal)
