@@ -1,8 +1,9 @@
 """CRUD operations for CMDB assets."""
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.crud.base import CRUDBase
+from app.crud.base import CRUDBase, contains_pattern
 from app.models.cmdb_asset import CmdbAsset
 
 
@@ -36,6 +37,91 @@ class CRUDCmdbAsset(CRUDBase[CmdbAsset]):
         stmt = self._active_statement().where(CmdbAsset.id.in_(ids))
         result = await db.execute(stmt)
         return list(result.scalars().all())
+
+    async def get_multi_filtered(
+        self,
+        db: AsyncSession,
+        *,
+        search: str | None = None,
+        asset_type: str | None = None,
+        business_system: str | None = None,
+        skip: int = 0,
+        limit: int = 10,
+    ) -> tuple[list[CmdbAsset], int]:
+        """Return a page of active assets for the management page."""
+        stmt = self._active_statement()
+        if search:
+            pattern = contains_pattern(search)
+            stmt = stmt.where(
+                CmdbAsset.hostname.ilike(pattern, escape="\\")
+                | CmdbAsset.ip_address.ilike(pattern, escape="\\")
+                | CmdbAsset.business_system.ilike(pattern, escape="\\")
+            )
+        if asset_type:
+            stmt = stmt.where(CmdbAsset.asset_type == asset_type)
+        if business_system:
+            stmt = stmt.where(CmdbAsset.business_system == business_system)
+
+        count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
+        total = (await db.execute(count_stmt)).scalar_one()
+
+        page_stmt = stmt.order_by(CmdbAsset.id.desc()).offset(skip).limit(limit)
+        assets = list((await db.execute(page_stmt)).scalars().all())
+        return assets, total
+
+    async def get_deleted_multi(
+        self,
+        db: AsyncSession,
+        *,
+        search: str | None = None,
+        skip: int = 0,
+        limit: int = 10,
+    ) -> tuple[list[CmdbAsset], int]:
+        """Return a page of soft-deleted assets for the recycle bin."""
+        stmt = select(CmdbAsset).where(CmdbAsset.is_deleted.is_(True))
+        if search:
+            pattern = contains_pattern(search)
+            stmt = stmt.where(
+                CmdbAsset.hostname.ilike(pattern, escape="\\")
+                | CmdbAsset.ip_address.ilike(pattern, escape="\\")
+            )
+
+        count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
+        total = (await db.execute(count_stmt)).scalar_one()
+
+        page_stmt = stmt.order_by(CmdbAsset.updated_at.desc(), CmdbAsset.id.desc()).offset(skip).limit(limit)
+        assets = list((await db.execute(page_stmt)).scalars().all())
+        return assets, total
+
+    async def restore(self, db: AsyncSession, id: int) -> CmdbAsset | None:
+        """Restore a soft-deleted asset."""
+        stmt = (
+            select(CmdbAsset)
+            .where(CmdbAsset.id == id, CmdbAsset.is_deleted.is_(True))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        asset = (await db.execute(stmt)).scalar_one_or_none()
+        if asset is None:
+            return None
+        asset.is_deleted = False
+        await db.flush()
+        return asset
+
+    async def hard_delete(self, db: AsyncSession, id: int) -> bool:
+        """Permanently remove a soft-deleted asset."""
+        stmt = (
+            select(CmdbAsset)
+            .where(CmdbAsset.id == id, CmdbAsset.is_deleted.is_(True))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        asset = (await db.execute(stmt)).scalar_one_or_none()
+        if asset is None:
+            return False
+        await db.delete(asset)
+        await db.flush()
+        return True
 
 
 cmdb_asset_crud = CRUDCmdbAsset()

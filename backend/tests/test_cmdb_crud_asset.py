@@ -76,3 +76,65 @@ async def test_list_by_ids_preserves_only_requested(db_session: AsyncSession) ->
     assets = await cmdb_asset_crud.list_by_ids(db_session, [first_id, second_id])
 
     assert {a.id for a in assets} == {first_id, second_id}
+
+
+async def test_get_multi_filtered_paginates_and_searches(db_session: AsyncSession) -> None:
+    for i in range(3):
+        await cmdb_asset_crud.create(
+            db_session,
+            {
+                "asset_type": "server",
+                "hostname": f"srv-list-{i}",
+                "ip_address": f"10.0.1.{i}",
+                "business_system": "财务系统" if i == 0 else "",
+            },
+        )
+    await db_session.flush()
+
+    assets, total = await cmdb_asset_crud.get_multi_filtered(db_session, limit=2)
+    assert total == 3
+    assert len(assets) == 2
+
+    filtered, filtered_total = await cmdb_asset_crud.get_multi_filtered(
+        db_session, search="srv-list-0"
+    )
+    assert filtered_total == 1
+    assert filtered[0].hostname == "srv-list-0"
+
+    by_business, by_business_total = await cmdb_asset_crud.get_multi_filtered(
+        db_session, business_system="财务系统"
+    )
+    assert by_business_total == 1
+    assert by_business[0].hostname == "srv-list-0"
+
+
+async def test_soft_delete_restore_and_hard_delete_round_trip(
+    db_session: AsyncSession,
+) -> None:
+    asset = await cmdb_asset_crud.create(
+        db_session,
+        {"asset_type": "server", "hostname": "srv-trash-01", "ip_address": "10.0.2.1"},
+    )
+    await db_session.flush()
+
+    assert await cmdb_asset_crud.soft_delete(db_session, asset.id) is True
+    assert await cmdb_asset_crud.get(db_session, asset.id) is None
+
+    deleted, deleted_total = await cmdb_asset_crud.get_deleted_multi(db_session)
+    assert deleted_total == 1
+    assert deleted[0].id == asset.id
+
+    restored = await cmdb_asset_crud.restore(db_session, asset.id)
+    assert restored is not None
+    assert await cmdb_asset_crud.get(db_session, asset.id) is not None
+
+    assert await cmdb_asset_crud.soft_delete(db_session, asset.id) is True
+    assert await cmdb_asset_crud.hard_delete(db_session, asset.id) is True
+    assert await cmdb_asset_crud.restore(db_session, asset.id) is None
+
+
+async def test_restore_and_hard_delete_return_falsy_for_unknown_id(
+    db_session: AsyncSession,
+) -> None:
+    assert await cmdb_asset_crud.restore(db_session, 999_999) is None
+    assert await cmdb_asset_crud.hard_delete(db_session, 999_999) is False
