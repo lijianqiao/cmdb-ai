@@ -7,10 +7,11 @@
 
 实现流程：
 1. propose_action 先合并顶层 asset_id，再用严格 Pydantic 模型校验动作载荷并检查 CMDB 资产。
-2. 合法提案始终先以 PENDING 追加；只有低风险 notify 可按配置使用真实操作者自动批准并继续执行。
-3. decide_proposal 只复用 CRUD 的审批状态机，不隐式恢复执行，避免人工 API 路径重复执行。
-4. resume_proposal 仅执行 APPROVED 提案；EXECUTED 返回幂等摘要，其他状态明确拒绝。
-5. 对 Agent 和事件发布器只暴露安全摘要，不返回原始 payload，避免设备凭据或未知字段泄露。
+2. 载荷校验失败只回传固定中文原因与字段名，绝不拼接 ValidationError / 原始 input_value。
+3. 合法提案始终先以 PENDING 追加；只有低风险 notify 可按配置使用真实操作者自动批准并继续执行。
+4. decide_proposal 只复用 CRUD 的审批状态机，不隐式恢复执行，避免人工 API 路径重复执行。
+5. resume_proposal 仅执行 APPROVED 提案；EXECUTED 返回幂等摘要，其他状态明确拒绝。
+6. 对 Agent 和事件发布器只暴露安全摘要，不返回原始 payload，避免设备凭据或未知字段泄露。
 """
 
 import asyncio
@@ -144,6 +145,25 @@ async def _publish(
     )
 
 
+def _safe_validation_reason(exc: ValidationError) -> str:
+    """将 Pydantic 校验失败映射为不含原始输入值的中文原因。
+
+    只保留字段名，绝不拼接 ``str(ValidationError)``，避免 ``input_value``
+    把密钥或其它敏感载荷回灌给 Agent 工具结果。
+    """
+    field_names: list[str] = []
+    for error in exc.errors():
+        loc = error.get("loc", ())
+        parts = [str(part) for part in loc]
+        if parts:
+            field_names.append(".".join(parts))
+    if not field_names:
+        return "HITL 动作载荷校验失败"
+    # dict.fromkeys 保序去重，避免同一字段重复出现在拒绝原因里。
+    unique_fields = "、".join(dict.fromkeys(field_names))
+    return f"HITL 动作载荷校验失败，涉及字段：{unique_fields}"
+
+
 def _validated_payload(
     *,
     action_type: ActionType,
@@ -168,7 +188,7 @@ def _validated_payload(
         else:
             raise HitlProposalRejectedError(f"不支持的 HITL 动作类型：{action_type}")
     except ValidationError as exc:
-        raise HitlProposalRejectedError(f"HITL 动作载荷校验失败：{exc}") from exc
+        raise HitlProposalRejectedError(_safe_validation_reason(exc)) from exc
 
     return {**validated, "asset_id": asset_id, "proposal_reason": reason}
 

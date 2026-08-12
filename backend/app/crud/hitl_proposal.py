@@ -5,12 +5,25 @@ EXECUTED (exactly once); PENDING -[reject]-> REJECTED. Only PENDING may be
 decided; only APPROVED may become EXECUTED.
 """
 
+import asyncio
 from datetime import UTC, datetime
+from weakref import WeakValueDictionary
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.hitl_proposal import HitlProposal
+
+_DECISION_LOCKS: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
+
+
+def _decision_lock(proposal_id: int) -> asyncio.Lock:
+    """返回进程内审批锁，补足 SQLite 不支持行锁的测试与单进程场景。"""
+    lock = _DECISION_LOCKS.get(proposal_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _DECISION_LOCKS[proposal_id] = lock
+    return lock
 
 
 class InvalidHitlTransitionError(ValueError):
@@ -77,19 +90,31 @@ class CRUDHitlProposal:
         approve: bool,
         reviewed_by_user_id: int,
     ) -> HitlProposal:
-        """Move a PENDING proposal to APPROVED or REJECTED. Only PENDING may be decided."""
-        proposal = await self.get(db, proposal_id)
-        if proposal is None:
-            raise ValueError(f"HITL proposal {proposal_id} not found")
-        target = "APPROVED" if approve else "REJECTED"
-        if proposal.status != "PENDING":
-            raise InvalidHitlTransitionError(proposal.status, target)
+        """Move a PENDING proposal to APPROVED or REJECTED. Only PENDING may be decided.
 
-        proposal.status = target
-        proposal.reviewed_by_user_id = reviewed_by_user_id
-        proposal.reviewed_at = datetime.now(UTC)
-        await db.flush()
-        return proposal
+        使用进程内锁 + ``SELECT … FOR UPDATE`` 串行化并发审批，避免两个会话都读到
+        PENDING 后互相覆盖（甚至把已 EXECUTED 的行改回 APPROVED/REJECTED）。
+        """
+        target = "APPROVED" if approve else "REJECTED"
+        async with _decision_lock(proposal_id):
+            stmt = (
+                select(HitlProposal)
+                .where(HitlProposal.id == proposal_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            result = await db.execute(stmt)
+            proposal = result.scalar_one_or_none()
+            if proposal is None:
+                raise ValueError(f"HITL proposal {proposal_id} not found")
+            if proposal.status != "PENDING":
+                raise InvalidHitlTransitionError(proposal.status, target)
+
+            proposal.status = target
+            proposal.reviewed_by_user_id = reviewed_by_user_id
+            proposal.reviewed_at = datetime.now(UTC)
+            await db.flush()
+            return proposal
 
     async def mark_executed(self, db: AsyncSession, proposal_id: int) -> HitlProposal:
         """Move an APPROVED proposal to EXECUTED exactly once."""

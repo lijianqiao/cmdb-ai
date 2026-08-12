@@ -19,6 +19,9 @@ from app.agent.tool_dispatch import (
     build_tool_dispatcher,
     root_tool_schemas,
 )
+from app.crud.agent_session import agent_session_crud
+from app.crud.cmdb_asset import cmdb_asset_crud
+from app.models.user import User
 
 
 async def test_propose_remediation_returns_pending_without_payload(
@@ -127,6 +130,46 @@ async def test_propose_remediation_returns_actionable_rejection(
     assert result.control == "rejected"
     assert "asset_id" in result.content
     assert "不一致" in result.content
+
+
+async def test_propose_remediation_rejects_extra_secret_without_echo(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """真实校验路径拒绝额外密钥字段时，工具结果不得回显密钥值。"""
+    session = await agent_session_crud.create(
+        db_session,
+        {"user_id": test_user.id, "title": "HITL 工具拒绝", "status": "active"},
+    )
+    asset = await cmdb_asset_crud.create(
+        db_session,
+        {
+            "asset_type": "server",
+            "hostname": "srv-hitl-tool",
+            "ip_address": "10.0.0.21",
+            "business_system": "测试系统",
+            "subnet_cidr": "",
+        },
+    )
+    await db_session.flush()
+    secret = "SECRET_TOOL_REJECT_TOKEN_Y7"
+
+    result = await hitl_tools.propose_remediation(
+        db_session,
+        session_id=session.id,
+        actor_user_id=test_user.id,
+        proposed_by_agent_id="root-agent",
+        asset_id=asset.id,
+        action_type="notify",
+        payload={"message": "主机离线", "password": secret},
+        reason="额外密钥字段工具回归",
+    )
+
+    assert result.control == "rejected"
+    assert secret not in result.content
+    assert "input_value" not in result.content
+    assert "password" in result.content
+    assert "校验失败" in result.content
 
 
 async def test_propose_remediation_hides_unexpected_exception_detail(

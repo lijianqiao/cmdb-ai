@@ -138,7 +138,7 @@ async def test_propose_rejects_invalid_payload_before_insert(
     """未知动作、额外字段和严格模式类型错误都不得创建提案。"""
     session_id, asset_id = await _make_context(db_session, test_user.id)
 
-    with pytest.raises(HitlProposalRejectedError):
+    with pytest.raises(HitlProposalRejectedError) as exc_info:
         await propose_action(
             db_session,
             session_id=session_id,
@@ -150,6 +150,36 @@ async def test_propose_rejects_invalid_payload_before_insert(
             actor_user_id=test_user.id,
         )
 
+    assert "不得接收" not in str(exc_info.value)
+    assert "input_value" not in str(exc_info.value)
+    assert await _proposal_count(db_session) == 0
+
+
+async def test_propose_rejection_omits_extra_secret_field_value(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """L2 校验拒绝时，额外密钥字段值不得出现在面向 Agent 的错误文本中。"""
+    session_id, asset_id = await _make_context(db_session, test_user.id)
+    secret = "SECRET_PAYLOAD_TOKEN_REJECT_X9"
+
+    with pytest.raises(HitlProposalRejectedError) as exc_info:
+        await propose_action(
+            db_session,
+            session_id=session_id,
+            proposed_by_agent_id=None,
+            action_type="notify",
+            asset_id=asset_id,
+            payload={"message": "告警", "password": secret},
+            reason="额外密钥字段回归",
+            actor_user_id=test_user.id,
+        )
+
+    message = str(exc_info.value)
+    assert secret not in message
+    assert "input_value" not in message
+    assert "password" in message
+    assert "校验失败" in message
     assert await _proposal_count(db_session) == 0
 
 
@@ -387,6 +417,93 @@ async def test_resume_rejects_pending_and_rejected(
             proposal_id=proposal.proposal_id,
             actor_user_id=test_user.id,
         )
+
+
+async def test_concurrent_decide_one_winner_never_clobbers_executed(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """两个独立会话并发 approve/reject 时，只能一人获胜，且不得覆盖 EXECUTED。"""
+    from app.crud.hitl_proposal import InvalidHitlTransitionError
+
+    session_id, asset_id = await _make_context(db_session, test_user.id)
+    proposal = await propose_action(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="notify",
+        asset_id=asset_id,
+        payload={"message": "并发审批"},
+        reason="并发 decide 回归",
+        actor_user_id=test_user.id,
+    )
+    await db_session.commit()
+
+    session_factory = async_sessionmaker(
+        db_engine,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    ready = asyncio.Event()
+    release = asyncio.Event()
+    started = 0
+    start_gate = asyncio.Lock()
+
+    async def decide_and_commit(*, approve: bool) -> ProposalSafeSummary | Exception:
+        """使用独立会话审批；在真正 decide 前同步，制造并发窗口。"""
+        nonlocal started
+        async with session_factory() as independent_session:
+            async with start_gate:
+                started += 1
+                if started == 2:
+                    ready.set()
+            await release.wait()
+            try:
+                summary = await decide_proposal(
+                    independent_session,
+                    proposal_id=proposal.proposal_id,
+                    approve=approve,
+                    reviewed_by_user_id=test_user.id,
+                )
+                await independent_session.commit()
+                return summary
+            except Exception as exc:
+                await independent_session.rollback()
+                return exc
+
+    approve_task = asyncio.create_task(decide_and_commit(approve=True))
+    reject_task = asyncio.create_task(decide_and_commit(approve=False))
+    await asyncio.wait_for(ready.wait(), timeout=1)
+    release.set()
+    approve_result, reject_result = await asyncio.gather(approve_task, reject_task)
+
+    outcomes = [approve_result, reject_result]
+    successes = [item for item in outcomes if isinstance(item, ProposalSafeSummary)]
+    failures = [item for item in outcomes if isinstance(item, InvalidHitlTransitionError)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert successes[0].status in {"APPROVED", "REJECTED"}
+
+    stored = await hitl_proposal_crud.get(db_session, proposal.proposal_id)
+    assert stored is not None
+    assert stored.status == successes[0].status
+    assert stored.status != "EXECUTED"
+
+    if stored.status == "APPROVED":
+        executed = await hitl_proposal_crud.mark_executed(db_session, proposal.proposal_id)
+        await db_session.commit()
+        assert executed.status == "EXECUTED"
+        with pytest.raises(InvalidHitlTransitionError):
+            await hitl_proposal_crud.decide(
+                db_session,
+                proposal.proposal_id,
+                approve=False,
+                reviewed_by_user_id=test_user.id,
+            )
+        final = await hitl_proposal_crud.get(db_session, proposal.proposal_id)
+        assert final is not None
+        assert final.status == "EXECUTED"
 
 
 async def test_concurrent_resume_executes_successful_action_once(
