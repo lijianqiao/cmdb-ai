@@ -251,3 +251,156 @@ async def test_model_capability_mismatch_is_rejected_before_http_request(
                 await chat(model_key, [ChatMessage(role="user", content="hi")], client=client)
             else:
                 await embed(model_key, ["hi"], client=client)
+
+
+def _sse_response(*events: dict[str, Any] | str) -> httpx.Response:
+    """构造 OpenAI 兼容 SSE 响应（最后自动追加 data: [DONE]）。"""
+    lines: list[str] = []
+    for event in events:
+        if isinstance(event, str):
+            lines.append(f"data: {event}")
+        else:
+            lines.append(f"data: {json.dumps(event, ensure_ascii=False)}")
+        lines.append("")
+    lines.append("data: [DONE]")
+    lines.append("")
+    return httpx.Response(
+        200,
+        content="\n".join(lines).encode("utf-8"),
+        headers={"content-type": "text/event-stream"},
+    )
+
+
+async def test_chat_stream_invokes_on_delta_and_returns_aggregated_result() -> None:
+    """stream=True 时按 token 回调 on_delta，最终仍返回完整 ChatResult。"""
+    captured: dict[str, Any] = {}
+    deltas: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["parsed"] = json.loads(request.content)
+        return _sse_response(
+            {
+                "choices": [{"delta": {"content": "你"}, "index": 0}],
+            },
+            {
+                "choices": [{"delta": {"content": "好"}, "index": 0}],
+            },
+            {
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 2},
+            },
+        )
+
+    async def on_delta(text: str) -> None:
+        deltas.append(text)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://fake") as fake_client:
+        result = await chat(
+            "local-chat",
+            [ChatMessage(role="user", content="hi")],
+            client=fake_client,
+            stream=True,
+            on_delta=on_delta,
+        )
+
+    assert captured["parsed"]["stream"] is True
+    assert captured["parsed"]["stream_options"] == {"include_usage": True}
+    assert deltas == ["你", "好"]
+    assert result.content == "你好"
+    assert result.tool_calls == []
+    assert result.finish_reason == "stop"
+    assert result.prompt_tokens == 4
+    assert result.completion_tokens == 2
+
+
+async def test_chat_stream_accumulates_tool_call_deltas() -> None:
+    """流式 tool_calls 按 index 拼装 arguments，不触发文本 on_delta。"""
+    deltas: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _sse_response(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "kb_grep", "arguments": ""},
+                                }
+                            ]
+                        },
+                        "index": 0,
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": '{"pattern":'},
+                                }
+                            ]
+                        },
+                        "index": 0,
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": ' "重启"}'},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                        "index": 0,
+                    }
+                ],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 6},
+            },
+        )
+
+    async def on_delta(text: str) -> None:
+        deltas.append(text)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://fake") as fake_client:
+        result = await chat(
+            "local-chat",
+            [ChatMessage(role="user", content="查重启")],
+            client=fake_client,
+            stream=True,
+            on_delta=on_delta,
+        )
+
+    assert deltas == []
+    assert result.content is None
+    assert result.finish_reason == "tool_calls"
+    assert result.tool_calls == [
+        ToolCall(id="call_1", name="kb_grep", arguments='{"pattern": "重启"}')
+    ]
+    assert result.prompt_tokens == 8
+    assert result.completion_tokens == 6
+
+
+async def test_chat_stream_raises_on_non_200() -> None:
+    transport = httpx.MockTransport(lambda request: httpx.Response(500, text="boom"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://fake") as fake_client:
+        with pytest.raises(LlmRequestError):
+            await chat(
+                "local-chat",
+                [ChatMessage(role="user", content="hi")],
+                client=fake_client,
+                stream=True,
+            )

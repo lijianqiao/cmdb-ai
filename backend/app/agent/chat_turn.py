@@ -8,9 +8,11 @@
 实现流程：
 1. 先 append_user_message，保证即使后续模型失败，用户原话仍可被一次 commit 保留。
 2. 构造 WsHitlEventPublisher + root dispatcher（可注入替身便于单测）；工具 Schema 用 root_tool_schemas。
-3. 不改 loop.py：包装 chat_fn——有 tool_calls 时广播 tool_call（仅 id/name）；无工具且有正文时
-   按固定字数切伪流式 assistant_delta（末片 done=true）。
-4. 包装 dispatch_tool 只做透传；pending_approval 的 hitl_* 仍由 dispatcher 内 publisher 发出，避免重复解析。
+3. 不改 loop.py：包装 chat_fn——默认走 llm.chat(stream=True)：
+   - 文本 token 经 on_delta 实时 broadcast(assistant_delta, done=false)；
+   - 回合结束若有 tool_calls 则广播 tool_call（仅 id/name）；
+   - 无工具且有正文：若已推过增量则再推 done=true 空片；若 mock 未走流式则整段一次 done=true。
+4. 包装 dispatch_tool 只做透传；pending_approval 的 hitl_* 仍由 dispatcher 内 publisher 发出。
 5. 调用既有 run_loop，注入中文 ROOT_OPS_SYSTEM_PROMPT；model_key 使用 MODELS 登记键 local-chat。
 6. 正常/early_exit 后广播 turn_done；异常广播中文 error（无堆栈）后原样抛出，由 API 层 commit。
 """
@@ -35,27 +37,8 @@ ROOT_OPS_SYSTEM_PROMPT = """你是企业统一运维助手（OpsAssistant）。
 禁止杜撰「已执行成功」或伪造执行输出。
 回答简洁、可操作；涉及风险操作时明确说明需要审批。"""
 
-# 伪流式切分：落在计划建议的 40–80 字区间
-_ASSISTANT_DELTA_CHUNK_SIZE = 60
-
 # settings 无专用 Agent 模型键；MODELS 默认 chat 登记键为 local-chat
 _DEFAULT_MODEL_KEY = "local-chat"
-
-
-def _chunk_text(text: str, size: int = _ASSISTANT_DELTA_CHUNK_SIZE) -> list[str]:
-    """
-    将最终助手正文切成伪流式片段。
-
-    Args:
-        text: 完整助手回复
-        size: 每片最大字数
-
-    Returns:
-        非空文本片列表；空串返回空列表
-    """
-    if not text:
-        return []
-    return [text[i : i + size] for i in range(0, len(text), size)]
 
 
 async def run_chat_turn(
@@ -79,25 +62,20 @@ async def run_chat_turn(
         actor_user_id: 当前用户 ID（绑进 root dispatcher）
         content: 用户消息正文
         chat_fn: 可选注入的模型调用（单测 mock；默认 llm.chat）
-        dispatch_tool: 可选注入的工具调度（单测 mock；默认 root dispatcher）
-        hub_instance: 可选注入的 WS Hub（单测隔离；默认模块单例）
-        publisher: 可选 HITL 发布器（须与 hub 一致；默认按 hub 构造）
-        model_key: MODELS 登记键；默认 local-chat
+        dispatch_tool: 可选工具调度
+        hub_instance: 可选 WS hub
+        publisher: 可选 HITL 发布器
+        model_key: 可选模型键
 
     Returns:
-        run_loop 的终止结果
-
-    Raises:
-        Exception: 模型或调度异常在广播 error 后原样抛出
+        LoopOutcome
     """
     active_hub = hub_instance if hub_instance is not None else hub
-    active_publisher = publisher
-    if active_publisher is None:
-        active_publisher = (
-            WsHitlEventPublisher(hub=hub_instance)
-            if hub_instance is not None
-            else WsHitlEventPublisher()
-        )
+    active_publisher = (
+        publisher
+        if publisher is not None
+        else WsHitlEventPublisher(hub=active_hub)
+    )
 
     await append_user_message(db, session_id, content)
 
@@ -120,8 +98,35 @@ async def run_chat_turn(
         messages: list[Any],
         **kwargs: Any,
     ) -> ChatResult:
-        """在模型返回后推送 tool_call 或 assistant_delta。"""
-        result = await resolved_chat(mk, messages, **kwargs)
+        """真 token 流推送 assistant_delta；工具轮广播 tool_call。"""
+        streamed_text = False
+
+        async def on_delta(text: str) -> None:
+            nonlocal streamed_text
+            if not text:
+                return
+            streamed_text = True
+            await active_hub.broadcast(
+                session_id,
+                AgentWsServerMessage(
+                    type="assistant_delta",
+                    payload={"text": text, "done": False},
+                ),
+            )
+
+        # 默认开启流式；注入的 mock 若忽略 stream/on_delta，仍返回整段 ChatResult
+        # stream/on_delta 放在 kwargs 之后，避免被调用方透传覆盖
+        call_kwargs = dict(kwargs)
+        call_kwargs.pop("stream", None)
+        call_kwargs.pop("on_delta", None)
+        result = await resolved_chat(
+            mk,
+            messages,
+            stream=True,
+            on_delta=on_delta,
+            **call_kwargs,
+        )
+
         if result.tool_calls:
             for tool_call in result.tool_calls:
                 await active_hub.broadcast(
@@ -132,14 +137,21 @@ async def run_chat_turn(
                     ),
                 )
         elif result.content:
-            chunks = _chunk_text(result.content)
-            last_index = len(chunks) - 1
-            for index, chunk in enumerate(chunks):
+            if streamed_text:
                 await active_hub.broadcast(
                     session_id,
                     AgentWsServerMessage(
                         type="assistant_delta",
-                        payload={"text": chunk, "done": index == last_index},
+                        payload={"text": "", "done": True},
+                    ),
+                )
+            else:
+                # mock / 非流式 chat_fn：整段一次推送并标记完成
+                await active_hub.broadcast(
+                    session_id,
+                    AgentWsServerMessage(
+                        type="assistant_delta",
+                        payload={"text": result.content, "done": True},
                     ),
                 )
         return result

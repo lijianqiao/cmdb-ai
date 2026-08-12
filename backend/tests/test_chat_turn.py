@@ -128,6 +128,60 @@ async def test_chat_turn_broadcasts_tool_call_then_delta_then_turn_done(
     assert turn_done["payload"]["reason"] == "final_answer"
 
 
+async def test_chat_turn_forwards_on_delta_tokens_then_done(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """chat_fn 调用 on_delta 时逐片推送 assistant_delta，最后补 done=true 空片。"""
+    from app.agent.chat_turn import run_chat_turn
+
+    session_id = await _make_session(db_session, test_user.id)
+    test_hub = AgentWsHub()
+    ws = FakeWebSocket()
+    await test_hub.connect(session_id, ws)  # type: ignore[arg-type]
+
+    async def streaming_chat(
+        model_key: str, messages: list[ChatMessage], **kwargs: Any
+    ) -> ChatResult:
+        on_delta = kwargs.get("on_delta")
+        assert kwargs.get("stream") is True
+        assert on_delta is not None
+        await on_delta("片")
+        await on_delta("段")
+        return ChatResult(
+            content="片段",
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=3,
+            completion_tokens=2,
+        )
+
+    async def unused_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
+        raise AssertionError(f"不应调用工具: {name}")
+
+    outcome = await run_chat_turn(
+        db_session,
+        session_id=session_id,
+        actor_user_id=test_user.id,
+        content="流式测试",
+        chat_fn=streaming_chat,
+        dispatch_tool=unused_dispatch,
+        hub_instance=test_hub,
+    )
+    await db_session.commit()
+
+    assert outcome.reason == "final_answer"
+    assert outcome.final_answer == "片段"
+
+    delta_events = [item for item in ws.sent if item["type"] == "assistant_delta"]
+    assert [item["payload"] for item in delta_events] == [
+        {"text": "片", "done": False},
+        {"text": "段", "done": False},
+        {"text": "", "done": True},
+    ]
+    assert ws.sent[-1]["type"] == "turn_done"
+
+
 async def test_chat_turn_pending_approval_emits_hitl_pending_without_secrets(
     db_session: AsyncSession,
     test_user: User,
