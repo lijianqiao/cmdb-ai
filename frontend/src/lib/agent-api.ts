@@ -72,6 +72,16 @@ export async function getAgentSession(sessionId: number): Promise<AgentSession> 
 }
 
 /**
+ * 硬删除会话（仅所有者；关联消息等由后端 CASCADE）。
+ *
+ * Args:
+ *   sessionId: 会话 ID
+ */
+export async function deleteAgentSession(sessionId: number): Promise<void> {
+  await api.delete(`/agent/sessions/${sessionId}`)
+}
+
+/**
  * 列出会话根 transcript 消息（非分页数组）。
  *
  * Args:

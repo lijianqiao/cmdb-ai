@@ -6,6 +6,7 @@
 import { useEffect, useRef } from "react"
 
 import { HitlApprovalCard } from "@/components/ops-assistant/HitlApprovalCard"
+import { ChatMarkdown } from "@/components/ops-assistant/ChatMarkdown"
 import { BubbleChatIcon } from "@/lib/icons"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -47,10 +48,12 @@ function MessageRow({ item }: { item: OpsChatItem }) {
     case "assistant":
       return (
         <div className="flex justify-start">
-          <div className="max-w-[85%] rounded-2xl border bg-card px-3 py-2 text-sm text-card-foreground">
-            <p className="whitespace-pre-wrap break-words">
-              {item.content || (item.streaming ? "…" : "")}
-            </p>
+          <div className="max-w-[85%] rounded-2xl border bg-card px-3 py-2 text-card-foreground">
+            {item.content ? (
+              <ChatMarkdown content={item.content} />
+            ) : item.streaming ? (
+              <p className="text-sm text-muted-foreground">…</p>
+            ) : null}
             {item.streaming ? (
               <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
                 <Spinner className="size-3" />

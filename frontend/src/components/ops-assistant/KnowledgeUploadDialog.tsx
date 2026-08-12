@@ -1,6 +1,7 @@
 /** 知识库文档上传对话框
 
  * 打开时拉取分类列表；仅有 upload 无 read 时 categories 会 403，需友好提示。
+ * 有 knowledge:manage（含超管）时可在本对话框内联新建分类。
  * 表单字段与后端一致：category_code / title / file（.md/.txt）。
  */
 
@@ -37,7 +38,10 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Spinner } from "@/components/ui/spinner"
+import { usePermission } from "@/hooks/use-permission"
+import { PERMISSIONS } from "@/lib/constants"
 import {
+  createCategory,
   listCategories,
   uploadDocument,
   type KnowledgeCategory,
@@ -55,6 +59,17 @@ const schema = z.object({
 })
 
 type FormValues = z.infer<typeof schema>
+
+const createCategorySchema = z.object({
+  code: z
+    .string()
+    .min(1, "请输入分类代码")
+    .max(50, "代码最多 50 个字符")
+    .regex(/^[a-zA-Z0-9_-]+$/, "代码仅允许字母、数字、下划线与连字符"),
+  name: z.string().min(1, "请输入分类名称").max(100, "名称最多 100 个字符"),
+})
+
+type CreateCategoryValues = z.infer<typeof createCategorySchema>
 
 interface KnowledgeUploadDialogProps {
   open: boolean
@@ -84,15 +99,20 @@ function readErrorMessage(error: unknown, fallback: string): string {
 }
 
 /**
- * 知识库上传对话框：分类 + 标题 + 文件。
+ * 知识库上传对话框：分类（可内联新建）+ 标题 + 文件。
  */
 export function KnowledgeUploadDialog({
   open,
   onOpenChange,
 }: KnowledgeUploadDialogProps) {
+  const { hasPermission } = usePermission()
+  const canManageCategory = hasPermission(PERMISSIONS.KNOWLEDGE_MANAGE)
+
   const [categories, setCategories] = useState<KnowledgeCategory[]>([])
   const [categoriesLoading, setCategoriesLoading] = useState(false)
   const [categoriesForbidden, setCategoriesForbidden] = useState(false)
+  const [showCreateCategory, setShowCreateCategory] = useState(false)
+  const [creatingCategory, setCreatingCategory] = useState(false)
 
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
@@ -101,6 +121,11 @@ export function KnowledgeUploadDialog({
       title: "",
       file: undefined,
     },
+  })
+
+  const createForm = useForm<CreateCategoryValues>({
+    resolver: zodResolver(createCategorySchema),
+    defaultValues: { code: "", name: "" },
   })
 
   const categoryItems = useMemo(
@@ -120,14 +145,20 @@ export function KnowledgeUploadDialog({
       title: "",
       file: undefined,
     })
+    createForm.reset({ code: "", name: "" })
     setCategories([])
     setCategoriesForbidden(false)
+    setShowCreateCategory(false)
     setCategoriesLoading(true)
 
     void listCategories()
       .then((rows) => {
         setCategories(rows)
         setCategoriesForbidden(false)
+        // 无分类且有管理权限时，默认展开新建区，减少一次点击
+        if (rows.length === 0 && canManageCategory) {
+          setShowCreateCategory(true)
+        }
       })
       .catch((error: unknown) => {
         const status = isAxiosError(error) ? error.response?.status : undefined
@@ -142,7 +173,32 @@ export function KnowledgeUploadDialog({
       .finally(() => {
         setCategoriesLoading(false)
       })
-  }, [open, form])
+  }, [open, form, createForm, canManageCategory])
+
+  const handleCreateCategory = async (
+    data: CreateCategoryValues,
+  ): Promise<void> => {
+    if (creatingCategory) return
+    setCreatingCategory(true)
+    try {
+      const created = await createCategory({
+        code: data.code.trim(),
+        name: data.name.trim(),
+      })
+      setCategories((prev) => {
+        if (prev.some((row) => row.code === created.code)) return prev
+        return [...prev, created]
+      })
+      form.setValue("category_code", created.code, { shouldValidate: true })
+      createForm.reset({ code: "", name: "" })
+      setShowCreateCategory(false)
+      toast.success("分类已创建")
+    } catch (error: unknown) {
+      toast.error(readErrorMessage(error, "创建分类失败"))
+    } finally {
+      setCreatingCategory(false)
+    }
+  }
 
   const handleSubmit = async (data: FormValues): Promise<void> => {
     try {
@@ -182,7 +238,23 @@ export function KnowledgeUploadDialog({
               name="category_code"
               render={({ field, fieldState }) => (
                 <Field data-invalid={fieldState.invalid}>
-                  <FieldLabel htmlFor="knowledge-category">分类</FieldLabel>
+                  <div className="flex items-center justify-between gap-2">
+                    <FieldLabel htmlFor="knowledge-category">分类</FieldLabel>
+                    {canManageCategory && !categoriesForbidden && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        disabled={categoriesLoading}
+                        onClick={() =>
+                          setShowCreateCategory((prev) => !prev)
+                        }
+                      >
+                        {showCreateCategory ? "收起新建" : "新建分类"}
+                      </Button>
+                    )}
+                  </div>
                   <Select
                     items={categoryItems}
                     value={field.value || null}
@@ -218,7 +290,9 @@ export function KnowledgeUploadDialog({
                     <FieldDescription>正在加载分类…</FieldDescription>
                   ) : categories.length === 0 ? (
                     <FieldDescription>
-                      暂无可用分类，请先由管理员创建。
+                      {canManageCategory
+                        ? "暂无分类，请在下方新建后再上传。"
+                        : "暂无可用分类，请先由管理员创建。"}
                     </FieldDescription>
                   ) : (
                     <FieldDescription>
@@ -229,6 +303,66 @@ export function KnowledgeUploadDialog({
                 </Field>
               )}
             />
+
+            {canManageCategory &&
+              !categoriesForbidden &&
+              showCreateCategory && (
+                <div className="flex flex-col gap-3 rounded-lg border border-dashed p-3">
+                  <p className="text-sm font-medium">新建分类</p>
+                  <Controller
+                    control={createForm.control}
+                    name="code"
+                    render={({ field, fieldState }) => (
+                      <Field data-invalid={fieldState.invalid}>
+                        <FieldLabel htmlFor="knowledge-category-code">
+                          代码
+                        </FieldLabel>
+                        <Input
+                          id="knowledge-category-code"
+                          placeholder="例如 sop"
+                          aria-invalid={fieldState.invalid}
+                          {...field}
+                        />
+                        <FieldDescription>
+                          字母、数字、下划线或连字符
+                        </FieldDescription>
+                        <FieldError errors={[fieldState.error]} />
+                      </Field>
+                    )}
+                  />
+                  <Controller
+                    control={createForm.control}
+                    name="name"
+                    render={({ field, fieldState }) => (
+                      <Field data-invalid={fieldState.invalid}>
+                        <FieldLabel htmlFor="knowledge-category-name">
+                          名称
+                        </FieldLabel>
+                        <Input
+                          id="knowledge-category-name"
+                          placeholder="例如 故障处理 SOP"
+                          aria-invalid={fieldState.invalid}
+                          {...field}
+                        />
+                        <FieldError errors={[fieldState.error]} />
+                      </Field>
+                    )}
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={creatingCategory}
+                    onClick={() =>
+                      void createForm.handleSubmit(handleCreateCategory)()
+                    }
+                  >
+                    {creatingCategory && (
+                      <Spinner data-icon="inline-start" />
+                    )}
+                    保存分类
+                  </Button>
+                </div>
+              )}
 
             <Controller
               control={form.control}

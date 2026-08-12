@@ -36,5 +36,23 @@ class CRUDAgentSession(CRUDBase[AgentSession]):
         result = await db.execute(stmt)
         return list(result.scalars().all()), total
 
+    async def hard_delete(self, db: AsyncSession, session_id: int) -> bool:
+        """
+        物理删除会话（关联消息/HITL/registry/trace 依赖库级 CASCADE）。
+
+        Args:
+            db: 数据库会话
+            session_id: 会话主键
+
+        Returns:
+            找到并删除返回 True，否则 False
+        """
+        session = await self.get(db, session_id)
+        if session is None:
+            return False
+        await db.delete(session)
+        await db.flush()
+        return True
+
 
 agent_session_crud = CRUDAgentSession()

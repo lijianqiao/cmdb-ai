@@ -176,3 +176,55 @@ async def test_list_messages_root_transcript_only(
         headers=other_headers,
     )
     assert denied.status_code == 404
+
+
+async def test_delete_session_hard_and_cascade(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    test_role: Role,
+    auth_headers: Headers,
+    login_user,
+) -> None:
+    """所有者可硬删会话；消息级联删除；非所有者 404。"""
+    session = await agent_session_crud.create(
+        db_session,
+        {"user_id": test_user.id, "title": "待删除", "status": "active"},
+    )
+    await db_session.flush()
+    await agent_message_crud.append(
+        db_session,
+        session_id=session.id,
+        role="user",
+        content="将被级联删除",
+        agent_id=None,
+    )
+    await db_session.commit()
+    session_id = session.id
+
+    other = await _other_user(db_session, test_role)
+    other_headers = await login_user(other.username, "testpassword123")
+    forbidden = await client.delete(
+        f"/api/v1/agent/sessions/{session_id}",
+        headers=other_headers,
+    )
+    assert forbidden.status_code == 404
+
+    deleted = await client.delete(
+        f"/api/v1/agent/sessions/{session_id}",
+        headers=auth_headers,
+    )
+    assert deleted.status_code == 200, deleted.text
+
+    missing = await client.get(
+        f"/api/v1/agent/sessions/{session_id}",
+        headers=auth_headers,
+    )
+    assert missing.status_code == 404
+
+    messages = await agent_message_crud.list_for_agent(
+        db_session,
+        session_id,
+        agent_id=None,
+    )
+    assert messages == []

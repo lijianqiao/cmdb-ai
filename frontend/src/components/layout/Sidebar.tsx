@@ -422,7 +422,7 @@ function SidebarBrand({ collapsed }: { collapsed: boolean }) {
     >
       <Shield02Icon className="size-6 shrink-0 text-primary" />
       {!collapsed && (
-        <span className="truncate text-lg font-semibold">权限管理系统</span>
+        <span className="truncate text-lg font-semibold">运维管理系统</span>
       )}
     </div>
   )
@@ -447,7 +447,7 @@ export function Sidebar({ open, onOpenChange, collapsed }: SidebarProps) {
           <SheetHeader className="border-b">
             <SheetTitle className="flex items-center gap-2">
               <Shield02Icon className="size-5 text-primary" />
-              权限管理系统
+              运维管理系统
             </SheetTitle>
           </SheetHeader>
           <NavList collapsed={false} onNavigate={() => onOpenChange(false)} />

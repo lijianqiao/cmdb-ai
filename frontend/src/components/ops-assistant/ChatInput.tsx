@@ -1,6 +1,6 @@
 /** 运维助手输入框
 
- * InputGroup + Textarea；Enter 发送、Shift+Enter 换行。
+ * InputGroup：Textarea 与发送按钮同一行；Enter 发送、Shift+Enter 换行。
  */
 
 import { useState, type KeyboardEvent } from "react"
@@ -22,7 +22,7 @@ export interface ChatInputProps {
 }
 
 /**
- * 聊天输入与发送按钮。
+ * 聊天输入与发送按钮（单行布局）。
  *
  * Args:
  *   disabled: 禁用输入（无会话或发送中由页面传入）
@@ -52,17 +52,18 @@ export function ChatInput({
   }
 
   return (
-    <InputGroup className="h-auto items-stretch border border-border bg-background">
+    <InputGroup className="h-auto min-h-9 items-end border border-border bg-background">
       <InputGroupTextarea
         value={value}
         onChange={(event) => setValue(event.target.value)}
         onKeyDown={handleKeyDown}
         placeholder={placeholder}
         disabled={disabled}
-        rows={3}
+        rows={1}
+        className="max-h-32 min-h-9 py-2"
         aria-label="消息输入"
       />
-      <InputGroupAddon align="block-end" className="justify-end border-t">
+      <InputGroupAddon align="inline-end" className="shrink-0 self-end py-1.5">
         <InputGroupButton
           type="button"
           variant="default"

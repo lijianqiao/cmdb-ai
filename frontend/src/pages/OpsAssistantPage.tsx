@@ -1,18 +1,19 @@
 /** 运维助手 Chat 页
 
  * 左侧会话列表 + 右侧消息/输入；会话 REST + useOpsChat（含 WS）。
- * 有 knowledge:upload 时展示知识库上传入口。
+ * 有 knowledge:upload 时展示知识库上传入口；会话可硬删除。
  */
 
 import { useCallback, useEffect, useState } from "react"
 import dayjs from "dayjs"
 import { toast } from "sonner"
 
-import { AiChat01Icon, PlusSignIcon, Upload01Icon } from "@/lib/icons"
+import { AiChat01Icon, Delete02Icon, PlusSignIcon, Upload01Icon } from "@/lib/icons"
 import { ChatInput } from "@/components/ops-assistant/ChatInput"
 import { ChatMessageList } from "@/components/ops-assistant/ChatMessageList"
 import { KnowledgeUploadDialog } from "@/components/ops-assistant/KnowledgeUploadDialog"
 import { MonitorAlertBanner } from "@/components/ops-assistant/MonitorAlertBanner"
+import { ConfirmDialog } from "@/components/common/ConfirmDialog"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -29,7 +30,11 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { useOpsChat } from "@/hooks/use-ops-chat"
 import { usePermission } from "@/hooks/use-permission"
-import { createAgentSession, listAgentSessions } from "@/lib/agent-api"
+import {
+  createAgentSession,
+  deleteAgentSession,
+  listAgentSessions,
+} from "@/lib/agent-api"
 import { PERMISSIONS } from "@/lib/constants"
 import { cn } from "@/lib/utils"
 import type { AgentSession } from "@/types/agent"
@@ -55,6 +60,7 @@ export function OpsAssistantPage() {
   const [creating, setCreating] = useState(false)
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null)
   const [uploadOpen, setUploadOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<AgentSession | null>(null)
   const canUploadKnowledge = hasPermission(PERMISSIONS.KNOWLEDGE_UPLOAD)
 
   const {
@@ -111,6 +117,26 @@ export function OpsAssistantPage() {
     }
   }
 
+  const handleDeleteConfirm = async (): Promise<boolean> => {
+    if (deleteTarget == null) return false
+    const deletingId = deleteTarget.id
+    try {
+      await deleteAgentSession(deletingId)
+      toast.success("会话已删除")
+      const remaining = sessions.filter((row) => row.id !== deletingId)
+      setSessions(remaining)
+      setSelectedSessionId((current) => {
+        if (current !== deletingId) return current
+        return remaining[0]?.id ?? null
+      })
+      setDeleteTarget(null)
+      return true
+    } catch {
+      toast.error("删除会话失败")
+      return false
+    }
+  }
+
   const connectionLabel = wsStatusLabel(reconnecting, wsStatus)
 
   return (
@@ -147,6 +173,18 @@ export function OpsAssistantPage() {
       />
 
       <KnowledgeUploadDialog open={uploadOpen} onOpenChange={setUploadOpen} />
+
+      <ConfirmDialog
+        open={deleteTarget != null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null)
+        }}
+        title="确认删除会话"
+        description={`确定要删除「${
+          deleteTarget?.title || `会话 #${deleteTarget?.id ?? ""}`
+        }」吗？消息与相关记录将一并永久删除，不可恢复。`}
+        onConfirm={handleDeleteConfirm}
+      />
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 md:flex-row">
         <aside className="flex w-full shrink-0 flex-col gap-2 rounded-xl border bg-card md:w-64">
@@ -185,23 +223,43 @@ export function OpsAssistantPage() {
                 {sessions.map((session) => {
                   const active = session.id === selectedSessionId
                   return (
-                    <Button
+                    <div
                       key={session.id}
-                      type="button"
-                      variant={active ? "secondary" : "ghost"}
                       className={cn(
-                        "h-auto w-full flex-col items-start gap-0.5 px-3 py-2 text-left",
+                        "group flex items-stretch gap-0.5 rounded-lg",
                         active && "bg-muted",
                       )}
-                      onClick={() => setSelectedSessionId(session.id)}
                     >
-                      <span className="w-full truncate text-sm font-medium">
-                        {session.title || `会话 #${session.id}`}
-                      </span>
-                      <span className="text-xs font-normal text-muted-foreground">
-                        {dayjs(session.updated_at).format("MM-DD HH:mm")}
-                      </span>
-                    </Button>
+                      <Button
+                        type="button"
+                        variant={active ? "secondary" : "ghost"}
+                        className={cn(
+                          "h-auto min-w-0 flex-1 flex-col items-start gap-0.5 px-3 py-2 text-left",
+                          active && "bg-transparent hover:bg-transparent",
+                        )}
+                        onClick={() => setSelectedSessionId(session.id)}
+                      >
+                        <span className="w-full truncate text-sm font-medium">
+                          {session.title || `会话 #${session.id}`}
+                        </span>
+                        <span className="text-xs font-normal text-muted-foreground">
+                          {dayjs(session.updated_at).format("MM-DD HH:mm")}
+                        </span>
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        className="mt-1 mr-1 shrink-0 text-muted-foreground opacity-70 hover:text-destructive group-hover:opacity-100"
+                        aria-label={`删除会话 ${session.title || session.id}`}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setDeleteTarget(session)
+                        }}
+                      >
+                        <Delete02Icon />
+                      </Button>
+                    </div>
                   )
                 })}
               </div>

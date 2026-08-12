@@ -78,9 +78,9 @@ export function LoginPage() {
       <div className="hidden flex-1 flex-col justify-center bg-primary p-12 text-primary-foreground md:flex">
         <div className="mx-auto max-w-md">
           <Shield02Icon className="mb-6 size-12" />
-          <h1 className="text-3xl font-bold">权限管理系统</h1>
+          <h1 className="text-3xl font-bold">运维管理系统</h1>
           <p className="mt-4 text-lg text-primary-foreground/80">
-            基于 RBAC 模型的精细化权限管控平台
+            基于 AI 的运维管理系统
           </p>
           <div className="mt-8 flex flex-col gap-3 text-sm text-primary-foreground/70">
             <p>• 用户、角色、权限全生命周期管理</p>

@@ -3,14 +3,15 @@
 @Email: lijianqiao2906@live.com
 @FileName: agent_sessions.py
 @DateTime: 2026-08-12 12:43
-@Docs: Agent 会话 REST API：创建、列表、详情、历史与发消息触发 chat turn。
+@Docs: Agent 会话 REST API：创建、列表、详情、硬删除、历史与发消息触发 chat turn。
 
 实现流程：
 1. 全部端点走 get_current_user 登录校验；Chat 页面对登录用户开放，无额外权限码。
 2. 创建会话时写入当前用户 user_id，status 固定为 active；列表复用 list_for_user 分页。
-3. 详情与消息历史先查会话，非所有者或不存在一律 404，避免枚举他人会话 ID。
-4. 消息历史优先用 list_for_agent(..., agent_id=None) 只返回根 transcript，按 id 升序。
-5. POST messages：归属校验后调用 run_chat_turn（复用 run_loop + root dispatcher + WS 推送），
+3. 详情 / 删除 / 消息历史先查会话，非所有者或不存在一律 404，避免枚举他人会话 ID。
+4. DELETE 为物理删除；消息、HITL、registry、trace 依赖库级 ON DELETE CASCADE。
+5. 消息历史优先用 list_for_agent(..., agent_id=None) 只返回根 transcript，按 id 升序。
+6. POST messages：归属校验后调用 run_chat_turn（复用 run_loop + root dispatcher + WS 推送），
    整轮结束后一次 commit；异常时仍尽量 commit 已写入的用户消息。
 """
 
@@ -126,6 +127,27 @@ async def get_session(
     """获取会话详情；非所有者返回 404。"""
     session = await _owned_session_or_404(db, session_id, current_user.id)
     return success_response(AgentSessionResponse.model_validate(session))
+
+
+@router.delete(
+    "/sessions/{session_id}",
+    response_model=ResponseEnvelope[None],
+)
+async def delete_session(
+    session_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ResponseEnvelope[None]:
+    """硬删除当前用户拥有的会话；非所有者或不存在返回 404。"""
+    await _owned_session_or_404(db, session_id, current_user.id)
+    deleted = await agent_session_crud.hard_delete(db, session_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="会话不存在",
+        )
+    await db.commit()
+    return success_response(None, message="删除成功")
 
 
 @router.get(

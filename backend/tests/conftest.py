@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -68,6 +69,14 @@ async def db_engine() -> AsyncIterator[AsyncEngine]:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+
+    # SQLite 默认关闭外键；打开后 ON DELETE CASCADE 才与 Postgres 行为一致
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection: object, _: object) -> None:
+        cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
 

@@ -39,6 +39,34 @@ export async function listCategories(): Promise<KnowledgeCategory[]> {
   return response.data.data
 }
 
+/** 创建分类请求体 */
+export interface KnowledgeCategoryCreate {
+  code: string
+  name: string
+  description?: string
+}
+
+/**
+ * 创建知识库分类。
+ *
+ * 需要 `knowledge:manage`（超管可绕过）。
+ *
+ * Args:
+ *   body: code / name / 可选 description
+ *
+ * Returns:
+ *   新建分类
+ */
+export async function createCategory(
+  body: KnowledgeCategoryCreate,
+): Promise<KnowledgeCategory> {
+  const response = await api.post<ApiResponse<KnowledgeCategory>>(
+    "/knowledge/categories",
+    body,
+  )
+  return response.data.data
+}
+
 /**
  * 上传知识文档（multipart）。
  *
