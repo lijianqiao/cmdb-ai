@@ -9,6 +9,8 @@ export const ROUTES = {
   ROLES_TRASH: "/roles/trash",
   PERMISSIONS: "/permissions",
   PERMISSIONS_TRASH: "/permissions/trash",
+  CMDB: "/cmdb",
+  CMDB_TRASH: "/cmdb/trash",
   PROFILE: "/profile",
   AUDIT: "/audit",
   FORBIDDEN: "/403",
