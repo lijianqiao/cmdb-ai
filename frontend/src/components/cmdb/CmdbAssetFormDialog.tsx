@@ -96,7 +96,11 @@ export function CmdbAssetFormDialog({
   const isEdit = !!asset
   const form = useForm<CmdbAssetFormValues>({
     resolver: (data, context, options) =>
-      zodResolver(createFormSchema(isEdit))(data, context, options),
+      zodResolver(createFormSchema(asset?.credential_type ?? null))(
+        data,
+        context,
+        options
+      ),
     defaultValues: defaultValues(asset),
   })
 

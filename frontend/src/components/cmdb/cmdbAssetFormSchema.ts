@@ -2,6 +2,8 @@
 
 import { z } from "zod"
 
+import type { CredentialType } from "@/types/cmdb"
+
 /** 切换凭据类型时返回应写入 RHF 的空凭据字段，避免隐藏字段残留导致 zod 失败 */
 export function clearedCredentialFields(): {
   credential_username: string
@@ -10,7 +12,16 @@ export function clearedCredentialFields(): {
   return { credential_username: "", credential_password: "" }
 }
 
-export function createFormSchema(isEdit: boolean) {
+/**
+ * 构造表单校验 schema。
+ *
+ * Args:
+ *   existingCredentialType: 资产当前持久化的凭据类型；新建资产传 null。
+ *     只有「本来就是 static」时才允许密码留空（后端会保留原密文）——
+ *     新建，或者从 none/dynamic 切换成 static，都必须填新密码，否则
+ *     不存在可保留的旧密文，留空会被后端 422 拒绝，这里提前拦截。
+ */
+export function createFormSchema(existingCredentialType: CredentialType | null) {
   return z
     .object({
       asset_type: z.string().min(1, "请选择资产类型").max(50),
@@ -41,11 +52,15 @@ export function createFormSchema(isEdit: boolean) {
             message: "静态凭据必须填写账号",
           })
         }
-        if (!isEdit && !data.credential_password) {
+        const passwordCanBeOmitted = existingCredentialType === "static"
+        if (!passwordCanBeOmitted && !data.credential_password) {
           ctx.addIssue({
             code: "custom",
             path: ["credential_password"],
-            message: "新建静态凭据必须填写密码",
+            message:
+              existingCredentialType === null
+                ? "新建静态凭据必须填写密码"
+                : "从其他凭据类型切换为静态密码时必须填写新密码",
           })
         }
       } else if (data.credential_type === "dynamic") {
