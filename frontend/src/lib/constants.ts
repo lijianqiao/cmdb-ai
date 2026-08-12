@@ -36,6 +36,18 @@ export const PERMISSIONS = {
   PERMISSION_DELETE: "permission:delete",
   // 审计模块
   AUDIT_READ: "audit:read",
+  // 知识库模块
+  KNOWLEDGE_READ: "knowledge:read",
+  KNOWLEDGE_UPLOAD: "knowledge:upload",
+  KNOWLEDGE_MANAGE: "knowledge:manage",
+  // CMDB 模块
+  CMDB_READ: "cmdb:read",
+  CMDB_MANAGE: "cmdb:manage",
+  // 监控模块
+  MONITOR_READ: "monitor:read",
+  MONITOR_MANAGE: "monitor:manage",
+  // Agent HITL
+  AGENT_HITL_APPROVE: "agent:hitl_approve",
 } as const
 
 /** localStorage 存储键 */

@@ -150,6 +150,36 @@ SEED_PERMISSIONS: tuple[SeedPermission, ...] = (
         "module": "知识库",
         "description": "创建/管理知识库分类",
     },
+    {
+        "name": "查看 CMDB 资产",
+        "code": "cmdb:read",
+        "module": "CMDB",
+        "description": "查看 CMDB 资产列表与详情",
+    },
+    {
+        "name": "管理 CMDB 资产",
+        "code": "cmdb:manage",
+        "module": "CMDB",
+        "description": "创建/更新/删除 CMDB 资产",
+    },
+    {
+        "name": "查看监控目标与状态",
+        "code": "monitor:read",
+        "module": "监控",
+        "description": "查看监控目标与健康状态",
+    },
+    {
+        "name": "管理监控目标",
+        "code": "monitor:manage",
+        "module": "监控",
+        "description": "创建/更新/删除监控目标",
+    },
+    {
+        "name": "审批 HITL 提案",
+        "code": "agent:hitl_approve",
+        "module": "Agent",
+        "description": "审批或驳回 Agent 提出的 HITL 提案",
+    },
 )
 
 

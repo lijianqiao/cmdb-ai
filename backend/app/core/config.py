@@ -79,6 +79,7 @@ class Settings(BaseSettings):
     AGENT_RECEIPT_GC_INTERVAL_SECONDS: float = Field(
         default=60.0, gt=0, allow_inf_nan=False
     )
+    HITL_NOTIFY_AUTO_APPROVE: bool = False
 
     # JWT / 会话
     SECRET_KEY: SecretStr | None = None
