@@ -20,6 +20,8 @@ import { RolesPage } from "@/pages/RolesPage"
 import { RolesTrashPage } from "@/pages/RolesTrashPage"
 import { CmdbAssetsPage } from "@/pages/CmdbAssetsPage"
 import { CmdbAssetsTrashPage } from "@/pages/CmdbAssetsTrashPage"
+import { DeviceCommandPoliciesPage } from "@/pages/DeviceCommandPoliciesPage"
+import { DeviceCommandPoliciesTrashPage } from "@/pages/DeviceCommandPoliciesTrashPage"
 import { UsersPage } from "@/pages/UsersPage"
 import { UsersTrashPage } from "@/pages/UsersTrashPage"
 
@@ -116,6 +118,22 @@ export function App() {
             element={
               <ProtectedRoute permission={PERMISSIONS.CMDB_MANAGE}>
                 <CmdbAssetsTrashPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path={ROUTES.DEVICE_COMMAND_POLICIES}
+            element={
+              <ProtectedRoute permission={PERMISSIONS.DEVICE_COMMAND_POLICY_READ}>
+                <DeviceCommandPoliciesPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path={ROUTES.DEVICE_COMMAND_POLICIES_TRASH}
+            element={
+              <ProtectedRoute permission={PERMISSIONS.DEVICE_COMMAND_POLICY_MANAGE}>
+                <DeviceCommandPoliciesTrashPage />
               </ProtectedRoute>
             }
           />

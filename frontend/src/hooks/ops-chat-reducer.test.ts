@@ -115,6 +115,27 @@ describe("reduceOpsChat", () => {
     })
   })
 
+  it("hitl_resolved 携带 result_excerpt 时写入时间线", () => {
+    const state = reduceOpsChat(empty, {
+      type: "ws",
+      message: {
+        type: "hitl_resolved",
+        payload: {
+          proposal_id: 9,
+          status: "executed",
+          result_excerpt: "Cisco IOS XE Software, Version 17.9.4a",
+        },
+      },
+    })
+    expect(state.items).toHaveLength(1)
+    expect(state.items[0]).toMatchObject({
+      kind: "hitl",
+      proposalId: 9,
+      status: "executed",
+      resultExcerpt: "Cisco IOS XE Software, Version 17.9.4a",
+    })
+  })
+
   it("turn_done 只结束 streaming，不改其它条目", () => {
     let state = reduceOpsChat(empty, {
       type: "ws",

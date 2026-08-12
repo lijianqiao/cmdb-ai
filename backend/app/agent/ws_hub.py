@@ -22,7 +22,9 @@ from starlette.websockets import WebSocket, WebSocketState
 from app.schemas.agent_ws import AgentWsEventType, AgentWsServerMessage
 
 # 与 T10 ProposalSafeSummary 字段对齐；绝不透传原始动作载荷
-_HITL_SAFE_KEYS = frozenset({"proposal_id", "action_type", "status", "reason", "asset_id"})
+_HITL_SAFE_KEYS = frozenset(
+    {"proposal_id", "action_type", "status", "reason", "asset_id", "result_excerpt"}
+)
 _HITL_EVENT_TYPES = frozenset({"hitl_pending", "hitl_resolved", "hitl_execution_failed"})
 
 

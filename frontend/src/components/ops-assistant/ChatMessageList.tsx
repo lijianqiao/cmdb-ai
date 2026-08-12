@@ -81,6 +81,7 @@ function MessageRow({ item }: { item: OpsChatItem }) {
               status={item.status}
               reason={item.reason}
               assetId={item.assetId}
+              resultExcerpt={item.resultExcerpt}
             />
           </div>
         </div>

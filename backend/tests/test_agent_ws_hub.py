@@ -16,7 +16,9 @@ from app.schemas.agent_ws import AgentWsServerMessage
 pytestmark = pytest.mark.asyncio
 
 # 与 ProposalSafeSummary 对齐的白名单字段
-_SAFE_SUMMARY_KEYS = frozenset({"proposal_id", "action_type", "status", "reason", "asset_id"})
+_SAFE_SUMMARY_KEYS = frozenset(
+    {"proposal_id", "action_type", "status", "reason", "asset_id", "result_excerpt"}
+)
 # 原始动作载荷中不应出现在 WS 事件里的敏感键
 _SENSITIVE_KEYS = frozenset({"message", "command", "password"})
 

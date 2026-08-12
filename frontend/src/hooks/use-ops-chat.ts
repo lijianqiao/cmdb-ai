@@ -61,6 +61,8 @@ export type OpsChatItem =
       status: string
       reason: string
       assetId: number | null
+      /** WS 安全摘要中的执行结果片段（无审批权限时展示用） */
+      resultExcerpt: string | null
     }
   | {
       kind: "error"
@@ -163,6 +165,11 @@ function readAssetId(payload: Record<string, unknown>): number | null {
     return Number.isFinite(parsed) ? parsed : null
   }
   return null
+}
+
+function readResultExcerpt(payload: Record<string, unknown>): string | null {
+  const value = payload.result_excerpt
+  return typeof value === "string" ? value : null
 }
 
 /**
@@ -270,6 +277,7 @@ function applyWsMessage(
             status: readString(message.payload, "status") || "pending",
             reason: readString(message.payload, "reason"),
             assetId: readAssetId(message.payload),
+            resultExcerpt: readResultExcerpt(message.payload),
           },
         ],
       }
@@ -283,6 +291,7 @@ function applyWsMessage(
         message.type === "hitl_execution_failed"
           ? readString(message.payload, "status") || "execution_failed"
           : readString(message.payload, "status") || "resolved"
+      const excerptFromPayload = readResultExcerpt(message.payload)
       const items = state.items.map((item) => {
         if (item.kind !== "hitl" || item.proposalId !== proposalId) return item
         return {
@@ -295,6 +304,7 @@ function applyWsMessage(
             message.payload.asset_id !== undefined
               ? readAssetId(message.payload)
               : item.assetId,
+          resultExcerpt: excerptFromPayload ?? item.resultExcerpt,
         }
       })
       const exists = items.some(
@@ -309,6 +319,7 @@ function applyWsMessage(
           status,
           reason: readString(message.payload, "reason"),
           assetId: readAssetId(message.payload),
+          resultExcerpt: excerptFromPayload,
         })
       }
       return { items }
