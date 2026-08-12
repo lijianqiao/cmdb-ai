@@ -18,6 +18,7 @@ from app.models.knowledge_chunk import KnowledgeChunk
 from app.models.knowledge_document import KnowledgeDocument
 from app.models.monitor_status_event import MonitorStatusEvent
 from app.models.monitor_target import MonitorTarget
+from app.models.system_config import SystemConfig
 from app.models.permission import Permission
 from app.models.refresh_session import RefreshSession
 from app.models.refresh_session_family import RefreshSessionFamily
@@ -47,4 +48,5 @@ __all__ = [
     "DeviceCommandPolicy",
     "MonitorTarget",
     "MonitorStatusEvent",
+    "SystemConfig",
 ]

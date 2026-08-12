@@ -16,6 +16,7 @@ from app.crud.monitor_status_event import monitor_status_event_crud
 from app.crud.monitor_target import monitor_target_crud
 from app.crud.permission import permission_crud
 from app.crud.role import role_crud
+from app.crud.system_config import system_config_crud
 from app.crud.user import user_crud
 
 __all__ = [
@@ -35,5 +36,6 @@ __all__ = [
     "monitor_target_crud",
     "permission_crud",
     "role_crud",
+    "system_config_crud",
     "user_crud",
 ]
