@@ -90,6 +90,23 @@ def _prepare_persist_data(
     return data
 
 
+def _credential_changed(existing: CmdbAsset, persist_data: dict[str, object]) -> bool:
+    """判断本次更新是否实际改动了凭据字段（用于审计详情，不记录密码明文）。"""
+    if "credential_type" in persist_data and persist_data["credential_type"] != existing.credential_type:
+        return True
+    if (
+        "credential_username" in persist_data
+        and persist_data["credential_username"] != existing.credential_username
+    ):
+        return True
+    if (
+        "credential_password_encrypted" in persist_data
+        and persist_data["credential_password_encrypted"] != existing.credential_password_encrypted
+    ):
+        return True
+    return False
+
+
 @router.get("/assets", response_model=ResponseEnvelope[PaginatedData[CmdbAssetResponse]])
 async def list_assets(
     page: int = Query(default=1, ge=1, le=100_000),
@@ -182,7 +199,7 @@ async def update_asset(
     persist_data = _prepare_persist_data(
         asset_in.model_dump(exclude_unset=True), existing=existing
     )
-    credential_touched = "credential_type" in asset_in.model_fields_set
+    credential_touched = _credential_changed(existing, persist_data)
     updated = await cmdb_asset_crud.update(db, asset_id, persist_data)
     if updated is None:
         raise HTTPException(status_code=404, detail="资产不存在")

@@ -4,9 +4,11 @@ import pytest
 from cryptography.fernet import Fernet
 from httpx import AsyncClient
 from pydantic import SecretStr
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.models.audit_log import AuditLog
 
 pytestmark = pytest.mark.asyncio
 
@@ -39,6 +41,23 @@ async def _grant_cmdb_permissions(db_session: AsyncSession, test_user) -> None: 
             role_permissions.insert().values(role_id=role_id, permission_id=permission.id)
         )
     await db_session.commit()
+
+
+async def _latest_update_audit_detail(db_session: AsyncSession, asset_id: int) -> str:
+    """取最近一次 update_cmdb_asset 审计记录的 detail 字段。"""
+    db_session.expire_all()
+    row = (
+        await db_session.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.action == "update_cmdb_asset",
+                AuditLog.target == f"cmdb_asset:{asset_id}",
+            )
+            .order_by(AuditLog.id.desc())
+            .limit(1)
+        )
+    ).scalar_one()
+    return row.detail
 
 
 async def test_create_asset_with_static_credential_never_echoes_plaintext(
@@ -128,6 +147,86 @@ async def test_update_without_password_keeps_existing_secret(
     body = update_resp.json()["data"]
     assert body["hostname"] == "srv-api-03-renamed"
     assert body["credential_password_set"] is True  # 没碰凭据字段，密文原样保留
+
+
+async def test_update_hostname_with_unchanged_credentials_audit_not_changed(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user,  # noqa: ANN001
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """模拟前端编辑弹窗每次都会回传 credential_type/username，但仅改 hostname 时审计应记为未变更。"""
+    await _grant_cmdb_permissions(db_session, test_user)
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
+    create_resp = await client.post(
+        "/api/v1/cmdb/assets",
+        json={
+            "asset_type": "server",
+            "hostname": "srv-audit-01",
+            "ip_address": "10.0.9.11",
+            "credential_type": "static",
+            "credential_username": "admin",
+            "credential_password": "orig-pwd",
+        },
+        headers=auth_headers,
+    )
+    asset_id = create_resp.json()["data"]["id"]
+
+    update_resp = await client.patch(
+        f"/api/v1/cmdb/assets/{asset_id}",
+        json={
+            "hostname": "srv-audit-01-renamed",
+            "credential_type": "static",
+            "credential_username": "admin",
+        },
+        headers=auth_headers,
+    )
+    assert update_resp.status_code == 200, update_resp.text
+
+    detail = await _latest_update_audit_detail(db_session, asset_id)
+    assert "凭据未变更" in detail
+    assert "凭据已变更" not in detail
+
+
+async def test_update_credential_change_audit_reports_changed(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user,  # noqa: ANN001
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """实际修改凭据（用户名或密码）时，审计应记为已变更。"""
+    await _grant_cmdb_permissions(db_session, test_user)
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
+    create_resp = await client.post(
+        "/api/v1/cmdb/assets",
+        json={
+            "asset_type": "server",
+            "hostname": "srv-audit-02",
+            "ip_address": "10.0.9.12",
+            "credential_type": "static",
+            "credential_username": "admin",
+            "credential_password": "orig-pwd",
+        },
+        headers=auth_headers,
+    )
+    asset_id = create_resp.json()["data"]["id"]
+
+    update_resp = await client.patch(
+        f"/api/v1/cmdb/assets/{asset_id}",
+        json={
+            "credential_type": "static",
+            "credential_username": "root",
+            "credential_password": "new-pwd",
+        },
+        headers=auth_headers,
+    )
+    assert update_resp.status_code == 200, update_resp.text
+
+    detail = await _latest_update_audit_detail(db_session, asset_id)
+    assert "凭据已变更" in detail
+    assert "new-pwd" not in detail
 
 
 async def test_switch_to_static_without_password_is_rejected_when_no_existing_secret(
