@@ -24,9 +24,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.executors import NotifyExecutor, NotImplementedExecutor
+from app.agent.device_commands import command_supports_vendor
+from app.agent.executors import (
+    DeviceQueryExecutor,
+    ExecutionResult,
+    NotifyExecutor,
+    NotImplementedExecutor,
+)
 from app.core.config import settings
 from app.crud.cmdb_asset import cmdb_asset_crud
+from app.crud.device_command_policy import device_command_policy_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
 from app.models.hitl_proposal import HitlProposal
 from app.utils.audit import log_audit
@@ -108,6 +115,7 @@ class ProposalSafeSummary:
 
 _NOTIFY_EXECUTOR = NotifyExecutor()
 _DEVICE_CONTROL_EXECUTOR = NotImplementedExecutor()
+_DEVICE_QUERY_EXECUTOR = DeviceQueryExecutor()
 _EXECUTION_LOCKS: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
 
@@ -251,6 +259,23 @@ async def propose_action(
     if asset is None:
         raise HitlProposalRejectedError(f"CMDB 资产不存在：{asset_id}")
 
+    if action_type == "device_query":
+        command_name = stored_payload["command_name"]
+        assert isinstance(command_name, str)
+        if asset.credential_type == "none":
+            raise HitlProposalRejectedError("该资产未配置登录凭据，无法执行设备命令")
+        if not asset.vendor:
+            raise HitlProposalRejectedError("资产未配置厂商信息，无法确定命令语法")
+        if not command_supports_vendor(command_name, asset.vendor):
+            raise HitlProposalRejectedError("该设备厂商不支持这个命令")
+        policy_decision = await device_command_policy_crud.resolve_policy(
+            db, asset_id=asset.id, asset_type=asset.asset_type, command_name=command_name
+        )
+        if policy_decision == "blacklist":
+            raise HitlProposalRejectedError("该命令已被列入黑名单，禁止执行")
+    else:
+        policy_decision = None
+
     proposal = await hitl_proposal_crud.create(
         db,
         session_id=session_id,
@@ -260,7 +285,13 @@ async def propose_action(
     )
     await _publish(publisher, proposal=proposal, event_type="hitl_pending")
 
-    if action_type == "notify" and settings.HITL_NOTIFY_AUTO_APPROVE:
+    if (
+        action_type == "notify" and settings.HITL_NOTIFY_AUTO_APPROVE
+    ) or (
+        action_type == "device_query"
+        and policy_decision == "whitelist"
+        and asset.credential_type != "dynamic"
+    ):
         await decide_proposal(
             db,
             proposal_id=proposal.id,
@@ -323,6 +354,7 @@ async def resume_proposal(
     proposal_id: int,
     actor_user_id: int | None = None,
     publisher: HitlEventPublisher | None = None,
+    dynamic_password: str | None = None,
 ) -> ProposalSafeSummary:
     """幂等恢复一个已批准提案并调度对应执行器。
 
@@ -331,6 +363,7 @@ async def resume_proposal(
         proposal_id: 待恢复提案 ID。
         actor_user_id: 触发恢复的用户 ID，可为空。
         publisher: 可选的安全事件发布器。
+        dynamic_password: 动态凭据资产执行时的一次性明文密码，不落库。
 
     Returns:
         执行成功后的 EXECUTED 摘要，或执行失败后仍为 APPROVED 的摘要。
@@ -363,11 +396,34 @@ async def resume_proposal(
             )
         elif proposal.action_type == "device_control":
             execution_result = await _DEVICE_CONTROL_EXECUTOR.execute(proposal.action_payload)
+        elif proposal.action_type == "device_query":
+            raw_asset_id = proposal.action_payload.get("asset_id")
+            asset_for_query = (
+                await cmdb_asset_crud.get(db, raw_asset_id) if isinstance(raw_asset_id, int) else None
+            )
+            if asset_for_query is None:
+                execution_result = ExecutionResult(ok=False, message="资产不存在")
+            else:
+                raw_command_name = proposal.action_payload.get("command_name")
+                execution_result = await _DEVICE_QUERY_EXECUTOR.execute(
+                    db,
+                    asset=asset_for_query,
+                    command_name=str(raw_command_name),
+                    dynamic_password=dynamic_password,
+                )
         else:
             raise HitlResumeError(f"不支持的 HITL 动作类型：{proposal.action_type}")
 
         if execution_result.ok:
             proposal = await hitl_proposal_crud.mark_executed(db, proposal.id)
+            if proposal.action_type == "device_query":
+                output = execution_result.detail.get("output")
+                if isinstance(output, str):
+                    proposal.action_payload = {
+                        **proposal.action_payload,
+                        "last_result_excerpt": output,
+                    }
+                    await db.flush()
             await log_audit(
                 db,
                 actor_user_id,

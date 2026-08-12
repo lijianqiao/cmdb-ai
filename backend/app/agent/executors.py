@@ -170,6 +170,7 @@ class DeviceQueryExecutor:
         definition = get_device_command(command_name)
         template = definition.templates[asset.vendor]  # type: ignore[index]
 
+        connection = None
         try:
             connection = await _open_scrapli_connection(
                 host=asset.ip_address,
@@ -181,6 +182,9 @@ class DeviceQueryExecutor:
             response = await connection.send_command(template)
         except Exception:
             return ExecutionResult(ok=False, message="连接或执行命令失败")
+        finally:
+            if connection is not None:
+                await connection.close()
 
         if getattr(response, "failed", False):
             return ExecutionResult(ok=False, message="设备返回命令执行失败")
