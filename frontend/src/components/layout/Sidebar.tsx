@@ -141,6 +141,13 @@ const NAV_ENTRIES: NavEntry[] = [
         icon: Key02Icon,
         permission: PERMISSIONS.PERMISSION_READ,
       },
+      {
+        type: "item",
+        label: "系统配置",
+        path: ROUTES.SYSTEM_CONFIG,
+        icon: Settings02Icon,
+        permission: PERMISSIONS.SYSTEM_CONFIG_MANAGE,
+      },
     ],
   },
   {

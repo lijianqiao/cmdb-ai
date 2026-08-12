@@ -15,6 +15,7 @@ export const ROUTES = {
   DEVICE_COMMAND_POLICIES_TRASH: "/device-command-policies/trash",
   PROFILE: "/profile",
   AUDIT: "/audit",
+  SYSTEM_CONFIG: "/system-config",
   FORBIDDEN: "/403",
   NOT_FOUND: "*",
 } as const
@@ -56,6 +57,8 @@ export const PERMISSIONS = {
   // 设备命令策略
   DEVICE_COMMAND_POLICY_READ: "device_command_policy:read",
   DEVICE_COMMAND_POLICY_MANAGE: "device_command_policy:manage",
+  // 系统配置
+  SYSTEM_CONFIG_MANAGE: "system_config:manage",
 } as const
 
 /** localStorage 存储键 */

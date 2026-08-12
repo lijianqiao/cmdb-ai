@@ -47,6 +47,9 @@ const ACTION_LABELS: Record<string, string> = {
   update_profile: "更新资料",
   change_password: "修改密码",
   reset_password: "重置密码",
+  update_llm_system_config: "更新模型配置",
+  update_operations_system_config: "更新运行配置",
+  bootstrap_system_configs: "初始化运行配置",
 }
 
 /** base-ui 的 Select 需要 items 才能在受控赋值时渲染选中项文案 */

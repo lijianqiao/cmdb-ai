@@ -24,6 +24,7 @@ import { DeviceCommandPoliciesPage } from "@/pages/DeviceCommandPoliciesPage"
 import { DeviceCommandPoliciesTrashPage } from "@/pages/DeviceCommandPoliciesTrashPage"
 import { UsersPage } from "@/pages/UsersPage"
 import { UsersTrashPage } from "@/pages/UsersTrashPage"
+import { SystemConfigPage } from "@/pages/SystemConfigPage"
 
 export function App() {
   const { bootstrap, isInitialized } = useAuth()
@@ -143,6 +144,14 @@ export function App() {
             element={
               <ProtectedRoute permission={PERMISSIONS.AUDIT_READ}>
                 <AuditLogsPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path={ROUTES.SYSTEM_CONFIG}
+            element={
+              <ProtectedRoute permission={PERMISSIONS.SYSTEM_CONFIG_MANAGE}>
+                <SystemConfigPage />
               </ProtectedRoute>
             }
           />

@@ -62,6 +62,10 @@ function getBreadcrumbs(pathname: string): Crumb[] {
       { label: "权限管理", path: ROUTES.PERMISSIONS },
       { label: "回收站" },
     ],
+    [ROUTES.SYSTEM_CONFIG]: [
+      { label: "系统管理" },
+      { label: "系统配置", path: ROUTES.SYSTEM_CONFIG },
+    ],
     [ROUTES.PROFILE]: [{ label: "个人中心" }],
     [ROUTES.AUDIT]: [{ label: "操作日志" }],
   }
