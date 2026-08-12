@@ -173,4 +173,4 @@ async def decide_hitl_proposal(
     proposal = await hitl_proposal_crud.get(db, proposal_id)
     if proposal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
-    return success_response(_to_response(proposal), message="审批完成")
+    return success_response(await _to_response(db, proposal), message="审批完成")
