@@ -1,4 +1,10 @@
-"""Contract tests for the code-owned child-Agent role catalog."""
+"""
+@Author: li
+@Email: lijianqiao2906@live.com
+@FileName: test_agent_roles.py
+@DateTime: 2026-08-12 11:26
+@Docs: 验证代码内置子 Agent 角色目录、最小权限和不可变约束。
+"""
 
 from dataclasses import FrozenInstanceError
 
@@ -39,6 +45,12 @@ def test_role_tool_boundaries_are_least_privilege() -> None:
     assert set(get_role("ops_explorer").tools_allowlist) == ops
     assert set(get_role("investigator").tools_allowlist) == knowledge | ops
     assert set(get_role("reviewer").tools_allowlist) == knowledge | ops
+
+
+def test_no_role_allows_propose_remediation() -> None:
+    """任何子 Agent 角色都不得获得 HITL 写工具。"""
+    for role in list_roles():
+        assert "propose_remediation" not in role.tools_allowlist
 
 
 def test_role_model_tiers_match_architecture() -> None:

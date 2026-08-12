@@ -1,10 +1,16 @@
-"""为七个 T07/T08 只读 Agent 工具提供带参数校验的安全调度。
+"""
+@Author: li
+@Email: lijianqiao2906@live.com
+@FileName: tool_dispatch.py
+@DateTime: 2026-08-12 11:26
+@Docs: 为子 Agent 只读工具和根 Agent HITL 工具提供严格、安全的调度。
 
 实现流程：
 1. 为每个既有工具签名定义严格参数模型，并生成提供给模型的 JSON Schema。
 2. 将角色持久化的工具白名单冻结到调度闭包中，调用时再次检查权限。
-3. 校验通过后才按既有函数签名转发；参数问题要求澄清，未知或越权工具拒绝。
-4. 工具自身的业务结果原样返回，意外异常只返回异常类型，避免泄露内部信息。
+3. 子调度器始终只认识七个只读工具，不接受任何角色白名单扩展写权限。
+4. 根调度器额外绑定可信会话身份，并单独开放 propose_remediation。
+5. 校验通过后才转发；参数问题要求澄清，意外异常只返回类型。
 """
 
 from collections.abc import Iterable
@@ -14,12 +20,15 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.hitl import HitlEventPublisher
+from app.agent.hitl_tools import propose_remediation
 from app.agent.knowledge_tools import kb_glob, kb_grep, kb_read, kb_semantic_search
 from app.agent.loop import ToolDispatcher, ToolResult
 from app.agent.ops_tools import query_cmdb, query_cmdb_dependencies, query_monitor_status
 from app.agent.roles import ToolName
 
 TOOL_SCHEMA_VERSION = "t09-v1"
+ROOT_TOOL_SCHEMA_VERSION = "t10-v1"
 
 
 class _Args(BaseModel):
@@ -81,6 +90,15 @@ class QueryMonitorStatusArgs(_Args):
         if self.target_ids is not None and self.ip_prefix is not None:
             raise ValueError("target_ids 与 ip_prefix 最多提供一个")
         return self
+
+
+class ProposeRemediationArgs(_Args):
+    """根 Agent 整改提案的模型可控参数。"""
+
+    asset_id: int = Field(ge=1)
+    action_type: Literal["notify", "device_control"]
+    payload: dict[str, object]
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 _ARGUMENT_MODELS: dict[ToolName, type[_Args]] = {
@@ -195,6 +213,93 @@ def build_tool_dispatcher(
             )
         try:
             return await _dispatch_validated(db, tool_name, parsed)
+        except Exception as exc:
+            return ToolResult(
+                control="failed",
+                content=f"工具 {name!r} 执行失败: {type(exc).__name__}",
+            )
+
+    return dispatch
+
+
+_ROOT_READ_ONLY_TOOLS: tuple[ToolName, ...] = (
+    "kb_glob",
+    "kb_grep",
+    "kb_read",
+    "kb_semantic_search",
+    "query_cmdb",
+    "query_cmdb_dependencies",
+    "query_monitor_status",
+)
+
+
+def root_tool_schemas() -> list[dict[str, Any]]:
+    """返回根 Agent 的七个只读工具和整改提案工具 Schema。
+
+    Returns:
+        OpenAI 兼容的八个严格函数工具定义。
+    """
+    parameters = deepcopy(ProposeRemediationArgs.model_json_schema())
+    parameters.pop("title", None)
+    return [
+        *tool_schemas_for(_ROOT_READ_ONLY_TOOLS),
+        {
+            "type": "function",
+            "function": {
+                "name": "propose_remediation",
+                "description": (
+                    f"[{ROOT_TOOL_SCHEMA_VERSION}] 为指定资产创建需人工审批的整改提案。"
+                ),
+                "parameters": parameters,
+            },
+        },
+    ]
+
+
+def build_root_tool_dispatcher(
+    db: AsyncSession,
+    *,
+    session_id: int,
+    actor_user_id: int,
+    proposed_by_agent_id: str | None = None,
+    publisher: HitlEventPublisher | None = None,
+) -> ToolDispatcher:
+    """创建绑定可信身份的根 Agent 工具调度器。
+
+    Args:
+        db: 当前事务使用的异步数据库会话。
+        session_id: 根 Agent 会话 ID，不允许由模型覆盖。
+        actor_user_id: 当前认证用户 ID，不允许由模型覆盖。
+        proposed_by_agent_id: 发起提案的 Agent ID，可为空。
+        publisher: 可选的 HITL 安全事件发布器。
+
+    Returns:
+        可调用七个只读工具和整改提案工具的调度函数。
+    """
+    read_dispatch = build_tool_dispatcher(db, _ROOT_READ_ONLY_TOOLS)
+
+    async def dispatch(name: str, arguments: dict[str, Any]) -> ToolResult:
+        if name != "propose_remediation":
+            return await read_dispatch(name, arguments)
+        try:
+            parsed = ProposeRemediationArgs.model_validate(arguments)
+        except ValidationError as exc:
+            return ToolResult(
+                control="clarification",
+                content=f"工具 {name!r} 参数无效: {exc.error_count()} 处错误",
+            )
+        try:
+            return await propose_remediation(
+                db,
+                session_id=session_id,
+                actor_user_id=actor_user_id,
+                proposed_by_agent_id=proposed_by_agent_id,
+                asset_id=parsed.asset_id,
+                action_type=parsed.action_type,
+                payload=parsed.payload,
+                reason=parsed.reason,
+                publisher=publisher,
+            )
         except Exception as exc:
             return ToolResult(
                 control="failed",
