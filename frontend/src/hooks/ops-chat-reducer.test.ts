@@ -1,10 +1,12 @@
-/** ops chat reducer 单测：历史映射与 WS 事件合并 */
+/** ops chat reducer / 门控纯函数单测：历史映射、WS 合并、竞态与去重 */
 
 import { describe, expect, it } from "vitest"
 
 import {
   mapHistoryToItems,
   reduceOpsChat,
+  shouldEnableAgentWs,
+  shouldSynthesizeSendError,
   type OpsChatState,
 } from "./use-ops-chat"
 import type { AgentMessage } from "@/types/agent"
@@ -111,5 +113,41 @@ describe("reduceOpsChat", () => {
       proposalId: 7,
       status: "approved",
     })
+  })
+
+  it("turn_done 只结束 streaming，不改其它条目", () => {
+    let state = reduceOpsChat(empty, {
+      type: "ws",
+      message: {
+        type: "assistant_delta",
+        payload: { text: "半截", done: false },
+      },
+    })
+    state = reduceOpsChat(state, {
+      type: "ws",
+      message: { type: "turn_done", payload: { reason: "final" } },
+    })
+    expect(state.items).toHaveLength(1)
+    expect(state.items[0]).toMatchObject({
+      kind: "assistant",
+      content: "半截",
+      streaming: false,
+    })
+  })
+})
+
+describe("shouldEnableAgentWs", () => {
+  it("仅当 historyReadySessionId 等于当前 session 时放行", () => {
+    expect(shouldEnableAgentWs(3, null)).toBe(false)
+    expect(shouldEnableAgentWs(3, 2)).toBe(false)
+    expect(shouldEnableAgentWs(null, 3)).toBe(false)
+    expect(shouldEnableAgentWs(3, 3)).toBe(true)
+  })
+})
+
+describe("shouldSynthesizeSendError", () => {
+  it("WS 已推 error 时不再合成 HTTP catch 错误行", () => {
+    expect(shouldSynthesizeSendError(false)).toBe(true)
+    expect(shouldSynthesizeSendError(true)).toBe(false)
   })
 })

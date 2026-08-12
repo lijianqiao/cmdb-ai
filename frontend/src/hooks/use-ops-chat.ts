@@ -1,15 +1,34 @@
 /** 运维助手会话状态 hook
 
- * 加载 REST 历史 → 本地消息列表 → POST 发送 → 合并 WS 实时事件。
- * 消息合并抽为纯 reducer，便于单测与 Task 7 渲染。
+ * 加载 REST 历史 →（历史 settle 后）开 WS → 本地消息列表 → POST 发送 → 合并实时事件。
+ * 消息合并抽为纯 reducer；isSending 仅由 POST finally 解除（turn_done 不解锁）。
  */
 
-import { useCallback, useEffect, useReducer, useState } from "react"
+import { useCallback, useEffect, useReducer, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { listAgentMessages, postAgentMessage } from "@/lib/agent-api"
 import { useAgentWs, type AgentWsStatus } from "@/hooks/use-agent-ws"
 import type { AgentMessage, AgentWsServerMessage } from "@/types/agent"
+
+/**
+ * 是否允许连接 Agent WS。
+ * 仅在「当前 session 的历史已 settle」后为 true，避免 GET 与实时事件竞态。
+ */
+export function shouldEnableAgentWs(
+  sessionId: number | null | undefined,
+  historyReadySessionId: number | null,
+): boolean {
+  return sessionId != null && historyReadySessionId === sessionId
+}
+
+/**
+ * HTTP catch 是否还需合成 error 行。
+ * 本轮若 WS 已推送 error，则跳过，避免双行。
+ */
+export function shouldSynthesizeSendError(wsErrorReceived: boolean): boolean {
+  return !wsErrorReceived
+}
 
 /** 统一时间线条目（历史 REST + 实时 WS） */
 export type OpsChatItem =
@@ -359,24 +378,39 @@ export function useOpsChat({
   sessionId,
 }: UseOpsChatOptions): UseOpsChatResult {
   const [state, dispatch] = useReducer(reduceOpsChat, initialState)
-  const [isLoadingHistory, setIsLoadingHistory] = useState(false)
+  const [isLoadingHistory, setIsLoadingHistory] = useState(
+    () => sessionId != null,
+  )
   const [isSending, setIsSending] = useState(false)
   const [monitorAlert, setMonitorAlert] = useState<Record<string, unknown> | null>(
     null,
   )
+  /** 历史已 settle 的 sessionId；与当前 sessionId 相等时才开 WS */
+  const [historyReadySessionId, setHistoryReadySessionId] = useState<number | null>(
+    null,
+  )
+  /** 本轮发送期间是否已收到 WS error（避免 HTTP catch 再插一行） */
+  const wsErrorForTurnRef = useRef(false)
 
   const reloadHistory = useCallback(async (): Promise<void> => {
     if (sessionId == null) {
       dispatch({ type: "reset" })
       setMonitorAlert(null)
+      setHistoryReadySessionId(null)
+      setIsLoadingHistory(false)
       return
     }
+    // 加载期间关闭 WS，避免 history_loaded 整表替换冲掉已到的实时事件
+    setHistoryReadySessionId(null)
     setIsLoadingHistory(true)
     try {
       const rows = await listAgentMessages(sessionId)
       dispatch({ type: "history_loaded", messages: rows })
+      setHistoryReadySessionId(sessionId)
     } catch {
       toast.error("加载会话历史失败")
+      // 失败也放行 WS，便于用户继续发消息；时间线可能仍为空
+      setHistoryReadySessionId(sessionId)
     } finally {
       setIsLoadingHistory(false)
     }
@@ -391,15 +425,18 @@ export function useOpsChat({
       setMonitorAlert(message.payload)
       return
     }
-    if (message.type === "turn_done") {
-      setIsSending(false)
+    if (message.type === "error") {
+      wsErrorForTurnRef.current = true
     }
+    // turn_done 只收尾时间线（streaming→false）；isSending 仅由 POST finally 解除
     dispatch({ type: "ws", message })
   }, [])
 
+  const historyReady = shouldEnableAgentWs(sessionId, historyReadySessionId)
+
   const { status: wsStatus, reconnecting } = useAgentWs({
     sessionId,
-    enabled: sessionId != null,
+    enabled: historyReady,
     onMessage: handleWsMessage,
   })
 
@@ -410,18 +447,21 @@ export function useOpsChat({
 
       const clientId = nextEphemeralId("local-user")
       dispatch({ type: "user_sent", clientId, content: trimmed })
+      wsErrorForTurnRef.current = false
       setIsSending(true)
       try {
         await postAgentMessage(sessionId, { content: trimmed })
       } catch {
         toast.error("发送失败，请稍后重试")
-        dispatch({
-          type: "ws",
-          message: {
-            type: "error",
-            payload: { message: "发送失败，请稍后重试" },
-          },
-        })
+        if (shouldSynthesizeSendError(wsErrorForTurnRef.current)) {
+          dispatch({
+            type: "ws",
+            message: {
+              type: "error",
+              payload: { message: "发送失败，请稍后重试" },
+            },
+          })
+        }
       } finally {
         setIsSending(false)
       }
