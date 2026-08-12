@@ -21,6 +21,11 @@ export default defineConfig([
     rules: {
       // React 19 新规则，对 MVP 数据获取模式（useEffect 中调用 fetch）过于严格
       'react-hooks/set-state-in-effect': 'off',
+      // 下划线前缀表示有意丢弃（如解构剔除某个 key），社区通用约定
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' },
+      ],
     },
   },
   {

@@ -57,7 +57,10 @@ export function useAgentWs({
   const [status, setStatus] = useState<AgentWsStatus>("idle")
   const token = useAuthStore((state) => state.token)
   const onMessageRef = useRef(onMessage)
-  onMessageRef.current = onMessage
+
+  useEffect(() => {
+    onMessageRef.current = onMessage
+  }, [onMessage])
 
   useEffect(() => {
     if (!enabled || sessionId == null) {
