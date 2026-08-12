@@ -5,6 +5,7 @@
 
 from fastapi import APIRouter
 
+from app.api.v1.agent_sessions import router as agent_sessions_router
 from app.api.v1.agent_ws import router as agent_ws_router
 from app.api.v1.audit_logs import router as audit_logs_router
 from app.api.v1.auth import router as auth_router
@@ -28,4 +29,5 @@ api_router.include_router(dashboard_router, prefix="/dashboard", tags=["仪表�
 api_router.include_router(audit_logs_router, prefix="/audit-logs", tags=["审计日志"])
 api_router.include_router(knowledge_router, prefix="/knowledge", tags=["知识库"])
 api_router.include_router(hitl_router, prefix="/hitl", tags=["HITL 审批"])
+api_router.include_router(agent_sessions_router, prefix="/agent", tags=["Agent 会话"])
 api_router.include_router(agent_ws_router, prefix="/ws", tags=["Agent WebSocket"])
