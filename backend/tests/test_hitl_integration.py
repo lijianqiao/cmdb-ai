@@ -95,7 +95,7 @@ async def test_scenario_a_notify_manual_approve_end_to_end(
         db_session,
         session_id=session_id,
         actor_user_id=test_user.id,
-        proposed_by_agent_id="root-agent",
+        proposed_by_agent_id=None,
     )
 
     tool_result = await dispatch(
