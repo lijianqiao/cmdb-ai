@@ -11,6 +11,7 @@ from secrets import token_urlsafe
 from typing import Literal, Self
 from urllib.parse import urlsplit
 
+from cryptography.fernet import Fernet
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
@@ -80,6 +81,8 @@ class Settings(BaseSettings):
         default=60.0, gt=0, allow_inf_nan=False
     )
     HITL_NOTIFY_AUTO_APPROVE: bool = False
+    # CMDB 设备凭据：静态密码对称加密密钥；留空则相关功能在使用时报错，不强制所有部署配置
+    CMDB_CREDENTIAL_KEY: SecretStr | None = None
 
     # JWT / 会话
     SECRET_KEY: SecretStr | None = None
@@ -146,6 +149,22 @@ class Settings(BaseSettings):
             raise ValueError("MIGRATION_DATABASE_URL 格式无效") from exc
         if database_url.get_backend_name() != "postgresql":
             raise ValueError("数据库迁移仅支持 PostgreSQL")
+        return value
+
+    @field_validator("CMDB_CREDENTIAL_KEY")
+    @classmethod
+    def validate_cmdb_credential_key(cls, value: SecretStr | None) -> SecretStr | None:
+        """在启动时校验密钥格式，避免录入了一个格式错误的值等到真正使用才报错。"""
+        if value is None:
+            return None
+        try:
+            Fernet(value.get_secret_value().encode("utf-8"))
+        except Exception as exc:
+            raise ValueError(
+                "CMDB_CREDENTIAL_KEY 必须是合法的 Fernet 密钥，用以下命令生成："
+                '`python -c "from cryptography.fernet import Fernet; '
+                'print(Fernet.generate_key().decode())"`'
+            ) from exc
         return value
 
     @model_validator(mode="after")
