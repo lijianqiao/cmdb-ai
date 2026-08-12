@@ -2,6 +2,7 @@
 export const ROUTES = {
   LOGIN: "/login",
   DASHBOARD: "/",
+  OPS_ASSISTANT: "/ops-assistant",
   USERS: "/users",
   USERS_TRASH: "/users/trash",
   ROLES: "/roles",

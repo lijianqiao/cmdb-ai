@@ -41,3 +41,13 @@ export type {
   RecentLoginItem,
   DashboardData,
 } from "./audit"
+export type {
+  AgentWsEventType,
+  AgentWsServerMessage,
+  AgentWsClientAuth,
+  AgentSession,
+  AgentSessionCreate,
+  AgentMessage,
+  AgentMessageCreate,
+  AgentChatTurn,
+} from "./agent"
