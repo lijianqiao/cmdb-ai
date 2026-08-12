@@ -24,7 +24,8 @@
 - **认证安全**：Argon2id 密码、短期 access token、HttpOnly refresh Cookie、会话族轮换与重放撤销
 - **接口鉴权**：`require_permission("…")`；`/me` 返回扁平权限列表供前端按钮/路由控制
 - **管理能力**：仪表盘、用户/角色/权限 CRUD、角色分配、管理员重置密码、审计日志
-- **初始化**：Alembic 迁移 + `init_db.py` 种子写入 16 条系统权限（角色与分配在 UI 中完成）
+- **系统配置**：受 RBAC 保护的 LLM/Embedding 与 HITL/监控运行参数（数据库优先于 `.env`）；详见 [docs/SYSTEM_CONFIG.md](./docs/SYSTEM_CONFIG.md)
+- **初始化**：Alembic 迁移 + `init_db.py` 种子写入系统权限与 4 项运行参数（角色与分配在 UI 中完成；LLM 键须在配置页保存）
 
 ## 技术栈
 
@@ -89,6 +90,7 @@ pnpm run dev   # 或 npm run dev
 | [docs/PRD.md](./docs/PRD.md) | 产品需求 |
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | 架构设计 |
 | [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) | 生产部署 |
+| [docs/SYSTEM_CONFIG.md](./docs/SYSTEM_CONFIG.md) | 系统运行配置（优先级、密钥、迁移与验收） |
 | [backend/README_zh.md](./backend/README_zh.md) | 后端说明（[English](./backend/README.md)） |
 | [frontend/README_zh.md](./frontend/README_zh.md) | 前端说明（[English](./frontend/README.md)） |
 
