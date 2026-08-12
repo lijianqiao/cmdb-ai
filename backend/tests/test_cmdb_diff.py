@@ -1,14 +1,18 @@
 """Tests for the CMDB <-> monitoring drift detector."""
 
+import asyncio
+
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.monitor_status_event import monitor_status_event_crud
 from app.crud.monitor_target import monitor_target_crud
+from app.crud.system_config import system_config_crud
 from app.models.audit_log import AuditLog
-from app.services.cmdb_diff import run_cmdb_diff_once
+from app.services import cmdb_diff as cmdb_diff_module
+from app.services.cmdb_diff import run_cmdb_diff_loop, run_cmdb_diff_once
 
 pytestmark = pytest.mark.asyncio
 
@@ -84,3 +88,63 @@ async def test_does_not_modify_cmdb_or_monitor_tables(db_session: AsyncSession) 
 
     assets = await cmdb_asset_crud.list_all(db_session)
     assert assets == []
+
+
+async def test_run_cmdb_diff_loop_reads_interval_from_database(
+    db_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CMDB 差异任务应在每轮开始前按数据库间隔休眠。"""
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    monkeypatch.setattr(cmdb_diff_module, "AsyncSessionLocal", session_factory)
+
+    async with session_factory() as db:
+        await system_config_crud.upsert_values(
+            db,
+            {"CMDB_DIFF_INTERVAL_SECONDS": "120"},
+            updated_by_user_id=None,
+        )
+        await db.commit()
+
+    recorded_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        recorded_delays.append(delay)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(cmdb_diff_module.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_cmdb_diff_loop()
+
+    assert recorded_delays == [120.0]
+
+
+async def test_run_cmdb_diff_loop_explicit_interval_overrides_database(
+    db_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """显式 interval_seconds 应覆盖数据库中的 CMDB 差异间隔。"""
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    monkeypatch.setattr(cmdb_diff_module, "AsyncSessionLocal", session_factory)
+
+    async with session_factory() as db:
+        await system_config_crud.upsert_values(
+            db,
+            {"CMDB_DIFF_INTERVAL_SECONDS": "120"},
+            updated_by_user_id=None,
+        )
+        await db.commit()
+
+    recorded_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        recorded_delays.append(delay)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(cmdb_diff_module.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_cmdb_diff_loop(interval_seconds=30.0)
+
+    assert recorded_delays == [30.0]

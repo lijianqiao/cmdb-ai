@@ -13,10 +13,10 @@ import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.crud.monitor_status_event import monitor_status_event_crud
 from app.crud.monitor_target import monitor_target_crud
+from app.services.system_config import get_effective_operations_config
 
 logger = logging.getLogger(__name__)
 
@@ -46,18 +46,26 @@ async def probe_tcp(ip: str, port: int, *, timeout_seconds: float) -> tuple[str,
     return "up", latency_ms, ""
 
 
-async def run_monitor_sweep_once(db: AsyncSession) -> int:
+async def run_monitor_sweep_once(
+    db: AsyncSession,
+    *,
+    probe_timeout_seconds: float | None = None,
+) -> int:
     """Probe every active target once, record one status event each, commit.
 
     A probe failure for one target is logged and recorded as "down" (with the
     exception text as detail) rather than aborting the whole sweep — one bad
     target must not stop the others from being checked.
     """
+    if probe_timeout_seconds is None:
+        operations = await get_effective_operations_config(db)
+        probe_timeout_seconds = operations.monitor_probe_timeout_seconds
+
     targets = await monitor_target_crud.list_active(db)
     for target in targets:
         try:
             status, latency_ms, detail = await probe_tcp(
-                target.ip_address, target.port, timeout_seconds=settings.MONITOR_PROBE_TIMEOUT_SECONDS
+                target.ip_address, target.port, timeout_seconds=probe_timeout_seconds
             )
         except Exception as exc:  # noqa: BLE001 - a single target's probe must never abort the sweep
             status, latency_ms, detail = "down", None, str(exc)
@@ -72,14 +80,28 @@ async def run_monitor_sweep_once(db: AsyncSession) -> int:
 
 async def run_monitor_sweep_loop(*, interval_seconds: float | None = None) -> None:
     """Run `run_monitor_sweep_once` forever, sleeping `interval_seconds` between rounds."""
-    interval = (
-        interval_seconds if interval_seconds is not None else settings.MONITOR_SWEEP_INTERVAL_SECONDS
-    )
     while True:
+        sweep_interval = 0.0
         try:
             async with AsyncSessionLocal() as db:
-                count = await run_monitor_sweep_once(db)
+                operations = await get_effective_operations_config(db)
+                sweep_interval = (
+                    interval_seconds
+                    if interval_seconds is not None
+                    else operations.monitor_sweep_interval_seconds
+                )
+                count = await run_monitor_sweep_once(
+                    db,
+                    probe_timeout_seconds=operations.monitor_probe_timeout_seconds,
+                )
                 logger.info("monitor sweep 完成，探测 %d 个目标", count)
         except Exception:
             logger.exception("monitor sweep 单轮失败")
-        await asyncio.sleep(interval)
+            async with AsyncSessionLocal() as db:
+                operations = await get_effective_operations_config(db)
+                sweep_interval = (
+                    interval_seconds
+                    if interval_seconds is not None
+                    else operations.monitor_sweep_interval_seconds
+                )
+        await asyncio.sleep(sweep_interval)

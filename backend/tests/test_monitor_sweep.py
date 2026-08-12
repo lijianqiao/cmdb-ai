@@ -4,11 +4,13 @@ import asyncio
 from typing import Any
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.crud.monitor_status_event import monitor_status_event_crud
 from app.crud.monitor_target import monitor_target_crud
-from app.services.monitor_sweep import probe_tcp, run_monitor_sweep_once
+from app.crud.system_config import system_config_crud
+from app.services import monitor_sweep as monitor_sweep_module
+from app.services.monitor_sweep import probe_tcp, run_monitor_sweep_loop, run_monitor_sweep_once
 
 pytestmark = pytest.mark.asyncio
 
@@ -117,3 +119,101 @@ async def test_run_monitor_sweep_once_continues_after_one_target_probe_raises(
     healthy_events = await monitor_status_event_crud.list_recent_for_target(db_session, healthy.id)
     assert failing_events[0].status == "down"
     assert healthy_events[0].status == "up"
+
+
+async def test_run_monitor_sweep_once_reads_probe_timeout_from_database(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """单轮巡检应从数据库读取 TCP 探测超时并传给 probe_tcp。"""
+    await monitor_target_crud.create(
+        db_session, {"cmdb_asset_id": None, "ip_address": "10.0.0.5", "port": 22, "is_active": True}
+    )
+    await db_session.commit()
+
+    await system_config_crud.upsert_values(
+        db_session,
+        {"MONITOR_PROBE_TIMEOUT_SECONDS": "7.5"},
+        updated_by_user_id=None,
+    )
+
+    recorded_timeout: float | None = None
+
+    async def fake_probe(ip: str, port: int, *, timeout_seconds: float) -> tuple[str, int | None, str]:
+        nonlocal recorded_timeout
+        recorded_timeout = timeout_seconds
+        return "up", 3, ""
+
+    monkeypatch.setattr("app.services.monitor_sweep.probe_tcp", fake_probe)
+
+    await run_monitor_sweep_once(db_session)
+
+    assert recorded_timeout == 7.5
+
+
+async def test_run_monitor_sweep_loop_reads_sweep_interval_from_database(
+    db_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """后台巡检循环应在每轮结束后按数据库间隔休眠。"""
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    monkeypatch.setattr(monitor_sweep_module, "AsyncSessionLocal", session_factory)
+
+    async with session_factory() as db:
+        await system_config_crud.upsert_values(
+            db,
+            {"MONITOR_SWEEP_INTERVAL_SECONDS": "12"},
+            updated_by_user_id=None,
+        )
+        await db.commit()
+
+    recorded_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        recorded_delays.append(delay)
+        raise asyncio.CancelledError
+
+    async def fake_sweep_once(db: AsyncSession, **kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr(monitor_sweep_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(monitor_sweep_module, "run_monitor_sweep_once", fake_sweep_once)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_monitor_sweep_loop()
+
+    assert recorded_delays == [12.0]
+
+
+async def test_run_monitor_sweep_loop_explicit_interval_overrides_database(
+    db_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """显式 interval_seconds 应覆盖数据库中的巡检间隔。"""
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    monkeypatch.setattr(monitor_sweep_module, "AsyncSessionLocal", session_factory)
+
+    async with session_factory() as db:
+        await system_config_crud.upsert_values(
+            db,
+            {"MONITOR_SWEEP_INTERVAL_SECONDS": "12"},
+            updated_by_user_id=None,
+        )
+        await db.commit()
+
+    recorded_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        recorded_delays.append(delay)
+        raise asyncio.CancelledError
+
+    async def fake_sweep_once(db: AsyncSession, **kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr(monitor_sweep_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(monitor_sweep_module, "run_monitor_sweep_once", fake_sweep_once)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_monitor_sweep_loop(interval_seconds=5.0)
+
+    assert recorded_delays == [5.0]

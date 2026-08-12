@@ -35,11 +35,11 @@ from app.agent.executors import (
     NotifyExecutor,
     NotImplementedExecutor,
 )
-from app.core.config import settings
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
 from app.models.hitl_proposal import HitlProposal
+from app.services.system_config import get_effective_operations_config
 from app.utils.audit import log_audit
 
 type ActionType = Literal["notify", "device_control", "device_query"]
@@ -293,8 +293,9 @@ async def propose_action(
     )
     await _publish(publisher, proposal=proposal, event_type="hitl_pending")
 
+    operations = await get_effective_operations_config(db)
     if (
-        action_type == "notify" and settings.HITL_NOTIFY_AUTO_APPROVE
+        action_type == "notify" and operations.hitl_notify_auto_approve
     ) or (
         action_type == "device_query"
         and policy_decision == "whitelist"

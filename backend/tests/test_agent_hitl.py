@@ -32,6 +32,7 @@ from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
+from app.crud.system_config import system_config_crud
 from app.models.audit_log import AuditLog
 from app.models.hitl_proposal import HitlProposal
 from app.models.user import User
@@ -336,6 +337,34 @@ async def test_notify_auto_approve_uses_actor_and_executes_once(
         select(func.count()).select_from(AuditLog).where(AuditLog.action == "hitl_notify_executed")
     )
     assert audit_count.scalar_one() == 1
+
+
+async def test_database_setting_can_auto_approve_notify_when_env_is_false(
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """数据库开启 notify 自动审批时，应覆盖环境变量 False。"""
+    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
+    session_id, asset_id = await _make_context(db_session, test_user.id)
+    await system_config_crud.upsert_values(
+        db_session,
+        {"HITL_NOTIFY_AUTO_APPROVE": "true"},
+        updated_by_user_id=None,
+    )
+
+    summary = await propose_action(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="notify",
+        asset_id=asset_id,
+        payload={"message": "请检查设备"},
+        reason="告警通知",
+        actor_user_id=test_user.id,
+    )
+
+    assert summary.status == "EXECUTED"
 
 
 async def test_device_control_never_auto_approves(

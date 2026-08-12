@@ -13,12 +13,12 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.monitor_status_event import monitor_status_event_crud
 from app.crud.monitor_target import monitor_target_crud
 from app.models.monitor_target import MonitorTarget
+from app.services.system_config import get_effective_operations_config
 from app.utils.audit import log_audit
 
 logger = logging.getLogger(__name__)
@@ -82,9 +82,13 @@ async def run_cmdb_diff_loop(*, interval_seconds: float | None = None) -> None:
 
     Sleeps first (unlike the monitor sweep, this job is not urgent on startup).
     """
-    interval = interval_seconds if interval_seconds is not None else settings.CMDB_DIFF_INTERVAL_SECONDS
     while True:
-        await asyncio.sleep(interval)
+        sleep_interval = interval_seconds
+        if sleep_interval is None:
+            async with AsyncSessionLocal() as db:
+                operations = await get_effective_operations_config(db)
+                sleep_interval = operations.cmdb_diff_interval_seconds
+        await asyncio.sleep(sleep_interval)
         try:
             async with AsyncSessionLocal() as db:
                 count = await run_cmdb_diff_once(db)
