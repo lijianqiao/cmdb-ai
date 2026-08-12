@@ -11,6 +11,8 @@ export const ROUTES = {
   PERMISSIONS_TRASH: "/permissions/trash",
   CMDB: "/cmdb",
   CMDB_TRASH: "/cmdb/trash",
+  DEVICE_COMMAND_POLICIES: "/device-command-policies",
+  DEVICE_COMMAND_POLICIES_TRASH: "/device-command-policies/trash",
   PROFILE: "/profile",
   AUDIT: "/audit",
   FORBIDDEN: "/403",
@@ -51,6 +53,9 @@ export const PERMISSIONS = {
   MONITOR_MANAGE: "monitor:manage",
   // Agent HITL
   AGENT_HITL_APPROVE: "agent:hitl_approve",
+  // 设备命令策略
+  DEVICE_COMMAND_POLICY_READ: "device_command_policy:read",
+  DEVICE_COMMAND_POLICY_MANAGE: "device_command_policy:manage",
 } as const
 
 /** localStorage 存储键 */
