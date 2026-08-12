@@ -12,6 +12,7 @@ import { DashboardPage } from "@/pages/DashboardPage"
 import { ForbiddenPage } from "@/pages/ForbiddenPage"
 import { LoginPage } from "@/pages/LoginPage"
 import { NotFoundPage } from "@/pages/NotFoundPage"
+import { OpsAssistantPage } from "@/pages/OpsAssistantPage"
 import { PermissionsPage } from "@/pages/PermissionsPage"
 import { PermissionsTrashPage } from "@/pages/PermissionsTrashPage"
 import { ProfilePage } from "@/pages/ProfilePage"
@@ -51,6 +52,7 @@ export function App() {
           }
         >
           <Route path={ROUTES.DASHBOARD} element={<DashboardPage />} />
+          <Route path={ROUTES.OPS_ASSISTANT} element={<OpsAssistantPage />} />
           <Route
             path={ROUTES.USERS}
             element={

@@ -41,6 +41,10 @@ import {
   AuditIcon as Audit,
   ViewIcon as View,
   ViewOffSlashIcon as ViewOffSlash,
+  AiChat01Icon as AiChat01,
+  BubbleChatIcon as BubbleChat,
+  SentIcon as Sent,
+  Alert02Icon as Alert02,
 } from "@hugeicons/core-free-icons"
 
 type IconProps = Omit<ComponentProps<typeof HugeiconsIcon>, "icon">
@@ -85,3 +89,7 @@ export const Settings02Icon = makeIcon(Settings02)
 export const AuditIcon = makeIcon(Audit)
 export const ViewIcon = makeIcon(View)
 export const ViewOffSlashIcon = makeIcon(ViewOffSlash)
+export const AiChat01Icon = makeIcon(AiChat01)
+export const BubbleChatIcon = makeIcon(BubbleChat)
+export const SentIcon = makeIcon(Sent)
+export const Alert02Icon = makeIcon(Alert02)

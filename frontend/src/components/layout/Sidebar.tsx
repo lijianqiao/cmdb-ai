@@ -9,6 +9,7 @@ import { NavLink, useLocation, useNavigate } from "react-router"
 
 import {
   Dashboard02Icon,
+  AiChat01Icon,
   UserMultipleIcon,
   Shield02Icon,
   Key02Icon,
@@ -81,6 +82,12 @@ const NAV_ENTRIES: NavEntry[] = [
     label: "仪表盘",
     path: ROUTES.DASHBOARD,
     icon: Dashboard02Icon,
+  },
+  {
+    type: "item",
+    label: "运维助手",
+    path: ROUTES.OPS_ASSISTANT,
+    icon: AiChat01Icon,
   },
   {
     type: "group",
