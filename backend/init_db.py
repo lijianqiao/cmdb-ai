@@ -175,6 +175,18 @@ SEED_PERMISSIONS: tuple[SeedPermission, ...] = (
         "description": "创建/更新/删除监控目标",
     },
     {
+        "name": "查看设备命令策略",
+        "code": "device_command_policy:read",
+        "module": "设备命令策略",
+        "description": "查看设备命令白/黑名单策略",
+    },
+    {
+        "name": "管理设备命令策略",
+        "code": "device_command_policy:manage",
+        "module": "设备命令策略",
+        "description": "创建/更新/删除设备命令白/黑名单策略",
+    },
+    {
         "name": "审批 HITL 提案",
         "code": "agent:hitl_approve",
         "module": "Agent",
