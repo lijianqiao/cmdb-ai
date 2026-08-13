@@ -83,3 +83,28 @@ export async function decideHitlProposal(
   )
   return response.data.data
 }
+
+export interface HitlRetryRequest {
+  dynamic_credential_password?: string
+}
+
+/**
+ * 重试执行一个已批准但执行失败的提案。
+ *
+ * Args:
+ *   proposalId: 提案 ID
+ *   body: 动态凭据资产需携带本次登录密码
+ *
+ * Returns:
+ *   重试后的提案（EXECUTED 或仍为 APPROVED）
+ */
+export async function retryHitlProposal(
+  proposalId: number,
+  body: HitlRetryRequest,
+): Promise<HitlProposal> {
+  const response = await api.post<ApiResponse<HitlProposal>>(
+    `/hitl/proposals/${proposalId}/retry`,
+    body,
+  )
+  return response.data.data
+}

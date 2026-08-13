@@ -110,6 +110,8 @@ class ProposalSafeSummary:
     reason: str
     asset_id: int | None
     result_excerpt: str | None = None
+    # 仅在执行失败后有值；内容是执行器的分类信息，不含原始异常/设备细节。
+    last_error: str | None = None
 
 
 _NOTIFY_EXECUTOR = NotifyExecutor()
@@ -138,6 +140,8 @@ def _summary(proposal: HitlProposal) -> ProposalSafeSummary:
     action_type = cast(ActionType, proposal.action_type)
     raw_result_excerpt = payload.get("last_result_excerpt")
     result_excerpt = raw_result_excerpt if isinstance(raw_result_excerpt, str) else None
+    raw_last_error = payload.get("last_error")
+    last_error = raw_last_error if isinstance(raw_last_error, str) else None
     return ProposalSafeSummary(
         proposal_id=proposal.id,
         action_type=action_type,
@@ -145,6 +149,7 @@ def _summary(proposal: HitlProposal) -> ProposalSafeSummary:
         reason=reason,
         asset_id=asset_id,
         result_excerpt=result_excerpt,
+        last_error=last_error,
     )
 
 
@@ -261,17 +266,13 @@ async def propose_action(
 
         command_type = command_type_of(command_name)
         if command_type is None:
-            raise HitlProposalRejectedError(
-                f"未知命令名：{command_name}；可用命令：{'、'.join(list_command_names())}"
-            )
+            raise HitlProposalRejectedError(f"未知命令名：{command_name}；可用命令：{'、'.join(list_command_names())}")
         if action_type == "device_query" and command_type != "read_only":
             raise HitlProposalRejectedError(
                 "会改变设备状态的命令请使用 propose_device_control 工具，不能用 query_device_command"
             )
         if action_type == "device_control" and command_type != "state_changing":
-            raise HitlProposalRejectedError(
-                "只读命令请使用 query_device_command 工具，不需要走 propose_device_control"
-            )
+            raise HitlProposalRejectedError("只读命令请使用 query_device_command 工具，不需要走 propose_device_control")
 
         if asset.credential_type == "none":
             raise HitlProposalRejectedError("该资产未配置登录凭据，无法执行设备命令")
@@ -314,9 +315,7 @@ async def propose_action(
     await _publish(publisher, proposal=proposal, event_type="hitl_pending")
 
     operations = await get_effective_operations_config(db)
-    if (
-        action_type == "notify" and operations.hitl_notify_auto_approve
-    ) or (
+    if (action_type == "notify" and operations.hitl_notify_auto_approve) or (
         action_type in ("device_query", "device_control")
         and policy_decision == "whitelist"
         and asset.credential_type != "dynamic"
@@ -425,9 +424,7 @@ async def resume_proposal(
             )
         elif proposal.action_type in ("device_query", "device_control"):
             raw_asset_id = proposal.action_payload.get("asset_id")
-            asset_for_query = (
-                await cmdb_asset_crud.get(db, raw_asset_id) if isinstance(raw_asset_id, int) else None
-            )
+            asset_for_query = await cmdb_asset_crud.get(db, raw_asset_id) if isinstance(raw_asset_id, int) else None
             if asset_for_query is None:
                 execution_result = ExecutionResult(ok=False, message="资产不存在")
             else:
@@ -445,14 +442,16 @@ async def resume_proposal(
 
         if execution_result.ok:
             proposal = await hitl_proposal_crud.mark_executed(db, proposal.id)
+            updated_payload = dict(proposal.action_payload)
+            # 重试成功后清除上一次的失败标记
+            updated_payload.pop("last_error", None)
             if proposal.action_type in ("device_query", "device_control"):
                 output = execution_result.detail.get("output")
                 if isinstance(output, str):
-                    proposal.action_payload = {
-                        **proposal.action_payload,
-                        "last_result_excerpt": output,
-                    }
-                    await db.flush()
+                    updated_payload["last_result_excerpt"] = output
+            if updated_payload != proposal.action_payload:
+                proposal.action_payload = updated_payload
+                await db.flush()
             await log_audit(
                 db,
                 actor_user_id,
@@ -462,6 +461,13 @@ async def resume_proposal(
             )
             await _publish(publisher, proposal=proposal, event_type="hitl_resolved")
         else:
+            # 把执行器的分类失败信息写回 payload，让后续回查/工具文案能区分
+            # "已批准等待执行" 与 "执行过但失败"；成功后覆盖为无错误。
+            proposal.action_payload = {
+                **proposal.action_payload,
+                "last_error": execution_result.message,
+            }
+            await db.flush()
             await log_audit(
                 db,
                 actor_user_id,

@@ -151,6 +151,7 @@ async def test_propose_merges_matching_asset_id_and_returns_safe_summary(
         "reason",
         "asset_id",
         "result_excerpt",
+        "last_error",
     }
     assert [event[1] for event in publisher.events] == ["hitl_pending"]
     assert set(publisher.events[0][2]) == {
@@ -160,6 +161,7 @@ async def test_propose_merges_matching_asset_id_and_returns_safe_summary(
         "reason",
         "asset_id",
         "result_excerpt",
+        "last_error",
     }
 
 
@@ -369,9 +371,7 @@ async def test_database_setting_can_auto_approve_notify_when_env_is_false(
     assert summary.status == "EXECUTED"
 
 
-async def test_device_control_rejects_read_only_command_name(
-    db_session: AsyncSession, test_user: User
-) -> None:
+async def test_device_control_rejects_read_only_command_name(db_session: AsyncSession, test_user: User) -> None:
     """action_type=device_control 但传了只读命令名——两个工具的语义边界要在服务端强制。"""
     session_id, asset_id = await _make_context(db_session, test_user.id)
     with pytest.raises(HitlProposalRejectedError, match="只读命令请使用 query_device_command"):
@@ -387,9 +387,7 @@ async def test_device_control_rejects_read_only_command_name(
         )
 
 
-async def test_device_query_rejects_state_changing_command_name(
-    db_session: AsyncSession, test_user: User
-) -> None:
+async def test_device_query_rejects_state_changing_command_name(db_session: AsyncSession, test_user: User) -> None:
     """反过来，query_device_command 也不能被用来偷跑变更类命令。"""
     session_id, asset_id = await _make_context(db_session, test_user.id)
     with pytest.raises(HitlProposalRejectedError, match="会改变设备状态的命令请使用 propose_device_control"):
@@ -678,7 +676,9 @@ async def test_device_control_real_execution_failure_stays_approved(
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     ciphertext = encrypt_credential_password("whatever")
     asset_id = await _make_query_asset(
-        db_session, vendor="linux", credential_type="static",
+        db_session,
+        vendor="linux",
+        credential_type="static",
         credential_password_encrypted=ciphertext,
     )
     proposal = await propose_action(
@@ -715,6 +715,62 @@ async def test_device_control_real_execution_failure_stays_approved(
     assert summary.status == "APPROVED"
     assert stored.executed_at is None
     assert [event[1] for event in publisher.events] == ["hitl_execution_failed"]
+    # 失败分类要写回 payload 并进入安全摘要，供回查工具/前端区分"等待执行"与"执行失败"
+    assert isinstance(stored.action_payload.get("last_error"), str)
+    assert summary.last_error == stored.action_payload["last_error"]
+    assert publisher.events[-1][2].get("last_error") == summary.last_error
+
+
+async def test_resume_retry_after_failure_executes_and_clears_last_error(
+    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """执行失败后再次 resume（重试）成功时，应转为 EXECUTED 并清除 last_error。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    ciphertext = encrypt_credential_password("whatever")
+    asset_id = await _make_query_asset(
+        db_session,
+        vendor="linux",
+        credential_type="static",
+        credential_password_encrypted=ciphertext,
+    )
+    proposal = await propose_action(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="device_query",
+        asset_id=asset_id,
+        payload={"command_name": "show_version"},
+        reason="排查",
+        actor_user_id=test_user.id,
+    )
+    await decide_proposal(
+        db_session,
+        proposal_id=proposal.proposal_id,
+        approve=True,
+        reviewed_by_user_id=test_user.id,
+    )
+
+    from unittest.mock import AsyncMock, patch
+
+    with patch("app.agent.executors._open_scrapli_connection", side_effect=ConnectionError("unreachable")):
+        failed = await resume_proposal(db_session, proposal_id=proposal.proposal_id, actor_user_id=test_user.id)
+    assert failed.status == "APPROVED"
+    assert failed.last_error
+
+    fake_connection = AsyncMock()
+    fake_connection.send_command = AsyncMock(
+        return_value=type("Resp", (), {"result": "Linux host info", "failed": False})()
+    )
+    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+        retried = await resume_proposal(db_session, proposal_id=proposal.proposal_id, actor_user_id=test_user.id)
+
+    stored = await hitl_proposal_crud.get(db_session, proposal.proposal_id)
+    assert stored is not None
+    assert retried.status == "EXECUTED"
+    assert retried.last_error is None
+    assert "last_error" not in stored.action_payload
+    assert stored.action_payload.get("last_result_excerpt") == "Linux host info"
 
 
 async def test_unclassified_device_control_stays_pending(
@@ -724,7 +780,9 @@ async def test_unclassified_device_control_stays_pending(
     monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", True)
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     asset_id = await _make_query_asset(
-        db_session, vendor="cisco_iosxe", credential_type="static",
+        db_session,
+        vendor="cisco_iosxe",
+        credential_type="static",
         credential_password_encrypted="placeholder",
     )
     summary = await propose_action(
@@ -748,7 +806,9 @@ async def test_whitelisted_device_control_auto_executes_with_static_credential(
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     ciphertext = encrypt_credential_password("whatever")
     asset_id = await _make_query_asset(
-        db_session, vendor="cisco_iosxe", credential_password_encrypted=ciphertext,
+        db_session,
+        vendor="cisco_iosxe",
+        credential_password_encrypted=ciphertext,
     )
     await device_command_policy_crud.create(
         db_session,
@@ -782,13 +842,13 @@ async def test_whitelisted_device_control_auto_executes_with_static_credential(
     assert summary.status == "EXECUTED"
 
 
-async def test_dynamic_credential_device_control_never_auto_executes(
-    db_session: AsyncSession, test_user: User
-) -> None:
+async def test_dynamic_credential_device_control_never_auto_executes(db_session: AsyncSession, test_user: User) -> None:
     """跟 device_query 的既有规则完全对称：动态凭据永远至少过一次人工。"""
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     asset_id = await _make_query_asset(
-        db_session, credential_type="dynamic", credential_password_encrypted=None,
+        db_session,
+        credential_type="dynamic",
+        credential_password_encrypted=None,
     )
     await device_command_policy_crud.create(
         db_session,
@@ -925,9 +985,7 @@ async def test_list_for_session_filters_status(
     assert [item.id for item in pending] == [first.proposal_id]
 
 
-async def test_propose_device_query_creates_pending_proposal(
-    db_session: AsyncSession, test_user: User
-) -> None:
+async def test_propose_device_query_creates_pending_proposal(db_session: AsyncSession, test_user: User) -> None:
     """device_query 在资产具备凭据与厂商时应通过校验并创建 PENDING 提案。"""
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     asset_id = await _make_query_asset(db_session)
@@ -947,9 +1005,7 @@ async def test_propose_device_query_creates_pending_proposal(
     assert summary.action_type == "device_query"
 
 
-async def test_propose_device_query_rejects_extra_payload_fields(
-    db_session: AsyncSession, test_user: User
-) -> None:
+async def test_propose_device_query_rejects_extra_payload_fields(db_session: AsyncSession, test_user: User) -> None:
     """device_query 载荷含多余字段时应拒绝。"""
     session_id, asset_id = await _make_context(db_session, test_user.id)
 
@@ -974,13 +1030,9 @@ async def test_proposal_safe_summary_includes_result_excerpt_field() -> None:
     assert "result_excerpt" in field_names
 
 
-async def test_device_query_rejects_when_asset_has_no_credential(
-    db_session: AsyncSession, test_user: User
-) -> None:
+async def test_device_query_rejects_when_asset_has_no_credential(db_session: AsyncSession, test_user: User) -> None:
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
-    asset_id = await _make_query_asset(
-        db_session, credential_type="none", credential_password_encrypted=None
-    )
+    asset_id = await _make_query_asset(db_session, credential_type="none", credential_password_encrypted=None)
 
     with pytest.raises(HitlProposalRejectedError):
         await propose_action(
@@ -995,9 +1047,7 @@ async def test_device_query_rejects_when_asset_has_no_credential(
         )
 
 
-async def test_device_query_rejects_unknown_command_name(
-    db_session: AsyncSession, test_user: User
-) -> None:
+async def test_device_query_rejects_unknown_command_name(db_session: AsyncSession, test_user: User) -> None:
     """命令名根本不在目录里，报错要明确说"未知命令名"，不能跟厂商不支持混为一谈。"""
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     asset_id = await _make_query_asset(db_session)
@@ -1017,9 +1067,7 @@ async def test_device_query_rejects_unknown_command_name(
     assert "未知命令名" in str(exc_info.value)
 
 
-async def test_device_query_rejects_command_unsupported_by_vendor(
-    db_session: AsyncSession, test_user: User
-) -> None:
+async def test_device_query_rejects_command_unsupported_by_vendor(db_session: AsyncSession, test_user: User) -> None:
     """命令存在，但目录里没给这个厂商登记模板——报错要明确说"厂商不支持"，不是"未知命令名"。"""
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     # show_running_config 命令目录里没有 linux 的模板（见 device_commands.py）
@@ -1120,9 +1168,7 @@ async def test_device_query_whitelist_still_pends_for_dynamic_credential(
     db_session: AsyncSession, test_user: User
 ) -> None:
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
-    asset_id = await _make_query_asset(
-        db_session, credential_type="dynamic", credential_password_encrypted=None
-    )
+    asset_id = await _make_query_asset(db_session, credential_type="dynamic", credential_password_encrypted=None)
     await device_command_policy_crud.create(
         db_session,
         {
@@ -1148,9 +1194,7 @@ async def test_device_query_whitelist_still_pends_for_dynamic_credential(
     assert summary.status == "PENDING"
 
 
-async def test_device_query_unclassified_command_pends(
-    db_session: AsyncSession, test_user: User
-) -> None:
+async def test_device_query_unclassified_command_pends(db_session: AsyncSession, test_user: User) -> None:
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     asset_id = await _make_query_asset(db_session)
 
@@ -1168,13 +1212,9 @@ async def test_device_query_unclassified_command_pends(
     assert summary.status == "PENDING"
 
 
-async def test_resume_proposal_passes_dynamic_password_to_executor(
-    db_session: AsyncSession, test_user: User
-) -> None:
+async def test_resume_proposal_passes_dynamic_password_to_executor(db_session: AsyncSession, test_user: User) -> None:
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
-    asset_id = await _make_query_asset(
-        db_session, credential_type="dynamic", credential_password_encrypted=None
-    )
+    asset_id = await _make_query_asset(db_session, credential_type="dynamic", credential_password_encrypted=None)
     summary = await propose_action(
         db_session,
         session_id=session_id,
@@ -1196,9 +1236,7 @@ async def test_resume_proposal_passes_dynamic_password_to_executor(
     from unittest.mock import AsyncMock, patch
 
     fake_connection = AsyncMock()
-    fake_connection.send_command = AsyncMock(
-        return_value=type("Resp", (), {"result": "otp output", "failed": False})()
-    )
+    fake_connection.send_command = AsyncMock(return_value=type("Resp", (), {"result": "otp output", "failed": False})())
     with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
         resumed = await resume_proposal(
             db_session,

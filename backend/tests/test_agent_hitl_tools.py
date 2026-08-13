@@ -513,6 +513,67 @@ async def test_get_device_query_result_scopes_to_session(
     assert other_session.control == "rejected"
 
 
+async def test_get_device_query_result_reports_execution_failure(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """APPROVED 且带 last_error 时，回查文案必须说明执行失败，不能说正在执行。"""
+    session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
+    proposal = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="device_query",
+        action_payload={
+            "asset_id": asset_id,
+            "command_name": "show_version",
+            "last_error": "连接或执行命令失败；如果是重启/关机类命令，设备可能已经生效，请人工核实",
+        },
+    )
+    proposal.status = "APPROVED"
+    await db_session.flush()
+
+    result = await hitl_tools.get_device_query_result(
+        db_session, session_id=session_id, proposal_id=proposal.id
+    )
+    assert result.control == "ok"
+    assert "执行失败" in result.content
+    assert "正在执行" not in result.content
+    assert "等待执行" not in result.content
+
+
+async def test_query_device_command_reports_auto_execute_failure(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """白名单当场执行失败时，工具结果应明确失败而不是暗示仍在执行。"""
+
+    async def fake_propose_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
+        return ProposalSafeSummary(
+            proposal_id=52,
+            action_type="device_query",
+            status="APPROVED",
+            reason="排查交换机",
+            asset_id=9,
+            last_error="连接或执行命令失败；如果是重启/关机类命令，设备可能已经生效，请人工核实",
+        )
+
+    monkeypatch.setattr(hitl_tools, "propose_action", fake_propose_action)
+
+    result = await hitl_tools.query_device_command(
+        db_session,
+        session_id=1,
+        actor_user_id=2,
+        proposed_by_agent_id=None,
+        asset_id=9,
+        command_name="show_version",
+        reason="排查交换机",
+    )
+    assert result.control == "failed"
+    assert "已批准但上次执行失败" in result.content
+    assert "正在执行" not in result.content
+
+
 async def test_list_device_commands_rejects_missing_asset(
     db_session: AsyncSession,
 ) -> None:

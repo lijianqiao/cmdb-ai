@@ -19,7 +19,7 @@ export function shouldShowResultExcerpt(
 }
 
 /**
- * 批准 device_query 时是否需输入动态凭据密码。
+ * 批准或重试设备命令时是否需输入动态凭据密码。
  *
  * Args:
  *   actionType: 动作类型
@@ -32,7 +32,10 @@ export function needsDynamicCredentialPassword(
   actionType: string,
   assetCredentialType: string | null | undefined,
 ): boolean {
-  return actionType === "device_query" && assetCredentialType === "dynamic"
+  return (
+    (actionType === "device_query" || actionType === "device_control") &&
+    assetCredentialType === "dynamic"
+  )
 }
 
 /**
@@ -56,4 +59,34 @@ export function isApproveButtonDisabled(
   if (deciding || detailLoading) return true
   if (needsPassword && !password.trim()) return true
   return false
+}
+
+/**
+ * 从提案载荷中读取上次执行失败的分类信息。
+ *
+ * Args:
+ *   payload: HTTP 详情里的 action_payload
+ *
+ * Returns:
+ *   失败分类文案；无则 null
+ */
+export function readLastError(
+  payload: Record<string, unknown> | null | undefined,
+): string | null {
+  const value = payload?.last_error
+  return typeof value === "string" && value.trim() ? value : null
+}
+
+/**
+ * 是否展示「重试执行」操作（仅 APPROVED 且有审批权限）。
+ *
+ * Args:
+ *   canApprove: 是否持有 agent:hitl_approve
+ *   status: 当前展示状态
+ *
+ * Returns:
+ *   为 true 时展示重试按钮
+ */
+export function isRetryAvailable(canApprove: boolean, status: string): boolean {
+  return canApprove && status.trim().toUpperCase() === "APPROVED"
 }

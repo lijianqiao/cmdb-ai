@@ -11,7 +11,9 @@ import type { HitlProposal } from "@/lib/hitl-api"
 import { HitlApprovalCard } from "./HitlApprovalCard"
 import {
   isApproveButtonDisabled,
+  isRetryAvailable,
   needsDynamicCredentialPassword,
+  readLastError,
   shouldShowResultExcerpt,
 } from "./hitlApprovalCardUtils"
 
@@ -22,6 +24,7 @@ vi.mock("@/hooks/use-permission", () => ({
 vi.mock("@/lib/hitl-api", () => ({
   getHitlProposal: vi.fn(),
   decideHitlProposal: vi.fn(),
+  retryHitlProposal: vi.fn(),
 }))
 
 vi.mock("sonner", () => ({
@@ -82,6 +85,10 @@ describe("HitlApprovalCard 动态凭据密码（纯函数）", () => {
     expect(needsDynamicCredentialPassword("device_query", null)).toBe(false)
   })
 
+  it("device_control + dynamic 凭据时也需要密码输入", () => {
+    expect(needsDynamicCredentialPassword("device_control", "dynamic")).toBe(true)
+  })
+
   it("device_query + dynamic 时密码为空应禁用批准按钮", () => {
     expect(isApproveButtonDisabled(false, false, true, "")).toBe(true)
     expect(isApproveButtonDisabled(false, false, true, "   ")).toBe(true)
@@ -98,6 +105,28 @@ describe("HitlApprovalCard 动态凭据密码（纯函数）", () => {
   it("加载或提交中始终禁用批准", () => {
     expect(isApproveButtonDisabled(true, false, false, "x")).toBe(true)
     expect(isApproveButtonDisabled(false, true, false, "x")).toBe(true)
+  })
+})
+
+describe("HitlApprovalCard 重试与失败文案（纯函数）", () => {
+  it("有审批权限且状态为 APPROVED 时可重试", () => {
+    expect(isRetryAvailable(true, "APPROVED")).toBe(true)
+    expect(isRetryAvailable(true, "approved")).toBe(true)
+  })
+
+  it("无权限或非 APPROVED 时不展示重试", () => {
+    expect(isRetryAvailable(false, "APPROVED")).toBe(false)
+    expect(isRetryAvailable(true, "PENDING")).toBe(false)
+    expect(isRetryAvailable(true, "EXECUTED")).toBe(false)
+  })
+
+  it("从 action_payload 读取 last_error", () => {
+    expect(readLastError({ last_error: "连接或执行命令失败" })).toBe(
+      "连接或执行命令失败",
+    )
+    expect(readLastError({ last_error: "  " })).toBeNull()
+    expect(readLastError({})).toBeNull()
+    expect(readLastError(null)).toBeNull()
   })
 })
 
@@ -154,5 +183,42 @@ describe("HitlApprovalCard 组件渲染", () => {
 
     const approveButton = screen.getByTestId("hitl-approve-button")
     expect(approveButton).toBeDisabled()
+  })
+
+  it("APPROVED 且有审批权限时展示上次失败原因与重试按钮", async () => {
+    mockUsePermission.mockReturnValue({
+      permissions: ["agent:hitl_approve"],
+      hasPermission: () => true,
+      hasAnyPermission: () => true,
+      hasAllPermissions: () => true,
+    })
+    mockGetHitlProposal.mockResolvedValue(
+      buildProposal({
+        status: "APPROVED",
+        asset_credential_type: "static",
+        action_payload: {
+          asset_id: 9,
+          proposal_reason: "排查交换机",
+          last_error: "连接或执行命令失败",
+        },
+      }),
+    )
+
+    render(
+      <HitlApprovalCard
+        proposalId={1}
+        actionType="device_query"
+        status="APPROVED"
+        reason="排查交换机"
+        assetId={9}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId("hitl-last-error")).toHaveTextContent(
+        "上次执行失败：连接或执行命令失败",
+      )
+    })
+    expect(screen.getByTestId("hitl-retry-button")).toBeInTheDocument()
   })
 })

@@ -29,13 +29,16 @@ import { Cancel01Icon, Tick02Icon } from "@/lib/icons"
 import {
   decideHitlProposal,
   getHitlProposal,
+  retryHitlProposal,
   type HitlProposal,
 } from "@/lib/hitl-api"
 import { PERMISSIONS } from "@/lib/constants"
 import { cn } from "@/lib/utils"
 import {
   isApproveButtonDisabled,
+  isRetryAvailable,
   needsDynamicCredentialPassword,
+  readLastError,
   shouldShowResultExcerpt,
 } from "@/components/ops-assistant/hitlApprovalCardUtils"
 
@@ -168,6 +171,9 @@ export function HitlApprovalCard({
     resolvedResultExcerpt,
   )
 
+  const lastError = readLastError(detail?.action_payload)
+  const retryAvailable = isRetryAvailable(canApprove, displayStatus)
+
   const approveDisabled = isApproveButtonDisabled(
     deciding,
     detailLoading,
@@ -256,6 +262,30 @@ export function HitlApprovalCard({
     }
   }
 
+  const handleRetry = async (): Promise<void> => {
+    if (!retryAvailable || deciding) return
+    setDeciding(true)
+    try {
+      const body: { dynamic_credential_password?: string } = {}
+      if (needsDynamicPassword) {
+        body.dynamic_credential_password = dynamicPassword.trim()
+      }
+      const updated = await retryHitlProposal(proposalId, body)
+      setDetail(updated)
+      setLocalStatus(updated.status)
+      setDynamicPassword("")
+      toast.success(
+        updated.status.trim().toUpperCase() === "EXECUTED"
+          ? "重试执行成功"
+          : "重试后仍未执行成功，请检查设备连通性与凭据",
+      )
+    } catch (error: unknown) {
+      toast.error(readErrorMessage(error, "重试失败"))
+    } finally {
+      setDeciding(false)
+    }
+  }
+
   return (
     <>
       <Card className={cn("bg-card", className)}>
@@ -287,6 +317,12 @@ export function HitlApprovalCard({
           )}
           {displayAssetId != null ? (
             <p className="text-xs text-muted-foreground">资产 #{displayAssetId}</p>
+          ) : null}
+
+          {lastError && normalized === "APPROVED" ? (
+            <p className="text-xs text-destructive" data-testid="hitl-last-error">
+              上次执行失败：{lastError}
+            </p>
           ) : null}
 
           {showResultExcerpt ? (
@@ -362,6 +398,45 @@ export function HitlApprovalCard({
                 拒绝
               </Button>
             </div>
+          </CardFooter>
+        ) : null}
+
+        {retryAvailable ? (
+          <CardFooter className="flex flex-col items-stretch gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+            {needsDynamicPassword ? (
+              <div className="flex min-w-[200px] flex-1 flex-col gap-1.5">
+                <Label htmlFor={`hitl-retry-password-${proposalId}`}>
+                  动态凭据密码
+                </Label>
+                <Input
+                  id={`hitl-retry-password-${proposalId}`}
+                  type="password"
+                  autoComplete="off"
+                  placeholder="重试时输入本次登录密码"
+                  value={dynamicPassword}
+                  disabled={deciding}
+                  onChange={(event) => setDynamicPassword(event.target.value)}
+                  data-testid="hitl-retry-password"
+                />
+              </div>
+            ) : null}
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={
+                deciding || (needsDynamicPassword && !dynamicPassword.trim())
+              }
+              onClick={() => void handleRetry()}
+              data-testid="hitl-retry-button"
+            >
+              {deciding ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <Tick02Icon data-icon="inline-start" />
+              )}
+              重试执行
+            </Button>
           </CardFooter>
         ) : null}
       </Card>

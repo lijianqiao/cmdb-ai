@@ -22,6 +22,14 @@ class HitlDecideRequest(BaseModel):
     dynamic_credential_password: str | None = Field(default=None, min_length=1, max_length=256)
 
 
+class HitlRetryRequest(BaseModel):
+    """重试执行已批准提案的请求体。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dynamic_credential_password: str | None = Field(default=None, min_length=1, max_length=256)
+
+
 class HitlProposalResponse(ApiModel):
     """审批人视角的提案详情，包含完整动作载荷。"""
 

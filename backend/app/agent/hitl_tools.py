@@ -24,11 +24,23 @@ from app.agent.hitl import (
     ActionType,
     HitlEventPublisher,
     HitlProposalRejectedError,
+    ProposalSafeSummary,
     propose_action,
 )
 from app.agent.loop import ToolResult
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
+
+
+def _execution_failure_text(kind: str, summary: ProposalSafeSummary) -> str:
+    """区分"已批准但执行失败"与其它未完成状态，避免模型误报"正在执行中"。"""
+    if summary.status == "APPROVED" and summary.last_error:
+        return (
+            f"{kind} {summary.proposal_id} 已批准但上次执行失败：{summary.last_error}，需人工处理。"
+            "系统不会自动重试，请如实告知用户执行失败，"
+            "由管理员排查设备连通性/凭据后在审批卡片上重试执行。"
+        )
+    return f"{kind} {summary.proposal_id} 当前状态为 {summary.status}，未完成执行。"
 
 
 async def propose_remediation(
@@ -91,7 +103,7 @@ async def propose_remediation(
         )
     return ToolResult(
         control="failed",
-        content=f"整改提案 {summary.proposal_id} 当前状态为 {summary.status}，未完成执行。",
+        content=_execution_failure_text("整改提案", summary),
     )
 
 
@@ -158,7 +170,7 @@ async def query_device_command(
         )
     return ToolResult(
         control="failed",
-        content=f"设备命令查询 {summary.proposal_id} 当前状态为 {summary.status}，未完成执行。",
+        content=_execution_failure_text("设备命令查询", summary),
     )
 
 
@@ -230,7 +242,7 @@ async def propose_device_control(
         )
     return ToolResult(
         control="failed",
-        content=f"设备管控请求 {summary.proposal_id} 当前状态为 {summary.status}，未完成执行。",
+        content=_execution_failure_text("设备管控请求", summary),
     )
 
 
@@ -264,10 +276,27 @@ async def get_device_query_result(
         return ToolResult(control="ok", content=f"提案 {proposal_id} 已执行：\n{excerpt}")
     if proposal.status == "REJECTED":
         return ToolResult(control="ok", content=f"提案 {proposal_id} 已被拒绝")
-    if proposal.status in ("PENDING", "APPROVED"):
+    if proposal.status == "PENDING":
         return ToolResult(
             control="ok",
-            content=f"提案 {proposal_id} 还未执行完成，当前状态：{proposal.status}",
+            content=f"提案 {proposal_id} 正在等待人工审批，尚未执行。",
+        )
+    if proposal.status == "APPROVED":
+        last_error = proposal.action_payload.get("last_error")
+        if isinstance(last_error, str) and last_error:
+            return ToolResult(
+                control="ok",
+                content=(
+                    f"提案 {proposal_id} 已批准但上次执行失败：{last_error}，需人工处理。"
+                    "系统不会自动重试，需要管理员排查设备连通性/凭据后在审批卡片上重试执行。"
+                ),
+            )
+        return ToolResult(
+            control="ok",
+            content=(
+                f"提案 {proposal_id} 已批准但未执行成功，需人工在审批卡片上重试执行。"
+                "这不是正在执行中。"
+            ),
         )
     return ToolResult(
         control="ok",
@@ -300,8 +329,7 @@ async def list_device_commands_for_asset(
         return ToolResult(
             control="rejected",
             content=(
-                f"资产 {asset_id}（{asset.hostname}）未配置厂商信息，"
-                "无法确定命令语法；请先在 CMDB 中补全 vendor 字段。"
+                f"资产 {asset_id}（{asset.hostname}）未配置厂商信息，无法确定命令语法；请先在 CMDB 中补全 vendor 字段。"
             ),
         )
 

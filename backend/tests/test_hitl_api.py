@@ -273,6 +273,8 @@ async def test_approve_device_control_stays_approved_second_decide_conflicts(
         )
     assert first.status_code == 200, first.text
     assert first.json()["data"]["status"] == "APPROVED"
+    last_error = first.json()["data"]["action_payload"].get("last_error")
+    assert isinstance(last_error, str) and last_error
 
     second = await client.post(
         f"/api/v1/hitl/proposals/{proposal_id}/decide",
@@ -371,3 +373,138 @@ async def test_decide_device_query_with_password_executes(
     assert response.status_code == 200, response.text
     assert response.json()["data"]["status"] == "EXECUTED"
     assert "one-time-pass" not in response.text
+
+
+async def test_retry_approved_device_control_executes(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """APPROVED 且上次执行失败的提案可通过 /retry 再次执行。"""
+    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
+    await _grant_hitl_approve(db_session, test_user)
+    ciphertext = encrypt_credential_password("whatever")
+    session = await agent_session_crud.create(
+        db_session,
+        {"user_id": test_user.id, "title": "HITL API retry", "status": "active"},
+    )
+    asset = await cmdb_asset_crud.create(
+        db_session,
+        {
+            "asset_type": "server",
+            "hostname": "srv-hitl-retry",
+            "ip_address": "10.0.0.33",
+            "vendor": "linux",
+            "credential_type": "static",
+            "credential_username": "admin",
+            "credential_password_encrypted": ciphertext,
+        },
+    )
+    await db_session.flush()
+    summary = await propose_action(
+        db_session,
+        session_id=session.id,
+        proposed_by_agent_id=None,
+        action_type="device_control",
+        asset_id=asset.id,
+        payload={"command_name": "reboot"},
+        reason="故障恢复",
+        actor_user_id=test_user.id,
+    )
+    await db_session.commit()
+    proposal_id = summary.proposal_id
+
+    with patch(
+        "app.agent.executors._open_scrapli_connection",
+        side_effect=ConnectionError("unreachable"),
+    ):
+        failed = await client.post(
+            f"/api/v1/hitl/proposals/{proposal_id}/decide",
+            json={"approve": True},
+            headers=auth_headers,
+        )
+    assert failed.status_code == 200, failed.text
+    assert failed.json()["data"]["status"] == "APPROVED"
+
+    fake_connection = AsyncMock()
+    fake_connection.send_command = AsyncMock(
+        return_value=type("Resp", (), {"result": "Linux host info", "failed": False})()
+    )
+    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+        retried = await client.post(
+            f"/api/v1/hitl/proposals/{proposal_id}/retry",
+            json={},
+            headers=auth_headers,
+        )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["data"]["status"] == "EXECUTED"
+    assert "last_error" not in retried.json()["data"]["action_payload"]
+
+
+async def test_retry_pending_proposal_conflicts(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PENDING 提案不能走重试通道。"""
+    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
+    await _grant_hitl_approve(db_session, test_user)
+    _, proposal_id = await _make_pending_proposal(
+        db_session,
+        user_id=test_user.id,
+        action_type="notify",
+        payload={"message": "仍待审批"},
+        reason="监控告警",
+    )
+
+    response = await client.post(
+        f"/api/v1/hitl/proposals/{proposal_id}/retry",
+        json={},
+        headers=auth_headers,
+    )
+    assert response.status_code == 409, response.text
+
+
+async def test_retry_without_permission_returns_403(
+    client: AsyncClient,
+    auth_headers: Headers,
+) -> None:
+    """未授予 agent:hitl_approve 时重试应被拒绝。"""
+    response = await client.post(
+        "/api/v1/hitl/proposals/1/retry",
+        json={},
+        headers=auth_headers,
+    )
+    assert response.status_code == 403, response.text
+
+
+async def test_retry_dynamic_device_query_requires_password(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """动态凭据资产重试时必须提供本次登录密码。"""
+    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
+    await _grant_hitl_approve(db_session, test_user)
+    _, proposal_id = await _make_pending_device_query_proposal(
+        db_session,
+        user_id=test_user.id,
+    )
+    stored = await hitl_proposal_crud.get(db_session, proposal_id)
+    assert stored is not None
+    stored.status = "APPROVED"
+    await db_session.commit()
+
+    response = await client.post(
+        f"/api/v1/hitl/proposals/{proposal_id}/retry",
+        json={},
+        headers=auth_headers,
+    )
+    assert response.status_code == 422, response.text

@@ -12,7 +12,8 @@
    - 文本 token 经 on_delta 实时 broadcast(assistant_delta, done=false)；
    - 回合结束若有 tool_calls 则广播 tool_call（仅 id/name）；
    - 无工具且有正文：若已推过增量则再推 done=true 空片；若 mock 未走流式则整段一次 done=true。
-4. 包装 dispatch_tool 只做透传；pending_approval 的 hitl_* 仍由 dispatcher 内 publisher 发出。
+4. 包装 dispatch_tool 只做透传；pending_approval 的 hitl_* 由 dispatcher 内 publisher 入队，
+   由 API 层在 db.commit() 之后 flush，避免前端抢跑 GET 未提交提案。
 5. 调用既有 run_loop，注入中文 ROOT_OPS_SYSTEM_PROMPT；model_key 使用 MODELS 登记键 local-chat。
 6. 正常/early_exit 后广播 turn_done；异常广播中文 error（无堆栈）后原样抛出，由 API 层 commit。
 """

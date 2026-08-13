@@ -10,14 +10,14 @@ from typing import Any
 
 import pytest
 
-from app.agent.ws_hub import AgentWsHub, WsHitlEventPublisher
+from app.agent.ws_hub import AgentWsHub, BufferedWsHitlEventPublisher, WsHitlEventPublisher
 from app.schemas.agent_ws import AgentWsServerMessage
 
 pytestmark = pytest.mark.asyncio
 
 # 与 ProposalSafeSummary 对齐的白名单字段
 _SAFE_SUMMARY_KEYS = frozenset(
-    {"proposal_id", "action_type", "status", "reason", "asset_id", "result_excerpt"}
+    {"proposal_id", "action_type", "status", "reason", "asset_id", "result_excerpt", "last_error"}
 )
 # 原始动作载荷中不应出现在 WS 事件里的敏感键
 _SENSITIVE_KEYS = frozenset({"message", "command", "command_name", "password"})
@@ -149,3 +149,45 @@ async def test_ws_hitl_publisher_ignores_unknown_event_type() -> None:
         payload={"proposal_id": 1, "action_type": "notify", "status": "PENDING", "reason": "", "asset_id": None},
     )
     assert ws.sent == []
+
+
+async def test_buffered_publisher_defers_events_until_flush() -> None:
+    """缓冲发布器在 flush 之前不得广播任何事件，flush 后按顺序送达且幂等。"""
+    hub = AgentWsHub()
+    ws = FakeWebSocket()
+    await hub.connect(1, ws)  # type: ignore[arg-type]
+    publisher = BufferedWsHitlEventPublisher(hub=hub)
+
+    await publisher.publish(
+        session_id=1,
+        event_type="hitl_pending",
+        payload={
+            "proposal_id": 5,
+            "action_type": "device_query",
+            "status": "PENDING",
+            "reason": "查配置",
+            "asset_id": 2,
+        },
+    )
+    await publisher.publish(
+        session_id=1,
+        event_type="hitl_execution_failed",
+        payload={
+            "proposal_id": 5,
+            "action_type": "device_query",
+            "status": "APPROVED",
+            "reason": "查配置",
+            "asset_id": 2,
+        },
+    )
+    # 模拟事务尚未提交：不能有任何事件泄漏出去
+    assert ws.sent == []
+
+    await publisher.flush()
+    assert [item["type"] for item in ws.sent] == ["hitl_pending", "hitl_execution_failed"]
+    # 事件仍要过安全键过滤
+    assert all(set(item["payload"].keys()) <= _SAFE_SUMMARY_KEYS for item in ws.sent)
+
+    # 二次 flush 是空操作，不重复广播
+    await publisher.flush()
+    assert len(ws.sent) == 2

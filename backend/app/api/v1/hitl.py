@@ -9,8 +9,10 @@
 1. 全部端点以 agent:hitl_approve 门控，审批人可看到完整 action_payload。
 2. 列表与详情直接复用 hitl_proposal_crud 的会话查询与按 ID 读取。
 3. 审批接口调用 decide_proposal；仅在批准时再调用 resume_proposal（拒绝不恢复执行）。
-4. decide/resume 注入 WsHitlEventPublisher，把 hitl_resolved / hitl_execution_failed 推到会话 WS。
-5. 异常映射：缺失 404、非法迁移/恢复失败 409、提案校验拒绝 400；事务内审计后统一 commit。
+4. 新增 POST /proposals/{id}/retry，对 APPROVED 提案再次调用幂等的 resume_proposal。
+5. decide/resume/retry 注入 BufferedWsHitlEventPublisher，在 db.commit() 之后 flush，
+   避免前端收到 hitl_* 事件后立刻 GET 提案却读不到未提交的行。
+6. 异常映射：缺失 404、非法迁移/恢复失败 409、提案校验拒绝 400；事务内审计后统一 commit。
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -22,14 +24,14 @@ from app.agent.hitl import (
     decide_proposal,
     resume_proposal,
 )
-from app.agent.ws_hub import WsHitlEventPublisher
+from app.agent.ws_hub import BufferedWsHitlEventPublisher
 from app.core.database import get_db
 from app.core.deps import require_permission
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.hitl_proposal import InvalidHitlTransitionError, hitl_proposal_crud
 from app.models.user import User
 from app.schemas.common import ResponseEnvelope, success_response
-from app.schemas.hitl import HitlDecideRequest, HitlProposalResponse
+from app.schemas.hitl import HitlDecideRequest, HitlProposalResponse, HitlRetryRequest
 
 router = APIRouter()
 
@@ -126,7 +128,7 @@ async def decide_hitl_proposal(
                 detail="该资产使用动态凭据，批准时必须提供本次登录密码",
             )
 
-    publisher = WsHitlEventPublisher()
+    publisher = BufferedWsHitlEventPublisher()
     try:
         await decide_proposal(
             db,
@@ -169,8 +171,64 @@ async def decide_hitl_proposal(
 
     # 编排层已写入审计记录；端点只负责一次 commit，避免半提交。
     await db.commit()
+    # 提交后再广播 HITL 事件，避免前端收到事件后读不到未提交的行。
+    await publisher.flush()
 
     proposal = await hitl_proposal_crud.get(db, proposal_id)
     if proposal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
     return success_response(await _to_response(db, proposal), message="审批完成")
+
+
+@router.post(
+    "/proposals/{proposal_id}/retry",
+    response_model=ResponseEnvelope[HitlProposalResponse],
+)
+async def retry_hitl_proposal(
+    proposal_id: int,
+    body: HitlRetryRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("agent:hitl_approve")),
+) -> ResponseEnvelope[HitlProposalResponse]:
+    """重试执行一个已批准但执行失败的提案；EXECUTED 时幂等返回。"""
+    existing = await hitl_proposal_crud.get(db, proposal_id)
+    if existing is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
+
+    if existing.status not in ("APPROVED", "EXECUTED"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="只有已批准但未执行成功的提案可以重试",
+        )
+
+    if existing.status == "APPROVED" and existing.action_type in ("device_query", "device_control"):
+        raw_asset_id = existing.action_payload.get("asset_id")
+        asset = await cmdb_asset_crud.get(db, raw_asset_id) if isinstance(raw_asset_id, int) else None
+        if asset is not None and asset.credential_type == "dynamic" and not body.dynamic_credential_password:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="该资产使用动态凭据，重试时必须提供本次登录密码",
+            )
+
+    publisher = BufferedWsHitlEventPublisher()
+    try:
+        await resume_proposal(
+            db,
+            proposal_id=proposal_id,
+            actor_user_id=current_user.id,
+            publisher=publisher,
+            dynamic_password=body.dynamic_credential_password,
+        )
+    except HitlResumeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    await db.commit()
+    await publisher.flush()
+
+    proposal = await hitl_proposal_crud.get(db, proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
+    return success_response(await _to_response(db, proposal), message="重试完成")

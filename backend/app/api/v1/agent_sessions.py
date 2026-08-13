@@ -14,13 +14,15 @@
 4. DELETE 为物理删除；消息、HITL、registry、trace 依赖库级 ON DELETE CASCADE。
 5. 消息历史优先用 list_for_agent(..., agent_id=None) 只返回根 transcript，按 id 升序。
 6. POST messages：归属校验后调用 run_chat_turn（复用 run_loop + root dispatcher + WS 推送），
-   整轮结束后一次 commit；异常时仍尽量 commit 已写入的用户消息。
+   整轮结束后一次 commit；HITL 事件经 BufferedWsHitlEventPublisher 在 commit 之后再广播。
+   异常时仍尽量 commit 已写入的用户消息。
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.chat_turn import run_chat_turn
+from app.agent.ws_hub import BufferedWsHitlEventPublisher
 from app.core.database import get_db
 from app.core.deps import require_permission
 from app.crud.agent_message import agent_message_crud
@@ -168,9 +170,7 @@ async def list_session_messages(
         session_id,
         agent_id=None,
     )
-    return success_response(
-        [AgentMessageResponse.model_validate(item) for item in messages]
-    )
+    return success_response([AgentMessageResponse.model_validate(item) for item in messages])
 
 
 @router.post(
@@ -189,22 +189,28 @@ async def post_session_message(
     实时事件经 WebSocket 推送；本接口返回 turn 摘要。失败时尽量保留用户消息。
     """
     await _owned_session_or_404(db, session_id, current_user.id)
+    # HITL 事件缓冲到 commit 之后再广播：提案行在本轮事务内创建，如果事件
+    # 提前发出，前端收到后立即用另一个 DB 会话拉提案详情会拿到 404。
+    hitl_publisher = BufferedWsHitlEventPublisher()
     try:
         outcome = await run_chat_turn(
             db,
             session_id=session_id,
             actor_user_id=current_user.id,
             content=body.content,
+            publisher=hitl_publisher,
         )
     except Exception as exc:
         # 用户消息已在 turn 内写入；先提交再返回 500，避免整轮回滚丢原话
         await db.commit()
+        await hitl_publisher.flush()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="本轮对话处理失败，请稍后重试",
         ) from exc
 
     await db.commit()
+    await hitl_publisher.flush()
     return success_response(
         AgentChatTurnResponse(
             reason=outcome.reason,

@@ -23,7 +23,7 @@ from app.schemas.agent_ws import AgentWsEventType, AgentWsServerMessage
 
 # 与 T10 ProposalSafeSummary 字段对齐；绝不透传原始动作载荷
 _HITL_SAFE_KEYS = frozenset(
-    {"proposal_id", "action_type", "status", "reason", "asset_id", "result_excerpt"}
+    {"proposal_id", "action_type", "status", "reason", "asset_id", "result_excerpt", "last_error"}
 )
 _HITL_EVENT_TYPES = frozenset({"hitl_pending", "hitl_resolved", "hitl_execution_failed"})
 
@@ -127,15 +127,47 @@ class WsHitlEventPublisher:
         """
         if event_type not in _HITL_EVENT_TYPES:
             return
-        safe_payload: dict[str, Any] = {
-            key: payload[key] for key in _HITL_SAFE_KEYS if key in payload
-        }
+        safe_payload: dict[str, Any] = {key: payload[key] for key in _HITL_SAFE_KEYS if key in payload}
         # event_type 已通过 _HITL_EVENT_TYPES 收窄，与 AgentWsEventType 子集一致
         message = AgentWsServerMessage(
             type=cast(AgentWsEventType, event_type),
             payload=safe_payload,
         )
         await self._resolve_hub().broadcast(session_id, message)
+
+
+class BufferedWsHitlEventPublisher(WsHitlEventPublisher):
+    """缓冲 hitl_* 事件，由调用方在 db.commit() 之后 flush。
+
+    HITL 提案在一轮对话的事务内创建；如果事件在提交前就广播，前端收到
+    事件后立即用另一个数据库会话发 GET /hitl/proposals/{id}，会因为行未提交
+    而拿到 404「HITL 提案不存在」。缓冲到提交之后再发可消除这个竞态。
+    """
+
+    def __init__(self, hub: AgentWsHub | None = None) -> None:
+        """绑定 Hub 并初始化空缓冲队列。"""
+        super().__init__(hub)
+        self._pending: list[tuple[int, str, dict[str, object]]] = []
+
+    async def publish(
+        self,
+        *,
+        session_id: int,
+        event_type: str,
+        payload: Mapping[str, object],
+    ) -> None:
+        """只入队，不立即广播。"""
+        self._pending.append((session_id, event_type, dict(payload)))
+
+    async def flush(self) -> None:
+        """把缓冲的事件按顺序广播出去；重复调用是空操作。"""
+        pending, self._pending = self._pending, []
+        for session_id, event_type, payload in pending:
+            await super().publish(
+                session_id=session_id,
+                event_type=event_type,
+                payload=payload,
+            )
 
 
 # 模块单例，供 API / chat_turn / HITL 注入
