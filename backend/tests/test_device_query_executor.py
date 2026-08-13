@@ -170,11 +170,11 @@ async def test_vendor_unsupported_command_gives_specific_message(
     )
     asset = await cmdb_asset_crud.get(db_session, asset_id)
     assert asset is not None
-    asset.vendor = "juniper_junos"  # ping 目录里没有 juniper_junos 模板
+    asset.vendor = "linux"  # show_running_config 目录里没有 linux 模板
 
     executor = DeviceQueryExecutor()
     result = await executor.execute(
-        db_session, asset=asset, command_name="ping", dynamic_password=None
+        db_session, asset=asset, command_name="show_running_config", dynamic_password=None
     )
 
     assert result.ok is False

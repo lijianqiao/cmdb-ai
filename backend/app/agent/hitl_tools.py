@@ -14,6 +14,7 @@
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.device_commands import list_device_commands as list_catalog_commands
 from app.agent.hitl import (
     ActionType,
     HitlEventPublisher,
@@ -21,6 +22,8 @@ from app.agent.hitl import (
     propose_action,
 )
 from app.agent.loop import ToolResult
+from app.crud.cmdb_asset import cmdb_asset_crud
+from app.crud.device_command_policy import device_command_policy_crud
 
 
 async def propose_remediation(
@@ -193,3 +196,67 @@ async def get_device_query_result(
         control="ok",
         content=f"提案 {proposal_id} 当前状态：{proposal.status}",
     )
+
+
+async def list_device_commands_for_asset(
+    db: AsyncSession,
+    *,
+    asset_id: int,
+) -> ToolResult:
+    """列出一台资产可用的诊断命令、审批策略与凭据前提。
+
+    只读、无审批要求；让模型先查询"这台设备能做什么、要不要人工审批"，
+    而不是靠猜命令名反复失败。
+
+    Args:
+        db: 当前事务使用的异步数据库会话。
+        asset_id: 目标 CMDB 资产 ID。
+
+    Returns:
+        含命令名、说明、审批策略与凭据状态的安全工具结果。
+    """
+    asset = await cmdb_asset_crud.get(db, asset_id)
+    if asset is None:
+        return ToolResult(control="rejected", content=f"CMDB 资产不存在：{asset_id}")
+
+    if not asset.vendor:
+        return ToolResult(
+            control="rejected",
+            content=(
+                f"资产 {asset_id}（{asset.hostname}）未配置厂商信息，"
+                "无法确定命令语法；请先在 CMDB 中补全 vendor 字段。"
+            ),
+        )
+
+    lines = [f"资产 {asset_id}（{asset.hostname}，厂商 {asset.vendor}）可用诊断命令："]
+    supported_any = False
+    for definition in list_catalog_commands():
+        if asset.vendor not in definition.templates:
+            continue
+        supported_any = True
+        decision = await device_command_policy_crud.resolve_policy(
+            db,
+            asset_id=asset.id,
+            asset_type=asset.asset_type,
+            command_name=definition.name,
+        )
+        if decision == "blacklist":
+            policy_label = "黑名单（禁止执行）"
+        elif decision == "whitelist":
+            policy_label = "白名单（自动执行）"
+        else:
+            policy_label = "需人工审批"
+        lines.append(f"- {definition.name}：{definition.description}；策略：{policy_label}")
+
+    if not supported_any:
+        return ToolResult(
+            control="ok",
+            content=f"厂商 {asset.vendor} 当前没有任何可用命令。",
+        )
+
+    if asset.credential_type == "none":
+        lines.append("注意：该资产未配置登录凭据，执行任何命令前需先在 CMDB 中配置凭据。")
+    elif asset.credential_type == "dynamic":
+        lines.append("注意：该资产使用动态凭据，所有命令都需要人工审批并当场输入密码。")
+
+    return ToolResult(control="ok", content="\n".join(lines))

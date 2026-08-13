@@ -39,7 +39,7 @@ def test_show_version_has_templates_for_multiple_vendors() -> None:
 
 def test_command_supports_vendor_reflects_template_presence() -> None:
     assert command_supports_vendor("show_version", "cisco_iosxe") is True
-    assert command_supports_vendor("ping", "juniper_junos") is False
+    assert command_supports_vendor("show_running_config", "linux") is False
 
 
 def test_command_supports_vendor_returns_false_for_unknown_command() -> None:
@@ -66,6 +66,7 @@ def test_network_vendor_ping_uses_fixed_probe_target() -> None:
     assert ping.templates["cisco_iosxe"] == "ping 1.1.1.1"
     assert ping.templates["huawei_vrp"] == "ping 1.1.1.1"
     assert ping.templates["hp_comware"] == "ping 1.1.1.1"
+    assert ping.templates["juniper_junos"] == "ping 1.1.1.1 count 4"
 
 
 def test_get_command_template_returns_real_string_for_supported_vendor() -> None:
@@ -81,4 +82,4 @@ def test_get_command_template_raises_unknown_command_error_for_unknown_name() ->
 def test_get_command_template_raises_unsupported_vendor_error_for_known_command() -> None:
     """命令存在，但目录里没给这个厂商登记模板——不能跟"未知命令名"报同一个错。"""
     with pytest.raises(UnsupportedVendorError):
-        get_command_template("ping", "juniper_junos")
+        get_command_template("show_running_config", "linux")

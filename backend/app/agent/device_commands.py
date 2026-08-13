@@ -111,6 +111,8 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
             "cisco_iosxe": "ping 1.1.1.1",
             "huawei_vrp": "ping 1.1.1.1",
             "hp_comware": "ping 1.1.1.1",
+            # Junos ping 默认不停止，必须显式 count。
+            "juniper_junos": "ping 1.1.1.1 count 4",
         },
     ),
 }
@@ -133,6 +135,20 @@ def command_supports_vendor(command_name: str, vendor: str) -> bool:
     if command_name not in _DEVICE_COMMAND_CATALOG:
         return False
     return vendor in _DEVICE_COMMAND_CATALOG[command_name].templates
+
+
+def list_command_names() -> tuple[str, ...]:
+    """按登记顺序返回全部命令名，用于拼可行动的错误提示。"""
+    return tuple(_DEVICE_COMMAND_CATALOG)
+
+
+def list_commands_for_vendor(vendor: str) -> tuple[DeviceCommandDefinition, ...]:
+    """返回这个厂商登记过模板的全部命令定义；厂商无覆盖时返回空元组。"""
+    return tuple(
+        definition
+        for definition in _DEVICE_COMMAND_CATALOG.values()
+        if vendor in definition.templates
+    )
 
 
 def get_command_template(command_name: str, vendor: str) -> str:

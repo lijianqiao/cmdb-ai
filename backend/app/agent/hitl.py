@@ -28,6 +28,8 @@ from app.agent.device_commands import (
     UnknownDeviceCommandError,
     UnsupportedVendorError,
     get_command_template,
+    list_command_names,
+    list_commands_for_vendor,
 )
 from app.agent.executors import (
     DeviceQueryExecutor,
@@ -273,9 +275,19 @@ async def propose_action(
         try:
             get_command_template(command_name, asset.vendor)
         except UnknownDeviceCommandError as exc:
-            raise HitlProposalRejectedError(f"未知命令名：{command_name}") from exc
+            raise HitlProposalRejectedError(
+                f"未知命令名：{command_name}；可用命令：{'、'.join(list_command_names())}"
+            ) from exc
         except UnsupportedVendorError as exc:
-            raise HitlProposalRejectedError("该设备厂商不支持这个命令") from exc
+            supported = list_commands_for_vendor(asset.vendor)
+            supported_hint = (
+                f"该厂商支持的命令：{'、'.join(item.name for item in supported)}"
+                if supported
+                else "该厂商当前没有任何可用命令"
+            )
+            raise HitlProposalRejectedError(
+                f"该设备厂商不支持这个命令（厂商 {asset.vendor}，命令 {command_name}）；{supported_hint}"
+            ) from exc
         policy_decision = await device_command_policy_crud.resolve_policy(
             db, asset_id=asset.id, asset_type=asset.asset_type, command_name=command_name
         )

@@ -33,6 +33,12 @@ async def build_model_history(
     rows = await agent_message_crud.list_for_agent(
         db, session_id, agent_id=agent_id, limit=max_messages
     )
+    # 窗口截断可能把开头的 tool 结果与它的 assistant(tool_calls) 消息切开，
+    # 孤立的 tool 消息对 OpenAI 兼容端点是非法历史，直接丢弃到合法边界。
+    start = 0
+    while start < len(rows) and rows[start].role == "tool":
+        start += 1
+    rows = rows[start:]
     history: list[ChatMessage] = []
     if system_prompt is not None:
         history.append(ChatMessage(role="system", content=system_prompt))

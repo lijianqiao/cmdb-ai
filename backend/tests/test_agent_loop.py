@@ -196,6 +196,164 @@ async def test_loop_backfills_skipped_tool_calls_after_early_exit_in_batch(
     assert tool_messages[2].content.endswith("已跳过：等待前一个工具调用的处理结果")
 
 
+async def test_loop_feeds_clarification_back_to_model_for_self_correction(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    """参数错误不应终结回合：模型要能看到错误、修正参数后重试成功。"""
+    session_id = await _make_session(db_session, test_user.id)
+    await append_user_message(db_session, session_id, "查一下 SW-12 的配置")
+    await db_session.commit()
+
+    call_count = {"n": 0}
+
+    async def fake_chat(model_key: str, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return ChatResult(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="query_device_command",
+                        arguments='{"command_name": "show run"}',
+                    )
+                ],
+                finish_reason="tool_calls",
+                prompt_tokens=10,
+                completion_tokens=4,
+            )
+        if call_count["n"] == 2:
+            # 第二轮必须能看到第一轮的失败结果
+            assert any(
+                m.role == "tool" and "参数无效" in m.content for m in messages
+            )
+            return ChatResult(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="call_2",
+                        name="query_device_command",
+                        arguments='{"command_name": "show_running_config"}',
+                    )
+                ],
+                finish_reason="tool_calls",
+                prompt_tokens=12,
+                completion_tokens=4,
+            )
+        return ChatResult(
+            content="配置已查到",
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=15,
+            completion_tokens=3,
+        )
+
+    async def fake_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
+        if args.get("command_name") == "show run":
+            return ToolResult(control="clarification", content="工具参数无效: command_name")
+        return ToolResult(control="ok", content="hostname SW-12 ...")
+
+    outcome = await run_loop(
+        db_session,
+        session_id=session_id,
+        model_key="local-chat",
+        dispatch_tool=fake_dispatch,
+        chat_fn=fake_chat,
+    )
+    await db_session.commit()
+
+    assert outcome.reason == "final_answer"
+    assert outcome.final_answer == "配置已查到"
+    assert call_count["n"] == 3
+
+
+async def test_loop_feeds_rejected_back_to_model_for_explanation(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    """HITL 拒绝也要回灌模型，让它向用户解释原因而不是回合直接死掉。"""
+    session_id = await _make_session(db_session, test_user.id)
+    await append_user_message(db_session, session_id, "查一下这台 Linux 的配置")
+    await db_session.commit()
+
+    call_count = {"n": 0}
+
+    async def fake_chat(model_key: str, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return ChatResult(
+                content=None,
+                tool_calls=[
+                    ToolCall(id="call_1", name="query_device_command", arguments="{}")
+                ],
+                finish_reason="tool_calls",
+                prompt_tokens=10,
+                completion_tokens=4,
+            )
+        assert any(m.role == "tool" and "厂商不支持" in m.content for m in messages)
+        return ChatResult(
+            content="这台设备的厂商不支持查配置，建议改查版本信息",
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=12,
+            completion_tokens=6,
+        )
+
+    async def fake_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
+        return ToolResult(control="rejected", content="该设备厂商不支持这个命令")
+
+    outcome = await run_loop(
+        db_session,
+        session_id=session_id,
+        model_key="local-chat",
+        dispatch_tool=fake_dispatch,
+        chat_fn=fake_chat,
+    )
+    await db_session.commit()
+
+    assert outcome.reason == "final_answer"
+    assert outcome.final_answer is not None
+    assert "不支持" in outcome.final_answer
+
+
+async def test_loop_stops_after_consecutive_all_failed_rounds(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    """连续多轮工具全部失败要强制退出，防止小模型死循环烧预算。"""
+    session_id = await _make_session(db_session, test_user.id)
+    await append_user_message(db_session, session_id, "查询设备")
+    await db_session.commit()
+
+    chat_calls = {"n": 0}
+
+    async def fake_chat(model_key: str, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        chat_calls["n"] += 1
+        return ChatResult(
+            content=None,
+            tool_calls=[
+                ToolCall(id=f"call_{chat_calls['n']}", name="query_device_command", arguments="{}")
+            ],
+            finish_reason="tool_calls",
+            prompt_tokens=5,
+            completion_tokens=2,
+        )
+
+    async def always_fail_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
+        return ToolResult(control="clarification", content="参数无效")
+
+    outcome = await run_loop(
+        db_session,
+        session_id=session_id,
+        model_key="local-chat",
+        dispatch_tool=always_fail_dispatch,
+        chat_fn=fake_chat,
+    )
+    await db_session.commit()
+
+    assert outcome.reason == "early_exit"
+    assert outcome.control == "clarification"
+    assert chat_calls["n"] == 3
+
+
 async def test_loop_stops_when_budget_exceeded(db_session: AsyncSession, test_user: User) -> None:
     session_id = await _make_session(db_session, test_user.id)
     await append_user_message(db_session, session_id, "一直查一直查")

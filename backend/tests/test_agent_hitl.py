@@ -834,8 +834,8 @@ async def test_device_query_rejects_command_unsupported_by_vendor(
 ) -> None:
     """命令存在，但目录里没给这个厂商登记模板——报错要明确说"厂商不支持"，不是"未知命令名"。"""
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
-    # ping 命令目录里没有 juniper_junos 的模板（见 device_commands.py）
-    asset_id = await _make_query_asset(db_session, vendor="juniper_junos")
+    # show_running_config 命令目录里没有 linux 的模板（见 device_commands.py）
+    asset_id = await _make_query_asset(db_session, vendor="linux")
 
     with pytest.raises(HitlProposalRejectedError) as exc_info:
         await propose_action(
@@ -844,13 +844,15 @@ async def test_device_query_rejects_command_unsupported_by_vendor(
             proposed_by_agent_id=None,
             action_type="device_query",
             asset_id=asset_id,
-            payload={"command_name": "ping"},
+            payload={"command_name": "show_running_config"},
             reason="test",
             actor_user_id=test_user.id,
         )
 
     assert "该设备厂商不支持这个命令" in str(exc_info.value)
     assert "未知命令名" not in str(exc_info.value)
+    # 拒绝原因必须可行动：列出该厂商真正支持的命令供模型纠正。
+    assert "show_version" in str(exc_info.value)
 
 
 async def test_device_query_blacklist_rejects_without_creating_proposal(

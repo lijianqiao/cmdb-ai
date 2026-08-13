@@ -5,6 +5,10 @@ until the model returns a final answer (no tool_calls), a tool signals an
 early-exit control, or the budget is exhausted. The model decides *what* to
 call; whether the call is allowed is decided entirely inside `dispatch_tool`
 (docs/guide.md §3.1) — this loop never inspects tool arguments itself.
+
+Only `pending_approval` ends the turn early（等待人工审批）。`clarification` /
+`rejected` / `failed` 的工具结果会回灌给模型继续循环，让它修正参数或向用户
+解释原因；连续多轮全部失败才强制退出，防止小模型死循环烧预算。
 """
 
 import json
@@ -20,7 +24,9 @@ from app.core.llm import ChatResult, ToolCall, chat
 
 type ToolControl = Literal["ok", "rejected", "failed", "clarification", "pending_approval"]
 
-_EARLY_EXIT_CONTROLS: frozenset[ToolControl] = frozenset({"clarification", "pending_approval", "rejected"})
+_EARLY_EXIT_CONTROLS: frozenset[ToolControl] = frozenset({"pending_approval"})
+_FAILURE_CONTROLS: frozenset[ToolControl] = frozenset({"clarification", "rejected", "failed"})
+_MAX_CONSECUTIVE_FAILED_ROUNDS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +73,7 @@ async def run_loop(
 ) -> LoopOutcome:
     """Run one standard agent loop turn against `session_id`'s transcript."""
     active_budget = budget or Budget()
+    consecutive_failed_rounds = 0
 
     while True:
         try:
@@ -109,8 +116,10 @@ async def run_loop(
             tool_calls=result.tool_calls,
         )
 
+        round_controls: list[ToolControl] = []
         for index, tool_call in enumerate(result.tool_calls):
             tool_result = await dispatch_tool(tool_call.name, _parse_arguments(tool_call))
+            round_controls.append(tool_result.control)
             await append_tool_result(
                 db, session_id, tool_call.id, tool_result.content, agent_id=agent_id
             )
@@ -126,3 +135,13 @@ async def run_loop(
                 return LoopOutcome(
                     reason="early_exit", final_answer=None, control=tool_result.control
                 )
+
+        # 整轮工具全部失败才累计；有任何一次成功就重置，避免误杀正常纠错。
+        if round_controls and all(control in _FAILURE_CONTROLS for control in round_controls):
+            consecutive_failed_rounds += 1
+            if consecutive_failed_rounds >= _MAX_CONSECUTIVE_FAILED_ROUNDS:
+                return LoopOutcome(
+                    reason="early_exit", final_answer=None, control=round_controls[-1]
+                )
+        else:
+            consecutive_failed_rounds = 0

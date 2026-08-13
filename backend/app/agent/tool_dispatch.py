@@ -24,6 +24,7 @@ from app.agent.device_commands import CommandName
 from app.agent.hitl import HitlEventPublisher
 from app.agent.hitl_tools import (
     get_device_query_result,
+    list_device_commands_for_asset,
     propose_remediation,
     query_device_command,
 )
@@ -114,6 +115,20 @@ class QueryDeviceCommandArgs(_Args):
 
 class GetDeviceQueryResultArgs(_Args):
     proposal_id: int = Field(ge=1)
+
+
+class ListDeviceCommandsArgs(_Args):
+    asset_id: int = Field(ge=1)
+
+
+def _validation_reason(name: str, exc: ValidationError) -> str:
+    """把校验错误变成模型可自我纠正的提示：字段名 + 期望约束，不回显输入值。"""
+    details: list[str] = []
+    for error in exc.errors(include_url=False, include_input=False, include_context=False):
+        loc = ".".join(str(part) for part in error.get("loc", ())) or "(根)"
+        details.append(f"{loc}: {error.get('msg', 'invalid')}")
+    joined = "; ".join(dict.fromkeys(details))[:1000]
+    return f"工具 {name!r} 参数无效: {joined}"
 
 
 _ARGUMENT_MODELS: dict[ToolName, type[_Args]] = {
@@ -224,7 +239,7 @@ def build_tool_dispatcher(
         except ValidationError as exc:
             return ToolResult(
                 control="clarification",
-                content=f"工具 {name!r} 参数无效: {exc.error_count()} 处错误",
+                content=_validation_reason(name, exc),
             )
         try:
             return await _dispatch_validated(db, tool_name, parsed)
@@ -249,10 +264,10 @@ _ROOT_READ_ONLY_TOOLS: tuple[ToolName, ...] = (
 
 
 def root_tool_schemas() -> list[dict[str, Any]]:
-    """返回根 Agent 的七个只读工具、整改提案工具和两个设备命令工具 Schema。
+    """返回根 Agent 的七个只读工具、整改提案工具和三个设备命令工具 Schema。
 
     Returns:
-        OpenAI 兼容的十个严格函数工具定义。
+        OpenAI 兼容的十一个严格函数工具定义。
     """
     propose_parameters = deepcopy(ProposeRemediationArgs.model_json_schema())
     propose_parameters.pop("title", None)
@@ -264,8 +279,22 @@ def root_tool_schemas() -> list[dict[str, Any]]:
     query_parameters["properties"]["command_name"] = query_parameters.pop("$defs")["CommandName"]
     result_parameters = deepcopy(GetDeviceQueryResultArgs.model_json_schema())
     result_parameters.pop("title", None)
+    list_parameters = deepcopy(ListDeviceCommandsArgs.model_json_schema())
+    list_parameters.pop("title", None)
     return [
         *tool_schemas_for(_ROOT_READ_ONLY_TOOLS),
+        {
+            "type": "function",
+            "function": {
+                "name": "list_device_commands",
+                "description": (
+                    f"[{ROOT_TOOL_SCHEMA_VERSION}] 列出一台资产支持的设备诊断命令、"
+                    "审批策略（白名单/黑名单/需人工审批）与凭据前提。"
+                    "不确定命令名或是否需要审批时先调用这个工具。"
+                ),
+                "parameters": list_parameters,
+            },
+        },
         {
             "type": "function",
             "function": {
@@ -321,18 +350,33 @@ def build_root_tool_dispatcher(
         publisher: 可选的 HITL 安全事件发布器。
 
     Returns:
-        可调用七个只读工具、整改提案工具和两个设备命令工具的调度函数。
+        可调用七个只读工具、整改提案工具和三个设备命令工具的调度函数。
     """
     read_dispatch = build_tool_dispatcher(db, _ROOT_READ_ONLY_TOOLS)
 
     async def dispatch(name: str, arguments: dict[str, Any]) -> ToolResult:
+        if name == "list_device_commands":
+            try:
+                list_args = ListDeviceCommandsArgs.model_validate(arguments)
+            except ValidationError as exc:
+                return ToolResult(
+                    control="clarification",
+                    content=_validation_reason(name, exc),
+                )
+            try:
+                return await list_device_commands_for_asset(db, asset_id=list_args.asset_id)
+            except Exception as exc:
+                return ToolResult(
+                    control="failed",
+                    content=f"工具 {name!r} 执行失败: {type(exc).__name__}",
+                )
         if name == "query_device_command":
             try:
                 query_args = QueryDeviceCommandArgs.model_validate(arguments)
             except ValidationError as exc:
                 return ToolResult(
                     control="clarification",
-                    content=f"工具 {name!r} 参数无效: {exc.error_count()} 处错误",
+                    content=_validation_reason(name, exc),
                 )
             try:
                 return await query_device_command(
@@ -356,7 +400,7 @@ def build_root_tool_dispatcher(
             except ValidationError as exc:
                 return ToolResult(
                     control="clarification",
-                    content=f"工具 {name!r} 参数无效: {exc.error_count()} 处错误",
+                    content=_validation_reason(name, exc),
                 )
             try:
                 return await get_device_query_result(
@@ -376,7 +420,7 @@ def build_root_tool_dispatcher(
         except ValidationError as exc:
             return ToolResult(
                 control="clarification",
-                content=f"工具 {name!r} 参数无效: {exc.error_count()} 处错误",
+                content=_validation_reason(name, exc),
             )
         try:
             return await propose_remediation(

@@ -223,11 +223,11 @@ async def test_propose_remediation_hides_unexpected_exception_detail(
 
 
 def test_root_schema_adds_strict_propose_remediation_definition() -> None:
-    """根工具 Schema 应包含七个只读工具和三个根写/查询工具。"""
+    """根工具 Schema 应包含七个只读工具和四个根写/查询工具。"""
     schemas = root_tool_schemas()
     functions = {item["function"]["name"]: item["function"] for item in schemas}
 
-    assert len(functions) == 10
+    assert len(functions) == 11
     remediation = functions["propose_remediation"]
     parameters = remediation["parameters"]
     assert parameters["additionalProperties"] is False
@@ -250,6 +250,11 @@ def test_root_schema_adds_strict_propose_remediation_definition() -> None:
     result_params = get_result["parameters"]
     assert result_params["additionalProperties"] is False
     assert set(result_params["required"]) == {"proposal_id"}
+
+    list_commands = functions["list_device_commands"]
+    list_params = list_commands["parameters"]
+    assert list_params["additionalProperties"] is False
+    assert set(list_params["required"]) == {"asset_id"}
 
 
 async def test_root_dispatcher_binds_context_to_remediation(
@@ -466,3 +471,91 @@ async def test_get_device_query_result_scopes_to_session(
         db_session, session_id=other_session_id, proposal_id=proposal.id
     )
     assert other_session.control == "rejected"
+
+
+async def test_list_device_commands_rejects_missing_asset(
+    db_session: AsyncSession,
+) -> None:
+    result = await hitl_tools.list_device_commands_for_asset(db_session, asset_id=987654)
+    assert result.control == "rejected"
+    assert "不存在" in result.content
+
+
+async def test_list_device_commands_rejects_asset_without_vendor(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """vendor 为空时要给出可行动提示，而不是泛泛失败。"""
+    _, asset_id = await _make_session_and_asset(db_session, test_user.id)
+
+    result = await hitl_tools.list_device_commands_for_asset(db_session, asset_id=asset_id)
+
+    assert result.control == "rejected"
+    assert "vendor" in result.content
+
+
+async def test_list_device_commands_reports_policy_and_credential_state(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """命令清单应含白名单/黑名单/需审批标注与凭据前提提示。"""
+    from app.crud.device_command_policy import device_command_policy_crud
+
+    _, asset_id = await _make_session_and_asset(db_session, test_user.id)
+    asset = await cmdb_asset_crud.get(db_session, asset_id)
+    assert asset is not None
+    asset.vendor = "cisco_iosxe"
+    await db_session.flush()
+
+    await device_command_policy_crud.create(
+        db_session,
+        {
+            "scope": "asset",
+            "asset_id": asset_id,
+            "command_name": "show_version",
+            "decision": "whitelist",
+        },
+    )
+    await device_command_policy_crud.create(
+        db_session,
+        {
+            "scope": "asset",
+            "asset_id": asset_id,
+            "command_name": "ping",
+            "decision": "blacklist",
+        },
+    )
+    await db_session.commit()
+
+    result = await hitl_tools.list_device_commands_for_asset(db_session, asset_id=asset_id)
+
+    assert result.control == "ok"
+    assert "show_version：" in result.content
+    assert "白名单（自动执行）" in result.content
+    assert "黑名单（禁止执行）" in result.content
+    assert "需人工审批" in result.content
+    # 未配凭据的资产要提示先去 CMDB 配置凭据。
+    assert "未配置登录凭据" in result.content
+
+
+async def test_root_dispatcher_routes_list_device_commands(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """根调度器应把 list_device_commands 路由到工具实现，并对非法参数给可行动错误。"""
+    captured: dict[str, object] = {}
+
+    async def fake_list(db: AsyncSession, **kwargs: object) -> ToolResult:
+        captured.update(kwargs)
+        return ToolResult(control="ok", content="命令清单")
+
+    monkeypatch.setattr(tool_dispatch, "list_device_commands_for_asset", fake_list)
+    dispatch = build_root_tool_dispatcher(db_session, session_id=1, actor_user_id=2)
+
+    ok_result = await dispatch("list_device_commands", {"asset_id": 9})
+    assert ok_result.control == "ok"
+    assert captured == {"asset_id": 9}
+
+    bad_result = await dispatch("list_device_commands", {})
+    assert bad_result.control == "clarification"
+    assert "asset_id" in bad_result.content

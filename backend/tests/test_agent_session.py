@@ -112,6 +112,29 @@ async def test_build_model_history_respects_max_messages(
     assert [m.content for m in history] == ["msg-4", "msg-5"]
 
 
+async def test_build_model_history_drops_orphaned_leading_tool_messages(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    """窗口截断切在 assistant(tool_calls) 与 tool 结果之间时，孤立 tool 消息必须丢弃。"""
+    session_id = await _make_session(db_session, test_user.id)
+    await append_user_message(db_session, session_id, "查状态")
+    await append_assistant_message(
+        db_session,
+        session_id,
+        "",
+        tool_calls=[ToolCall(id="call_1", name="query_monitor_status", arguments="{}")],
+    )
+    await append_tool_result(db_session, session_id, "call_1", "状态: up")
+    await append_assistant_message(db_session, session_id, "设备在线")
+    await db_session.commit()
+
+    # max_messages=2 会把窗口切在 tool 结果处，首条变成孤立 tool 消息
+    history = await build_model_history(db_session, session_id, max_messages=2)
+
+    assert all(m.role != "tool" for m in history)
+    assert [m.content for m in history] == ["设备在线"]
+
+
 async def test_build_model_history_scopes_child_and_prepends_system_prompt(
     db_session: AsyncSession, test_user: User
 ) -> None:
