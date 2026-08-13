@@ -72,6 +72,26 @@ async def test_create_asset_type_policy_success(
     assert body["created_by_user_id"] == test_user.id
 
 
+async def test_create_policy_rejects_asset_type_scope_for_state_changing_command(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user,  # noqa: ANN001
+    auth_headers: Headers,
+) -> None:
+    await _grant_policy_permissions(db_session, test_user)
+    response = await client.post(
+        "/api/v1/device-command-policies/policies",
+        json={
+            "scope": "asset_type",
+            "asset_type": "switch",
+            "command_name": "reboot",
+            "decision": "whitelist",
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 422
+
+
 async def test_create_unknown_command_name_rejected(
     client: AsyncClient,
     db_session: AsyncSession,
