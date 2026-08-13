@@ -9,13 +9,24 @@ from app.agent.device_commands import (
     command_supports_vendor,
     get_command_template,
     get_device_command,
+    list_commands_for_vendor,
     list_device_commands,
+    validate_interface_name,
 )
 
 
 def test_catalog_contains_expected_commands() -> None:
     names = {item.name for item in list_device_commands()}
-    assert names == {"show_version", "show_running_config", "show_interfaces", "ping"}
+    assert names == {
+        "show_version",
+        "show_running_config",
+        "show_interfaces",
+        "ping",
+        "reboot",
+        "shutdown",
+        "port_enable",
+        "port_disable",
+    }
 
 
 def test_every_command_is_versioned_and_has_description() -> None:
@@ -83,3 +94,74 @@ def test_get_command_template_raises_unsupported_vendor_error_for_known_command(
     """命令存在，但目录里没给这个厂商登记模板——不能跟"未知命令名"报同一个错。"""
     with pytest.raises(UnsupportedVendorError):
         get_command_template("show_running_config", "linux")
+
+
+def test_catalog_contains_state_changing_commands() -> None:
+    names = {item.name for item in list_device_commands()}
+    assert {"reboot", "shutdown", "port_enable", "port_disable"} <= names
+
+
+def test_state_changing_commands_are_flagged() -> None:
+    for name in ("reboot", "shutdown", "port_enable", "port_disable"):
+        assert get_device_command(name).command_type == "state_changing"
+
+
+def test_shutdown_only_supports_linux_generic() -> None:
+    """网络设备没有通用整机关机语义，shutdown 只登记 linux/generic。"""
+    shutdown = get_device_command("shutdown")
+    assert set(shutdown.templates) == {"linux", "generic"}
+
+
+def test_reboot_has_confirmation_for_network_vendors() -> None:
+    reboot = get_device_command("reboot")
+    assert reboot.confirmation is not None
+    for vendor in ("cisco_iosxe", "huawei_vrp", "hp_comware", "juniper_junos"):
+        assert vendor in reboot.confirmation
+
+
+def test_port_commands_require_interface_argument() -> None:
+    for name in ("port_enable", "port_disable"):
+        assert get_device_command(name).requires_argument == "interface_name"
+    for name in ("show_version", "reboot", "shutdown"):
+        assert get_device_command(name).requires_argument == "none"
+
+
+def test_port_commands_config_templates_exclude_generic_driver_vendors() -> None:
+    """hp_comware/linux/generic 没有 Scrapli 配置模式驱动，不登记端口命令。"""
+    port_disable = get_device_command("port_disable")
+    assert port_disable.config_templates is not None
+    assert set(port_disable.config_templates) == {"cisco_iosxe", "huawei_vrp", "juniper_junos"}
+    assert "hp_comware" not in port_disable.config_templates
+    assert "linux" not in port_disable.config_templates
+
+
+def test_list_commands_for_vendor_includes_config_mode_only_commands() -> None:
+    """port_enable/port_disable 的 templates={}，但通过 config_templates 支持——发现工具靠这个函数看到它们。"""
+    names = {item.name for item in list_commands_for_vendor("cisco_iosxe")}
+    assert {"port_enable", "port_disable", "reboot", "show_version"} <= names
+    assert command_supports_vendor("port_disable", "cisco_iosxe") is True
+    assert command_supports_vendor("port_disable", "hp_comware") is False
+
+
+def test_junos_port_config_template_includes_explicit_commit() -> None:
+    """Junos 是 set/delete + commit 模式，模板必须显式包含 commit。"""
+    port_disable = get_device_command("port_disable")
+    assert port_disable.config_templates is not None
+    assert "commit" in port_disable.config_templates["juniper_junos"]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("GigabitEthernet0/1", True),
+        ("ge-0/0/1", True),
+        ("Ethernet1/0/1", True),
+        ("", False),
+        ("eth0; rm -rf /", False),
+        ("eth0\nreload", False),
+        ("eth0 reload", False),
+        ("a" * 65, False),
+    ],
+)
+def test_interface_name_validation_is_strict_allowlist(value: str, expected: bool) -> None:
+    assert validate_interface_name(value) is expected
