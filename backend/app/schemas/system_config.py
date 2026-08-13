@@ -85,6 +85,7 @@ class OperationsSystemConfigUpdate(ApiModel):
     monitor_probe_timeout_seconds: float = Field(gt=0, le=30, allow_inf_nan=False)
     monitor_sweep_interval_seconds: float = Field(ge=5, le=3600, allow_inf_nan=False)
     cmdb_diff_interval_seconds: float = Field(ge=60, le=86_400, allow_inf_nan=False)
+    monitor_event_retention_days: int = Field(ge=1, le=90)
 
 
 class LlmSystemConfigResponse(ApiModel):
@@ -109,6 +110,7 @@ class OperationsSystemConfigResponse(ApiModel):
     monitor_probe_timeout_seconds: float
     monitor_sweep_interval_seconds: float
     cmdb_diff_interval_seconds: float
+    monitor_event_retention_days: int
 
 
 class SystemConfigResponse(ApiModel):

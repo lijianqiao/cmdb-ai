@@ -70,6 +70,7 @@ def _operations_payload(**overrides: object) -> dict[str, object]:
         "monitor_probe_timeout_seconds": 3,
         "monitor_sweep_interval_seconds": 30,
         "cmdb_diff_interval_seconds": 3600,
+        "monitor_event_retention_days": 7,
     }
     payload.update(overrides)
     return payload

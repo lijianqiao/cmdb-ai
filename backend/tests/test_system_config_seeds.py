@@ -21,15 +21,16 @@ def test_system_config_permission_is_seeded_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_seed_system_configs_creates_only_four_operational_keys(
+async def test_seed_system_configs_creates_only_five_operational_keys(
     db_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """首次种子应写入四项运行配置，且不包含任何 LLM/Embedding 键。"""
+    """首次种子应写入五项运行配置，且不包含任何 LLM/Embedding 键。"""
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
     monkeypatch.setattr(init_db, "AsyncSessionLocal", session_factory)
 
-    assert await init_db.seed_system_configs() == 4
+    assert "MONITOR_EVENT_RETENTION_DAYS" in OPERATIONS_CONFIG_KEYS
+    assert await init_db.seed_system_configs() == 5
     assert await init_db.seed_system_configs() == 0
 
     async with session_factory() as db:
@@ -55,7 +56,7 @@ async def test_seed_system_configs_preserves_existing_values(
         )
         await db.commit()
 
-    assert await init_db.seed_system_configs() == 3
+    assert await init_db.seed_system_configs() == 4
 
     async with session_factory() as db:
         rows = await system_config_crud.get_by_keys(

@@ -32,6 +32,7 @@ const validOperationsForm = {
   monitor_probe_timeout_seconds: 3,
   monitor_sweep_interval_seconds: 30,
   cmdb_diff_interval_seconds: 3600,
+  monitor_event_retention_days: 7,
 }
 
 describe("系统配置表单规则", () => {
@@ -158,6 +159,22 @@ describe("系统配置表单规则", () => {
     const result = operationsConfigFormSchema.safeParse({
       ...validOperationsForm,
       cmdb_diff_interval_seconds: value,
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it.each([1, 90])("接受监控日志保留天数边界值 %s", (value) => {
+    const result = operationsConfigFormSchema.safeParse({
+      ...validOperationsForm,
+      monitor_event_retention_days: value,
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it.each([0, 91])("拒绝越界监控日志保留天数 %s", (value) => {
+    const result = operationsConfigFormSchema.safeParse({
+      ...validOperationsForm,
+      monitor_event_retention_days: value,
     })
     expect(result.success).toBe(false)
   })

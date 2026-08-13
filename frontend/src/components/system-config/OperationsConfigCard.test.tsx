@@ -28,6 +28,7 @@ describe("OperationsConfigCard", () => {
           monitor_probe_timeout_seconds: 3,
           monitor_sweep_interval_seconds: 30,
           cmdb_diff_interval_seconds: 3600,
+          monitor_event_retention_days: 7,
         }}
         onSaved={vi.fn()}
       />,

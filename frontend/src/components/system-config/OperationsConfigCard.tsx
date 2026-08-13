@@ -71,6 +71,7 @@ function toFormValues(value: OperationsSystemConfig): OperationsConfigFormValues
     monitor_probe_timeout_seconds: value.monitor_probe_timeout_seconds,
     monitor_sweep_interval_seconds: value.monitor_sweep_interval_seconds,
     cmdb_diff_interval_seconds: value.cmdb_diff_interval_seconds,
+    monitor_event_retention_days: value.monitor_event_retention_days,
   }
 }
 
@@ -221,6 +222,30 @@ export function OperationsConfigCard({
                     <FieldDescription>
                       比较监控在线 IP 与 CMDB 资产台账的周期，范围为 [60, 86400]
                       秒；只记录差异审计，不自动修改资产。
+                    </FieldDescription>
+                    <FieldError errors={[fieldState.error]} />
+                  </Field>
+                )}
+              />
+
+              <Controller
+                control={form.control}
+                name="monitor_event_retention_days"
+                render={({ field, fieldState }) => (
+                  <Field data-invalid={fieldState.invalid}>
+                    <FieldLabel htmlFor="monitor-event-retention-days">
+                      监控日志保留天数
+                    </FieldLabel>
+                    <Input
+                      id="monitor-event-retention-days"
+                      type="number"
+                      min={1}
+                      max={90}
+                      aria-invalid={fieldState.invalid}
+                      {...field}
+                    />
+                    <FieldDescription>
+                      过期变化记录会被清理，每台最新一条会保留。
                     </FieldDescription>
                     <FieldError errors={[fieldState.error]} />
                   </Field>

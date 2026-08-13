@@ -20,6 +20,7 @@ export interface OperationsSystemConfig {
   monitor_probe_timeout_seconds: number
   monitor_sweep_interval_seconds: number
   cmdb_diff_interval_seconds: number
+  monitor_event_retention_days: number
 }
 
 export interface SystemConfigData {

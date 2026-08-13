@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     MONITOR_PROBE_TIMEOUT_SECONDS: float = Field(default=3.0, gt=0, le=30)
     MONITOR_SWEEP_INTERVAL_SECONDS: float = Field(default=30.0, ge=5, le=3600)
     CMDB_DIFF_INTERVAL_SECONDS: float = Field(default=3600.0, ge=60, le=86_400)
+    MONITOR_EVENT_RETENTION_DAYS: int = Field(default=7, ge=1, le=90)
     DEVICE_COMMAND_TIMEOUT_SECONDS: float = Field(default=15.0, gt=0, le=120)
 
     # 子 Agent Spawn 配额与回执回收

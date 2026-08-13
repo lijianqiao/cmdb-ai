@@ -31,6 +31,7 @@ from app.services.system_config import (
     KEY_LLM_EMBEDDING_MODEL,
     KEY_MONITOR_PROBE_TIMEOUT_SECONDS,
     KEY_MONITOR_SWEEP_INTERVAL_SECONDS,
+    KEY_MONITOR_EVENT_RETENTION_DAYS,
     LLM_CONFIG_KEYS,
     OPERATIONS_CONFIG_KEYS,
     build_system_config_response,
@@ -130,6 +131,7 @@ async def _build_operations_audit_detail(
         KEY_MONITOR_PROBE_TIMEOUT_SECONDS: str(payload.monitor_probe_timeout_seconds),
         KEY_MONITOR_SWEEP_INTERVAL_SECONDS: str(payload.monitor_sweep_interval_seconds),
         KEY_CMDB_DIFF_INTERVAL_SECONDS: str(payload.cmdb_diff_interval_seconds),
+        KEY_MONITOR_EVENT_RETENTION_DAYS: str(payload.monitor_event_retention_days),
     }
     changed_keys: list[str] = []
     for key, new_value in new_values.items():

@@ -289,7 +289,7 @@ async def seed_permissions() -> int:
 
 def _system_config_seed_values() -> dict[str, str]:
     """
-    从当前 Settings 构建四项运行配置种子值。
+    从当前 Settings 构建五项运行配置种子值。
 
     Returns:
         仅包含 HITL 与监控相关键的默认字符串映射
@@ -305,6 +305,7 @@ def _system_config_seed_values() -> dict[str, str]:
             settings.MONITOR_SWEEP_INTERVAL_SECONDS
         ),
         "CMDB_DIFF_INTERVAL_SECONDS": str(settings.CMDB_DIFF_INTERVAL_SECONDS),
+        "MONITOR_EVENT_RETENTION_DAYS": str(settings.MONITOR_EVENT_RETENTION_DAYS),
     }
 
 

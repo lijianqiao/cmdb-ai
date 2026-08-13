@@ -149,6 +149,7 @@ async def test_save_and_read_operations_config_round_trip(
         monitor_probe_timeout_seconds=5.0,
         monitor_sweep_interval_seconds=60.0,
         cmdb_diff_interval_seconds=7200.0,
+        monitor_event_retention_days=14,
     )
     await save_operations_config(
         db_session,
@@ -160,6 +161,7 @@ async def test_save_and_read_operations_config_round_trip(
     assert config.monitor_probe_timeout_seconds == 5.0
     assert config.monitor_sweep_interval_seconds == 60.0
     assert config.cmdb_diff_interval_seconds == 7200.0
+    assert config.monitor_event_retention_days == 14
 
 
 @pytest.mark.asyncio
@@ -312,17 +314,20 @@ def test_llm_update_rejects_invalid_values(
         ("monitor_sweep_interval_seconds", 3601),
         ("cmdb_diff_interval_seconds", 59),
         ("cmdb_diff_interval_seconds", 86401),
+        ("monitor_event_retention_days", 0),
+        ("monitor_event_retention_days", 91),
     ],
 )
 def test_operations_update_rejects_out_of_range_values(
     field: str,
-    value: float,
+    value: float | int,
 ) -> None:
     payload = {
         "hitl_notify_auto_approve": False,
         "monitor_probe_timeout_seconds": 3.0,
         "monitor_sweep_interval_seconds": 30.0,
         "cmdb_diff_interval_seconds": 3600.0,
+        "monitor_event_retention_days": 7,
         field: value,
     }
     with pytest.raises(ValidationError):

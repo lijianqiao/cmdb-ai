@@ -112,6 +112,11 @@ export const operationsConfigFormSchema = z.object({
     .finite()
     .min(60, "CMDB 差异巡检间隔不能小于 60 秒")
     .max(86400, "CMDB 差异巡检间隔不能超过 86400 秒"),
+  monitor_event_retention_days: z.coerce
+    .number()
+    .int()
+    .min(1, "监控日志保留天数不能小于 1 天")
+    .max(90, "监控日志保留天数不能超过 90 天"),
 })
 
 export type LlmConfigFormValues = z.infer<typeof llmConfigFormSchema>

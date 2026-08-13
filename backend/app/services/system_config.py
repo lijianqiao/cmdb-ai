@@ -35,6 +35,7 @@ KEY_HITL_NOTIFY_AUTO_APPROVE = "HITL_NOTIFY_AUTO_APPROVE"
 KEY_MONITOR_PROBE_TIMEOUT_SECONDS = "MONITOR_PROBE_TIMEOUT_SECONDS"
 KEY_MONITOR_SWEEP_INTERVAL_SECONDS = "MONITOR_SWEEP_INTERVAL_SECONDS"
 KEY_CMDB_DIFF_INTERVAL_SECONDS = "CMDB_DIFF_INTERVAL_SECONDS"
+KEY_MONITOR_EVENT_RETENTION_DAYS = "MONITOR_EVENT_RETENTION_DAYS"
 
 LLM_CONFIG_KEYS = (
     KEY_LLM_CHAT_BASE_URL,
@@ -52,6 +53,7 @@ OPERATIONS_CONFIG_KEYS = (
     KEY_MONITOR_PROBE_TIMEOUT_SECONDS,
     KEY_MONITOR_SWEEP_INTERVAL_SECONDS,
     KEY_CMDB_DIFF_INTERVAL_SECONDS,
+    KEY_MONITOR_EVENT_RETENTION_DAYS,
 )
 
 ALL_SYSTEM_CONFIG_KEYS = LLM_CONFIG_KEYS + OPERATIONS_CONFIG_KEYS
@@ -91,6 +93,7 @@ class EffectiveOperationsConfig:
     monitor_probe_timeout_seconds: float
     monitor_sweep_interval_seconds: float
     cmdb_diff_interval_seconds: float
+    monitor_event_retention_days: int
 
 
 def _resolve_string_value(
@@ -106,6 +109,12 @@ def _resolve_float_value(row: SystemConfig | None, fallback: float) -> float:
     if row is None or row.value is None:
         return fallback
     return float(row.value)
+
+
+def _resolve_int_value(row: SystemConfig | None, fallback: int) -> int:
+    if row is None or row.value is None:
+        return fallback
+    return int(row.value)
 
 
 def _resolve_bool_value(row: SystemConfig | None, fallback: bool) -> bool:
@@ -188,7 +197,7 @@ async def get_effective_llm_config(db: AsyncSession) -> EffectiveLlmConfig:
 
 async def get_effective_operations_config(db: AsyncSession) -> EffectiveOperationsConfig:
     """
-    读取并校验 HITL 与监控四项有效配置。
+    读取并校验 HITL 与监控五项有效配置。
 
     Args:
         db: 异步数据库会话
@@ -214,12 +223,17 @@ async def get_effective_operations_config(db: AsyncSession) -> EffectiveOperatio
             rows.get(KEY_CMDB_DIFF_INTERVAL_SECONDS),
             settings.CMDB_DIFF_INTERVAL_SECONDS,
         ),
+        monitor_event_retention_days=_resolve_int_value(
+            rows.get(KEY_MONITOR_EVENT_RETENTION_DAYS),
+            settings.MONITOR_EVENT_RETENTION_DAYS,
+        ),
     )
     return EffectiveOperationsConfig(
         hitl_notify_auto_approve=validated.hitl_notify_auto_approve,
         monitor_probe_timeout_seconds=validated.monitor_probe_timeout_seconds,
         monitor_sweep_interval_seconds=validated.monitor_sweep_interval_seconds,
         cmdb_diff_interval_seconds=validated.cmdb_diff_interval_seconds,
+        monitor_event_retention_days=validated.monitor_event_retention_days,
     )
 
 
@@ -295,6 +309,9 @@ async def save_operations_config(
                 payload.monitor_sweep_interval_seconds
             ),
             KEY_CMDB_DIFF_INTERVAL_SECONDS: str(payload.cmdb_diff_interval_seconds),
+            KEY_MONITOR_EVENT_RETENTION_DAYS: str(
+                payload.monitor_event_retention_days
+            ),
         },
         updated_by_user_id=updated_by_user_id,
     )
@@ -330,5 +347,6 @@ async def build_system_config_response(db: AsyncSession) -> SystemConfigResponse
             monitor_probe_timeout_seconds=operations.monitor_probe_timeout_seconds,
             monitor_sweep_interval_seconds=operations.monitor_sweep_interval_seconds,
             cmdb_diff_interval_seconds=operations.cmdb_diff_interval_seconds,
+            monitor_event_retention_days=operations.monitor_event_retention_days,
         ),
     )
