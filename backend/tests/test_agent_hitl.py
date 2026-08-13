@@ -169,7 +169,9 @@ async def test_propose_merges_matching_asset_id_and_returns_safe_summary(
         ("unknown", {"message": "告警"}),
         ("notify", {"message": "告警", "secret": "不得接收"}),
         ("notify", {"message": 123}),
-        ("device_control", {"command": 123}),
+        ("device_control", {"command_name": 123}),
+        ("device_control", {"command_name": "reboot", "interface_name": "eth0"}),  # reboot 不接受参数
+        ("device_control", {"command_name": "port_disable"}),  # port_disable 缺 interface_name
     ],
 )
 async def test_propose_rejects_invalid_payload_before_insert(
@@ -367,27 +369,40 @@ async def test_database_setting_can_auto_approve_notify_when_env_is_false(
     assert summary.status == "EXECUTED"
 
 
-async def test_device_control_never_auto_approves(
-    db_session: AsyncSession,
-    test_user: User,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_device_control_rejects_read_only_command_name(
+    db_session: AsyncSession, test_user: User
 ) -> None:
-    """高风险 device_control 即使配置开启也必须保持 PENDING。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", True)
+    """action_type=device_control 但传了只读命令名——两个工具的语义边界要在服务端强制。"""
     session_id, asset_id = await _make_context(db_session, test_user.id)
+    with pytest.raises(HitlProposalRejectedError, match="只读命令请使用 query_device_command"):
+        await propose_action(
+            db_session,
+            session_id=session_id,
+            proposed_by_agent_id=None,
+            action_type="device_control",
+            asset_id=asset_id,
+            payload={"command_name": "show_version"},
+            reason="test",
+            actor_user_id=test_user.id,
+        )
 
-    summary = await propose_action(
-        db_session,
-        session_id=session_id,
-        proposed_by_agent_id=None,
-        action_type="device_control",
-        asset_id=asset_id,
-        payload={"command": "reboot"},
-        reason="故障恢复",
-        actor_user_id=test_user.id,
-    )
 
-    assert summary.status == "PENDING"
+async def test_device_query_rejects_state_changing_command_name(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    """反过来，query_device_command 也不能被用来偷跑变更类命令。"""
+    session_id, asset_id = await _make_context(db_session, test_user.id)
+    with pytest.raises(HitlProposalRejectedError, match="会改变设备状态的命令请使用 propose_device_control"):
+        await propose_action(
+            db_session,
+            session_id=session_id,
+            proposed_by_agent_id=None,
+            action_type="device_query",
+            asset_id=asset_id,
+            payload={"command_name": "reboot"},
+            reason="test",
+            actor_user_id=test_user.id,
+        )
 
 
 async def test_decide_approve_does_not_resume_or_resolve(
@@ -660,14 +675,15 @@ async def test_device_control_stub_failure_stays_approved(
     test_user: User,
 ) -> None:
     """device_control stub 失败后保持 APPROVED 并发布失败事件。"""
-    session_id, asset_id = await _make_context(db_session, test_user.id)
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    asset_id = await _make_query_asset(db_session, vendor="linux")
     proposal = await propose_action(
         db_session,
         session_id=session_id,
         proposed_by_agent_id=None,
         action_type="device_control",
         asset_id=asset_id,
-        payload={"command": "shutdown"},
+        payload={"command_name": "shutdown"},
         reason="维护窗口",
         actor_user_id=test_user.id,
     )

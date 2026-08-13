@@ -25,11 +25,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.device_commands import (
-    UnknownDeviceCommandError,
-    UnsupportedVendorError,
-    get_command_template,
+    command_supports_vendor,
+    command_type_of,
+    get_device_command,
     list_command_names,
     list_commands_for_vendor,
+    validate_interface_name,
 )
 from app.agent.executors import (
     DeviceQueryExecutor,
@@ -55,20 +56,13 @@ class NotifyPayload(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
 
 
-class DeviceControlPayload(BaseModel):
-    """设备管控动作的严格载荷。"""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    command: Literal["reboot", "shutdown", "port_disable", "port_enable"]
-
-
-class DeviceQueryPayload(BaseModel):
-    """设备诊断查询动作的严格载荷。"""
+class DeviceCommandPayload(BaseModel):
+    """设备诊断/管控动作的严格载荷；两者共用同一形状。"""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     command_name: str = Field(min_length=1, max_length=100)
+    interface_name: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class HitlEventPublisher(Protocol):
@@ -209,10 +203,8 @@ def _validated_payload(
     try:
         if action_type == "notify":
             validated = NotifyPayload.model_validate(candidate).model_dump()
-        elif action_type == "device_control":
-            validated = DeviceControlPayload.model_validate(candidate).model_dump()
-        elif action_type == "device_query":
-            validated = DeviceQueryPayload.model_validate(candidate).model_dump()
+        elif action_type in ("device_control", "device_query"):
+            validated = DeviceCommandPayload.model_validate(candidate).model_dump()
         else:
             raise HitlProposalRejectedError(f"不支持的 HITL 动作类型：{action_type}")
     except ValidationError as exc:
@@ -265,20 +257,29 @@ async def propose_action(
     if asset is None:
         raise HitlProposalRejectedError(f"CMDB 资产不存在：{asset_id}")
 
-    if action_type == "device_query":
+    if action_type in ("device_query", "device_control"):
         command_name = stored_payload["command_name"]
         assert isinstance(command_name, str)
+
+        command_type = command_type_of(command_name)
+        if command_type is None:
+            raise HitlProposalRejectedError(
+                f"未知命令名：{command_name}；可用命令：{'、'.join(list_command_names())}"
+            )
+        if action_type == "device_query" and command_type != "read_only":
+            raise HitlProposalRejectedError(
+                "会改变设备状态的命令请使用 propose_device_control 工具，不能用 query_device_command"
+            )
+        if action_type == "device_control" and command_type != "state_changing":
+            raise HitlProposalRejectedError(
+                "只读命令请使用 query_device_command 工具，不需要走 propose_device_control"
+            )
+
         if asset.credential_type == "none":
             raise HitlProposalRejectedError("该资产未配置登录凭据，无法执行设备命令")
         if not asset.vendor:
             raise HitlProposalRejectedError("资产未配置厂商信息，无法确定命令语法")
-        try:
-            get_command_template(command_name, asset.vendor)
-        except UnknownDeviceCommandError as exc:
-            raise HitlProposalRejectedError(
-                f"未知命令名：{command_name}；可用命令：{'、'.join(list_command_names())}"
-            ) from exc
-        except UnsupportedVendorError as exc:
+        if not command_supports_vendor(command_name, asset.vendor):
             supported = list_commands_for_vendor(asset.vendor)
             supported_hint = (
                 f"该厂商支持的命令：{'、'.join(item.name for item in supported)}"
@@ -287,7 +288,16 @@ async def propose_action(
             )
             raise HitlProposalRejectedError(
                 f"该设备厂商不支持这个命令（厂商 {asset.vendor}，命令 {command_name}）；{supported_hint}"
-            ) from exc
+            )
+
+        definition = get_device_command(command_name)
+        interface_name = stored_payload.get("interface_name")
+        if definition.requires_argument == "interface_name":
+            if not isinstance(interface_name, str) or not validate_interface_name(interface_name):
+                raise HitlProposalRejectedError("port_enable/port_disable 需要合法的接口名参数")
+        elif interface_name is not None:
+            raise HitlProposalRejectedError(f"命令 {command_name} 不接受 interface_name 参数")
+
         policy_decision = await device_command_policy_crud.resolve_policy(
             db, asset_id=asset.id, asset_type=asset.asset_type, command_name=command_name
         )
