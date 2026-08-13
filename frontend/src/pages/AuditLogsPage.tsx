@@ -50,6 +50,7 @@ const ACTION_LABELS: Record<string, string> = {
   update_llm_system_config: "更新模型配置",
   update_operations_system_config: "更新运行配置",
   bootstrap_system_configs: "初始化运行配置",
+  view_cmdb_credential: "查看资产凭据",
 }
 
 /** base-ui 的 Select 需要 items 才能在受控赋值时渲染选中项文案 */

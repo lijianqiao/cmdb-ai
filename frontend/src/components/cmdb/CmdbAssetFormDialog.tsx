@@ -7,9 +7,10 @@
  * 布局：短字段两列紧凑排布；内容区可滚动，底部按钮始终可见。
  */
 
-import { useEffect, useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { Controller, useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
+import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -23,9 +24,16 @@ import {
 import {
   Field,
   FieldError,
+  FieldGroup,
   FieldLabel,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from "@/components/ui/input-group"
 import {
   Select,
   SelectContent,
@@ -36,6 +44,11 @@ import {
 } from "@/components/ui/select"
 import { Spinner } from "@/components/ui/spinner"
 import { Textarea } from "@/components/ui/textarea"
+import api from "@/lib/api"
+import { PERMISSIONS } from "@/lib/constants"
+import { ViewIcon, ViewOffSlashIcon } from "@/lib/icons"
+import { usePermission } from "@/hooks/use-permission"
+import type { ApiResponse } from "@/types/api"
 import type {
   CmdbAsset,
   CmdbAssetCreate,
@@ -74,6 +87,86 @@ const CREDENTIAL_TYPE_ITEMS: { label: string; value: CredentialType }[] = [
   { label: "静态密码", value: "static" },
   { label: "动态密码（仅记账号）", value: "dynamic" },
 ]
+
+/** 拉取已保存的静态凭据明文（不写回编辑表单） */
+export async function fetchCmdbAssetCredential(assetId: number): Promise<string> {
+  const response = await api.get<ApiResponse<{ password: string }>>(
+    `/cmdb/assets/${assetId}/credential`
+  )
+  return response.data.data.password
+}
+
+interface CmdbCredentialRevealDialogProps {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  password: string
+  assetHostname?: string
+}
+
+/** 静态凭据明文查看对话框（默认隐藏字符，可切换显示） */
+export function CmdbCredentialRevealDialog({
+  open,
+  onOpenChange,
+  password,
+  assetHostname,
+}: CmdbCredentialRevealDialogProps) {
+  const [showPassword, setShowPassword] = useState(false)
+
+  const handleOpenChange = (next: boolean) => {
+    if (!next) {
+      setShowPassword(false)
+    }
+    onOpenChange(next)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>查看密码</DialogTitle>
+          {assetHostname ? (
+            <DialogDescription>
+              资产「{assetHostname}」的静态登录密码
+            </DialogDescription>
+          ) : null}
+        </DialogHeader>
+        <FieldGroup>
+          <Field>
+            <FieldLabel htmlFor="cmdb-credential-reveal">登录密码</FieldLabel>
+            <InputGroup>
+              <InputGroupInput
+                id="cmdb-credential-reveal"
+                type={showPassword ? "text" : "password"}
+                readOnly
+                value={password}
+              />
+              <InputGroupAddon align="inline-end">
+                <InputGroupButton
+                  type="button"
+                  size="icon-xs"
+                  aria-label={showPassword ? "隐藏密码" : "显示密码"}
+                  aria-pressed={showPassword}
+                  onClick={() => setShowPassword((prev) => !prev)}
+                >
+                  {showPassword ? <ViewOffSlashIcon /> : <ViewIcon />}
+                </InputGroupButton>
+              </InputGroupAddon>
+            </InputGroup>
+          </Field>
+        </FieldGroup>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => handleOpenChange(false)}
+          >
+            关闭
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
 
 interface CmdbAssetFormDialogProps {
   open: boolean
@@ -119,7 +212,11 @@ export function CmdbAssetFormDialog({
   asset,
   onSubmit,
 }: CmdbAssetFormDialogProps) {
+  const { hasPermission } = usePermission()
   const isEdit = !!asset
+  const [credentialDialogOpen, setCredentialDialogOpen] = useState(false)
+  const [revealedPassword, setRevealedPassword] = useState("")
+  const [credentialLoading, setCredentialLoading] = useState(false)
   const form = useForm<CmdbAssetFormValues>({
     resolver: (data, context, options) =>
       zodResolver(createFormSchema(asset?.credential_type ?? null))(
@@ -137,6 +234,26 @@ export function CmdbAssetFormDialog({
   }, [open, asset, form])
 
   const credentialType = form.watch("credential_type")
+
+  const canViewCredential =
+    isEdit &&
+    asset?.credential_type === "static" &&
+    asset?.credential_password_set &&
+    hasPermission(PERMISSIONS.CMDB_CREDENTIAL_READ)
+
+  const handleViewCredential = async () => {
+    if (!asset) return
+    setCredentialLoading(true)
+    try {
+      const password = await fetchCmdbAssetCredential(asset.id)
+      setRevealedPassword(password)
+      setCredentialDialogOpen(true)
+    } catch {
+      toast.error("查看密码失败")
+    } finally {
+      setCredentialLoading(false)
+    }
+  }
 
   const assetTypeItems = useMemo(() => {
     const current = asset?.asset_type
@@ -182,7 +299,8 @@ export function CmdbAssetFormDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[min(90dvh,40rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-xl">
         <DialogHeader className="shrink-0 px-6 pt-6 pb-3">
           <DialogTitle>{isEdit ? "编辑资产" : "新增资产"}</DialogTitle>
@@ -391,14 +509,31 @@ export function CmdbAssetFormDialog({
                       className="sm:col-span-2"
                       data-invalid={fieldState.invalid}
                     >
-                      <FieldLabel htmlFor="asset-credential-password">
-                        登录密码
-                        {isEdit && asset?.credential_password_set && (
-                          <span className="ml-2 text-xs font-normal text-muted-foreground">
-                            已设置
-                          </span>
+                      <div className="flex items-center gap-2">
+                        <FieldLabel htmlFor="asset-credential-password">
+                          登录密码
+                          {isEdit && asset?.credential_password_set && (
+                            <span className="ml-2 text-xs font-normal text-muted-foreground">
+                              已设置
+                            </span>
+                          )}
+                        </FieldLabel>
+                        {canViewCredential && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-auto px-2 py-0 text-xs"
+                            disabled={credentialLoading}
+                            onClick={handleViewCredential}
+                          >
+                            {credentialLoading && (
+                              <Spinner data-icon="inline-start" />
+                            )}
+                            查看密码
+                          </Button>
                         )}
-                      </FieldLabel>
+                      </div>
                       <Input
                         id="asset-credential-password"
                         type="password"
@@ -445,5 +580,12 @@ export function CmdbAssetFormDialog({
         </form>
       </DialogContent>
     </Dialog>
+    <CmdbCredentialRevealDialog
+      open={credentialDialogOpen}
+      onOpenChange={setCredentialDialogOpen}
+      password={revealedPassword}
+      assetHostname={asset?.hostname}
+    />
+    </>
   )
 }

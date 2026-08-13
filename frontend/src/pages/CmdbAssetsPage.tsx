@@ -15,6 +15,7 @@ import {
   Delete02Icon,
   InboxIcon,
   MoreHorizontalIcon,
+  ViewIcon,
 } from "@/lib/icons"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -30,7 +31,7 @@ import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable } from "@/components/common/DataTable"
 import { Pagination } from "@/components/common/Pagination"
 import { ConfirmDialog } from "@/components/common/ConfirmDialog"
-import { CmdbAssetFormDialog } from "@/components/cmdb/CmdbAssetFormDialog"
+import { CmdbAssetFormDialog, CmdbCredentialRevealDialog, fetchCmdbAssetCredential } from "@/components/cmdb/CmdbAssetFormDialog"
 import api from "@/lib/api"
 import { usePaginatedQuery } from "@/hooks/use-paginated-query"
 import { usePermission } from "@/hooks/use-permission"
@@ -61,6 +62,9 @@ export function CmdbAssetsPage() {
   const [editingAsset, setEditingAsset] = useState<CmdbAsset | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteAsset, setDeleteAsset] = useState<CmdbAsset | null>(null)
+  const [credentialDialogOpen, setCredentialDialogOpen] = useState(false)
+  const [credentialAsset, setCredentialAsset] = useState<CmdbAsset | null>(null)
+  const [revealedPassword, setRevealedPassword] = useState("")
 
   const handleCreate = () => {
     setEditingAsset(null)
@@ -88,6 +92,17 @@ export function CmdbAssetsPage() {
   const handleDeleteClick = (asset: CmdbAsset) => {
     setDeleteAsset(asset)
     setDeleteOpen(true)
+  }
+
+  const handleViewCredential = async (asset: CmdbAsset) => {
+    try {
+      const password = await fetchCmdbAssetCredential(asset.id)
+      setCredentialAsset(asset)
+      setRevealedPassword(password)
+      setCredentialDialogOpen(true)
+    } catch {
+      toast.error("查看密码失败")
+    }
   }
 
   const handleSubmit = async (
@@ -191,6 +206,16 @@ export function CmdbAssetsPage() {
                     <span>编辑</span>
                   </DropdownMenuItem>
                 )}
+                {hasPermission(PERMISSIONS.CMDB_CREDENTIAL_READ) &&
+                  row.original.credential_type === "static" &&
+                  row.original.credential_password_set && (
+                    <DropdownMenuItem
+                      onClick={() => handleViewCredential(row.original)}
+                    >
+                      <ViewIcon />
+                      <span>查看密码</span>
+                    </DropdownMenuItem>
+                  )}
                 {hasPermission(PERMISSIONS.CMDB_MANAGE) && (
                   <DropdownMenuItem
                     onClick={() => handleDeleteClick(row.original)}
@@ -274,6 +299,12 @@ export function CmdbAssetsPage() {
         title="确认删除资产"
         description={`确定要删除资产「${deleteAsset?.hostname}」吗？可在回收站恢复。`}
         onConfirm={handleDeleteConfirm}
+      />
+      <CmdbCredentialRevealDialog
+        open={credentialDialogOpen}
+        onOpenChange={setCredentialDialogOpen}
+        password={revealedPassword}
+        assetHostname={credentialAsset?.hostname}
       />
     </div>
   )

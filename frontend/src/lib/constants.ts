@@ -51,6 +51,7 @@ export const PERMISSIONS = {
   // CMDB 模块
   CMDB_READ: "cmdb:read",
   CMDB_MANAGE: "cmdb:manage",
+  CMDB_CREDENTIAL_READ: "cmdb:credential_read",
   // 监控模块
   MONITOR_READ: "monitor:read",
   MONITOR_MANAGE: "monitor:manage",
