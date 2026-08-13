@@ -109,6 +109,26 @@ async def test_asset_level_blacklist_overrides_asset_type_whitelist(
     assert result == "blacklist"
 
 
+async def test_resolve_policy_ignores_asset_type_whitelist_for_state_changing(
+    db_session: AsyncSession,
+) -> None:
+    """历史遗留的 asset_type 级 reboot 白名单不得自动放行，应视为未分类。"""
+    asset_id = await _make_asset(db_session)
+    await device_command_policy_crud.create(
+        db_session,
+        {
+            "scope": "asset_type",
+            "asset_type": "switch",
+            "command_name": "reboot",
+            "decision": "whitelist",
+        },
+    )
+    result = await device_command_policy_crud.resolve_policy(
+        db_session, asset_id=asset_id, asset_type="switch", command_name="reboot"
+    )
+    assert result is None
+
+
 async def test_resolve_policy_ignores_other_assets_asset_level_rule(
     db_session: AsyncSession,
 ) -> None:

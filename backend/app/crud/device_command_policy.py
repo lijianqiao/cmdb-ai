@@ -3,6 +3,7 @@
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.device_commands import command_type_of
 from app.crud.base import CRUDBase, ModelData
 from app.models.device_command_policy import DeviceCommandPolicy
 
@@ -43,7 +44,11 @@ class CRUDDeviceCommandPolicy(CRUDBase[DeviceCommandPolicy]):
     async def resolve_policy(
         self, db: AsyncSession, *, asset_id: int, asset_type: str, command_name: str
     ) -> str | None:
-        """单台设备策略优先于设备类型策略；都没有则返回 None（表示未分类）。"""
+        """单台设备策略优先于设备类型策略；都没有则返回 None（表示未分类）。
+
+        state_changing 命令忽略 asset_type 级策略，防止历史/手工/恢复行对整类设备
+        误放行 reboot 等变更命令；仅 asset 级策略仍生效。
+        """
         asset_stmt = select(DeviceCommandPolicy).where(
             DeviceCommandPolicy.scope == "asset",
             DeviceCommandPolicy.asset_id == asset_id,
@@ -53,6 +58,9 @@ class CRUDDeviceCommandPolicy(CRUDBase[DeviceCommandPolicy]):
         asset_policy = (await db.execute(asset_stmt)).scalar_one_or_none()
         if asset_policy is not None:
             return asset_policy.decision
+
+        if command_type_of(command_name) == "state_changing":
+            return None
 
         type_stmt = select(DeviceCommandPolicy).where(
             DeviceCommandPolicy.scope == "asset_type",
