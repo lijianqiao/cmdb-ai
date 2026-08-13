@@ -20,6 +20,7 @@ from app.models.user import User
 from app.schemas.common import PaginatedData, ResponseEnvelope, paginated_response, success_response
 from app.schemas.monitor import (
     MonitorLatestStatus,
+    MonitorLogItem,
     MonitorRuntimeResponse,
     MonitorTargetCreate,
     MonitorTargetResponse,
@@ -121,6 +122,29 @@ async def get_monitor_runtime(
             sweep_interval_seconds=int(operations.monitor_sweep_interval_seconds)
         )
     )
+
+
+@router.get("/logs", response_model=ResponseEnvelope[PaginatedData[MonitorLogItem]])
+async def list_monitor_logs(
+    page: int = Query(default=1, ge=1, le=100_000),
+    page_size: int = Query(default=10, ge=1, le=100),
+    target_id: int | None = Query(default=None, gt=0),
+    status: MonitorLatestStatus | None = Query(default=None),
+    search: str | None = Query(default=None, min_length=1, max_length=100),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("monitor_log:read")),
+) -> ResponseEnvelope[PaginatedData[MonitorLogItem]]:
+    """分页列出监控状态变化历史，可按目标、状态与标签/IP 筛选。"""
+    logs, total = await monitor_status_event_crud.list_logs(
+        db,
+        target_id=target_id,
+        status=status,
+        search=search,
+        skip=(page - 1) * page_size,
+        limit=page_size,
+    )
+    items = [MonitorLogItem.model_validate(log) for log in logs]
+    return paginated_response(items, total, page, page_size)
 
 
 @router.get("/targets", response_model=ResponseEnvelope[PaginatedData[MonitorTargetResponse]])

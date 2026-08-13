@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.monitor_status_event import monitor_status_event_crud
+from app.crud.monitor_target import monitor_target_crud
 from app.models.permission import Permission
 from app.models.user import user_roles
 
@@ -36,6 +37,24 @@ async def _grant_monitor_permissions(db_session: AsyncSession, test_user) -> Non
         await db_session.execute(
             role_permissions.insert().values(role_id=role_id, permission_id=permission.id)
         )
+    await db_session.commit()
+
+
+async def _grant_monitor_log_read(db_session: AsyncSession, test_user) -> None:  # noqa: ANN001
+    """现场创建 monitor_log:read 并挂到 test_user 已有角色上。"""
+    from sqlalchemy import select
+
+    from app.models.role import role_permissions
+
+    role_id = (
+        await db_session.execute(select(user_roles.c.role_id).where(user_roles.c.user_id == test_user.id))
+    ).scalar_one()
+    permission = Permission(name="查看监控日志", code="monitor_log:read", module="监控")
+    db_session.add(permission)
+    await db_session.flush()
+    await db_session.execute(
+        role_permissions.insert().values(role_id=role_id, permission_id=permission.id)
+    )
     await db_session.commit()
 
 
@@ -184,3 +203,52 @@ async def test_monitor_runtime_returns_sweep_interval(
     response = await client.get("/api/v1/monitor/runtime", headers=auth_headers)
     assert response.status_code == 200, response.text
     assert response.json()["data"]["sweep_interval_seconds"] >= 5
+
+
+async def test_monitor_logs_requires_monitor_log_read_permission(
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+) -> None:
+    """仅有 monitor:read 时访问监控日志必须 403。"""
+    await _grant_monitor_permissions(db_session, test_user)
+    response = await client.get("/api/v1/monitor/logs", headers=auth_headers)
+    assert response.status_code == 403
+
+
+async def test_monitor_logs_filters_by_target_id_and_status(
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+) -> None:
+    """有 monitor_log:read 时可按 target_id 与 status 筛到 down 行。"""
+    await _grant_monitor_log_read(db_session, test_user)
+    target_a = await monitor_target_crud.create(
+        db_session,
+        {"ip_address": "10.0.0.11", "port": 22, "label": "SSH-A", "is_active": True},
+    )
+    target_b = await monitor_target_crud.create(
+        db_session,
+        {"ip_address": "10.0.0.12", "port": 443, "label": "HTTPS-B", "is_active": True},
+    )
+    await monitor_status_event_crud.record(
+        db_session, target_id=target_a.id, status="down", latency_ms=None, detail="连接超时"
+    )
+    await monitor_status_event_crud.record(
+        db_session, target_id=target_a.id, status="up", latency_ms=8, detail=""
+    )
+    await monitor_status_event_crud.record(
+        db_session, target_id=target_b.id, status="down", latency_ms=None, detail="拒绝连接"
+    )
+    await db_session.commit()
+
+    response = await client.get(
+        f"/api/v1/monitor/logs?target_id={target_a.id}&status=down",
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["total"] == 1
+    item = payload["items"][0]
+    assert item["target_id"] == target_a.id
+    assert item["status"] == "down"
+    assert item["detail"] == "连接超时"
+    assert item["label"] == "SSH-A"
+    assert item["ip_address"] == "10.0.0.11"
+    assert item["port"] == 22

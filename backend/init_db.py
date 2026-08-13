@@ -176,6 +176,12 @@ SEED_PERMISSIONS: tuple[SeedPermission, ...] = (
         "description": "创建/更新/删除监控目标",
     },
     {
+        "name": "查看监控日志",
+        "code": "monitor_log:read",
+        "module": "监控",
+        "description": "查看监控探活状态变化历史",
+    },
+    {
         "name": "查看设备命令策略",
         "code": "device_command_policy:read",
         "module": "设备命令策略",

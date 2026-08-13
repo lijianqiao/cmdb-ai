@@ -68,3 +68,17 @@ class MonitorRuntimeResponse(ApiModel):
     """监控页轮询所需的运行参数。"""
 
     sweep_interval_seconds: int
+
+
+class MonitorLogItem(ApiModel):
+    """单条监控状态变化日志。"""
+
+    id: int
+    target_id: int
+    label: str
+    ip_address: str
+    port: int
+    status: MonitorLatestStatus
+    latency_ms: int | None = None
+    detail: str = ""
+    checked_at: datetime

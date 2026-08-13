@@ -7,12 +7,30 @@
 """
 
 from datetime import UTC, datetime, timedelta
+from typing import TypedDict, cast
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.crud.base import contains_pattern
 from app.models.monitor_status_event import MonitorStatusEvent
+from app.models.monitor_target import MonitorTarget
+
+
+class MonitorLogItemRow(TypedDict):
+    """监控日志列表行，含目标展示字段。"""
+
+    id: int
+    target_id: int
+    label: str
+    ip_address: str
+    port: int
+    status: str
+    latency_ms: int | None
+    detail: str
+    checked_at: datetime
 
 
 class CRUDMonitorStatusEvent:
@@ -84,6 +102,81 @@ class CRUDMonitorStatusEvent:
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_logs(
+        self,
+        db: AsyncSession,
+        *,
+        target_id: int | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        skip: int = 0,
+        limit: int = 10,
+    ) -> tuple[list[MonitorLogItemRow], int]:
+        """分页列出监控状态变化日志，并附带目标展示字段。
+
+        Args:
+            db: 数据库会话。
+            target_id: 可选，按监控目标筛选。
+            status: 可选，按探测状态（``up`` / ``down``）筛选。
+            search: 可选，对目标标签与 IP 做模糊匹配。
+            skip: 分页偏移。
+            limit: 每页条数。
+
+        Returns:
+            日志行列表与符合条件的总条数。
+        """
+        filters = []
+        if target_id is not None:
+            filters.append(MonitorStatusEvent.target_id == target_id)
+        if status is not None:
+            filters.append(MonitorStatusEvent.status == status)
+        if search:
+            pattern = contains_pattern(search)
+            filters.append(
+                MonitorTarget.label.ilike(pattern, escape="\\")
+                | MonitorTarget.ip_address.ilike(pattern, escape="\\")
+            )
+
+        stmt = (
+            select(
+                MonitorStatusEvent.id,
+                MonitorStatusEvent.target_id,
+                MonitorTarget.label,
+                MonitorTarget.ip_address,
+                MonitorTarget.port,
+                MonitorStatusEvent.status,
+                MonitorStatusEvent.latency_ms,
+                MonitorStatusEvent.detail,
+                MonitorStatusEvent.checked_at,
+            )
+            .join(MonitorTarget, MonitorStatusEvent.target_id == MonitorTarget.id)
+            .where(*filters)
+        )
+
+        count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
+        total = (await db.execute(count_stmt)).scalar_one()
+
+        page_stmt = stmt.order_by(
+            MonitorStatusEvent.checked_at.desc(),
+            MonitorStatusEvent.id.desc(),
+        ).offset(skip).limit(limit)
+        rows = (await db.execute(page_stmt)).all()
+        items: list[MonitorLogItemRow] = [
+            {
+                "id": row.id,
+                "target_id": row.target_id,
+                "label": row.label,
+                "ip_address": row.ip_address,
+                "port": row.port,
+                "status": row.status,
+                "latency_ms": row.latency_ms,
+                "detail": row.detail,
+                "checked_at": row.checked_at,
+            }
+            for row in rows
+        ]
+        return items, total
+
     async def get_latest_status_for_targets(
         self, db: AsyncSession, target_ids: list[int]
     ) -> dict[int, MonitorStatusEvent]:
@@ -151,8 +244,11 @@ class CRUDMonitorStatusEvent:
             ranked.c.rn > 1,
             ranked.c.checked_at < cutoff,
         )
-        result = await db.execute(
-            delete(MonitorStatusEvent).where(MonitorStatusEvent.id.in_(stale_ids))
+        result = cast(
+            CursorResult[tuple[()]],
+            await db.execute(
+                delete(MonitorStatusEvent).where(MonitorStatusEvent.id.in_(stale_ids))
+            ),
         )
         return result.rowcount or 0
 
