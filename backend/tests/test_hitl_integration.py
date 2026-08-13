@@ -9,18 +9,22 @@
 1. 通过 CMDB CRUD 准备真实资产，再用 build_root_tool_dispatcher 走 propose_remediation。
 2. 校验工具结果仅含安全摘要（pending_approval），不含原始载荷秘密。
 3. 授予 agent:hitl_approve 后经 HTTP decide 完成审批，断言状态机与审计动作。
-4. device_control 在通知自动批准开启时仍强制 HITL；stub 失败保持 APPROVED 且二次审批 409。
+4. 未分类 device_control 在通知自动批准开启时仍强制 HITL；stub 失败保持 APPROVED 且二次审批 409。
 5. 子角色调度器即使白名单污染也拒绝 propose_remediation，保证写路径仅根 Agent 可走。
 """
 
 import re
+from unittest.mock import patch
 
 import pytest
+from cryptography.fernet import Fernet
 from httpx import AsyncClient
+from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.tool_dispatch import build_root_tool_dispatcher, build_tool_dispatcher
+from app.core.cmdb_credential import encrypt_credential_password
 from app.core.config import settings
 from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
@@ -33,7 +37,7 @@ pytestmark = pytest.mark.asyncio
 
 type Headers = dict[str, str]
 
-_PROPOSAL_ID_RE = re.compile(r"整改提案\s+(\d+)")
+_PROPOSAL_ID_RE = re.compile(r"(?:整改提案|设备管控请求)\s+(\d+)")
 
 
 async def _grant_hitl_approve(db_session: AsyncSession, test_user: User) -> None:
@@ -139,16 +143,24 @@ async def test_scenario_a_notify_manual_approve_end_to_end(
     assert "hitl_executed" in actions or "hitl_notify_executed" in actions
 
 
-async def test_scenario_b_device_control_forced_hitl_and_stub_stays_approved(
+async def test_scenario_b_unclassified_device_control_forced_hitl_and_stub_stays_approved(
     client: AsyncClient,
     db_session: AsyncSession,
     test_user: User,
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Scenario B：即使通知自动批准开启，device_control 仍强制 HITL；stub 失败保 APPROVED。"""
+    """Scenario B：未分类 device_control 即使 notify 自动批准开启仍强制 HITL；stub 失败保 APPROVED。"""
     monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", True)
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
+    asset = await cmdb_asset_crud.get(db_session, asset_id)
+    assert asset is not None
+    asset.vendor = "cisco_iosxe"
+    asset.credential_type = "static"
+    asset.credential_username = "admin"
+    asset.credential_password_encrypted = encrypt_credential_password("whatever")
+    await db_session.flush()
     dispatch = build_root_tool_dispatcher(
         db_session,
         session_id=session_id,
@@ -156,11 +168,10 @@ async def test_scenario_b_device_control_forced_hitl_and_stub_stays_approved(
     )
 
     tool_result = await dispatch(
-        "propose_remediation",
+        "propose_device_control",
         {
             "asset_id": asset_id,
-            "action_type": "device_control",
-            "payload": {"command": "reboot"},
+            "command_name": "reboot",
             "reason": "故障恢复",
         },
     )
@@ -173,11 +184,15 @@ async def test_scenario_b_device_control_forced_hitl_and_stub_stays_approved(
     await db_session.commit()
 
     await _grant_hitl_approve(db_session, test_user)
-    first = await client.post(
-        f"/api/v1/hitl/proposals/{proposal_id}/decide",
-        json={"approve": True},
-        headers=auth_headers,
-    )
+    with patch(
+        "app.agent.executors._open_scrapli_connection",
+        side_effect=ConnectionError("unreachable"),
+    ):
+        first = await client.post(
+            f"/api/v1/hitl/proposals/{proposal_id}/decide",
+            json={"approve": True},
+            headers=auth_headers,
+        )
     assert first.status_code == 200, first.text
     assert first.json()["data"]["status"] == "APPROVED"
 

@@ -14,7 +14,12 @@
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.device_commands import list_device_commands as list_catalog_commands
+from app.agent.device_commands import (
+    command_supports_vendor,
+)
+from app.agent.device_commands import (
+    list_device_commands as list_catalog_commands,
+)
 from app.agent.hitl import (
     ActionType,
     HitlEventPublisher,
@@ -157,6 +162,78 @@ async def query_device_command(
     )
 
 
+async def propose_device_control(
+    db: AsyncSession,
+    *,
+    session_id: int,
+    actor_user_id: int,
+    proposed_by_agent_id: str | None,
+    asset_id: int,
+    command_name: str,
+    interface_name: str | None,
+    reason: str,
+    publisher: HitlEventPublisher | None = None,
+) -> ToolResult:
+    """对已配置凭据的资产发起会改变设备状态的命令（reboot/shutdown/port_enable/port_disable）。
+
+    命中白名单且资产非动态凭据时当场执行；否则停在 pending_approval，
+    需要人工审批（动态凭据资产还需要在批准时当场输入密码）。
+
+    Args:
+        db: 当前事务使用的异步数据库会话。
+        session_id: 根 Agent 所属会话 ID。
+        actor_user_id: 当前认证用户 ID。
+        proposed_by_agent_id: 发起提案的 Agent ID，可为空。
+        asset_id: 目标 CMDB 资产 ID。
+        command_name: 白名单内的变更类命令名。
+        interface_name: port_enable/port_disable 所需的接口名，其它命令应为空。
+        reason: 发起管控的原因。
+        publisher: 可选的 HITL 安全事件发布器。
+
+    Returns:
+        指示待审批、已执行、被拒绝或失败的安全工具结果。
+    """
+    payload: dict[str, object] = {"command_name": command_name}
+    if interface_name is not None:
+        payload["interface_name"] = interface_name
+
+    try:
+        summary = await propose_action(
+            db,
+            session_id=session_id,
+            actor_user_id=actor_user_id,
+            proposed_by_agent_id=proposed_by_agent_id,
+            asset_id=asset_id,
+            action_type="device_control",
+            payload=payload,
+            reason=reason,
+            publisher=publisher,
+        )
+    except HitlProposalRejectedError as exc:
+        return ToolResult(control="rejected", content=f"设备管控请求被拒绝：{exc}")
+    except Exception as exc:
+        return ToolResult(
+            control="failed",
+            content=f"设备管控请求创建失败：{type(exc).__name__}",
+        )
+
+    if summary.status == "EXECUTED":
+        output = summary.result_excerpt or "（无输出）"
+        return ToolResult(
+            control="ok",
+            content=f"设备管控命令 {summary.proposal_id} 已自动批准并执行：\n{output}",
+        )
+    if summary.status == "PENDING":
+        return ToolResult(
+            control="pending_approval",
+            content=f"设备管控请求 {summary.proposal_id} 已创建，正在等待人工审批。",
+        )
+    return ToolResult(
+        control="failed",
+        content=f"设备管控请求 {summary.proposal_id} 当前状态为 {summary.status}，未完成执行。",
+    )
+
+
 async def get_device_query_result(
     db: AsyncSession,
     *,
@@ -231,7 +308,7 @@ async def list_device_commands_for_asset(
     lines = [f"资产 {asset_id}（{asset.hostname}，厂商 {asset.vendor}）可用诊断命令："]
     supported_any = False
     for definition in list_catalog_commands():
-        if asset.vendor not in definition.templates:
+        if not command_supports_vendor(definition.name, asset.vendor):
             continue
         supported_any = True
         decision = await device_command_policy_crud.resolve_policy(

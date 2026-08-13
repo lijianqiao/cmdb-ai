@@ -60,7 +60,7 @@ async def test_propose_remediation_returns_pending_without_payload(
         captured.update(kwargs)
         return ProposalSafeSummary(
             proposal_id=41,
-            action_type="device_control",
+            action_type="notify",
             status="PENDING",
             reason="恢复故障设备",
             asset_id=7,
@@ -74,8 +74,8 @@ async def test_propose_remediation_returns_pending_without_payload(
         actor_user_id=13,
         proposed_by_agent_id="root-agent",
         asset_id=7,
-        action_type="device_control",
-        payload={"command": "reboot", "credential": "不得回传"},
+        action_type="notify",
+        payload={"message": "不得回传"},
         reason="恢复故障设备",
         publisher=publisher,  # type: ignore[arg-type]
     )
@@ -88,8 +88,8 @@ async def test_propose_remediation_returns_pending_without_payload(
         "actor_user_id": 13,
         "proposed_by_agent_id": "root-agent",
         "asset_id": 7,
-        "action_type": "device_control",
-        "payload": {"command": "reboot", "credential": "不得回传"},
+        "action_type": "notify",
+        "payload": {"message": "不得回传"},
         "reason": "恢复故障设备",
         "publisher": publisher,
     }
@@ -222,39 +222,79 @@ async def test_propose_remediation_hides_unexpected_exception_detail(
     assert "内部数据库地址" not in result.content
 
 
-def test_root_schema_adds_strict_propose_remediation_definition() -> None:
-    """根工具 Schema 应包含七个只读工具和四个根写/查询工具。"""
+async def test_propose_device_control_returns_pending_without_payload(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_propose_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
+        return ProposalSafeSummary(
+            proposal_id=60, action_type="device_control", status="PENDING",
+            reason="故障恢复", asset_id=9,
+        )
+    monkeypatch.setattr(hitl_tools, "propose_action", fake_propose_action)
+
+    result = await hitl_tools.propose_device_control(
+        db_session, session_id=1, actor_user_id=2, proposed_by_agent_id=None,
+        asset_id=9, command_name="reboot", interface_name=None, reason="故障恢复",
+    )
+    assert result.control == "pending_approval"
+    assert "60" in result.content
+
+
+async def test_propose_device_control_returns_ok_with_output_when_auto_executed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_propose_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
+        return ProposalSafeSummary(
+            proposal_id=61, action_type="device_control", status="EXECUTED",
+            reason="故障恢复", asset_id=9, result_excerpt="fake reboot output",
+        )
+    monkeypatch.setattr(hitl_tools, "propose_action", fake_propose_action)
+
+    result = await hitl_tools.propose_device_control(
+        db_session, session_id=1, actor_user_id=2, proposed_by_agent_id=None,
+        asset_id=9, command_name="reboot", interface_name=None, reason="故障恢复",
+    )
+    assert result.control == "ok"
+    assert "fake reboot output" in result.content
+
+
+def test_root_schema_adds_propose_device_control_and_narrows_propose_remediation() -> None:
     schemas = root_tool_schemas()
     functions = {item["function"]["name"]: item["function"] for item in schemas}
+    assert len(functions) == 12
 
-    assert len(functions) == 11
     remediation = functions["propose_remediation"]
-    parameters = remediation["parameters"]
-    assert parameters["additionalProperties"] is False
-    assert set(parameters["required"]) == {"asset_id", "action_type", "payload", "reason"}
-    assert parameters["properties"]["action_type"]["enum"] == ["notify", "device_control"]
-    assert parameters["properties"]["payload"]["type"] == "object"
+    assert remediation["parameters"]["properties"]["action_type"]["const"] == "notify"
 
-    query_cmd = functions["query_device_command"]
-    query_params = query_cmd["parameters"]
-    assert query_params["additionalProperties"] is False
-    assert set(query_params["required"]) == {"asset_id", "command_name", "reason"}
-    assert set(query_params["properties"]["command_name"]["enum"]) == {
-        "show_version",
-        "show_running_config",
-        "show_interfaces",
-        "ping",
+    control = functions["propose_device_control"]
+    control_params = control["parameters"]
+    assert control_params["additionalProperties"] is False
+    assert set(control_params["required"]) == {"asset_id", "command_name", "reason"}
+    assert set(control_params["properties"]["command_name"]["enum"]) == {
+        "show_version", "show_running_config", "show_interfaces", "ping",
+        "reboot", "shutdown", "port_enable", "port_disable",
     }
 
-    get_result = functions["get_device_query_result"]
-    result_params = get_result["parameters"]
-    assert result_params["additionalProperties"] is False
-    assert set(result_params["required"]) == {"proposal_id"}
 
-    list_commands = functions["list_device_commands"]
-    list_params = list_commands["parameters"]
-    assert list_params["additionalProperties"] is False
-    assert set(list_params["required"]) == {"asset_id"}
+async def test_root_dispatcher_routes_propose_device_control(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_propose_device_control(db: AsyncSession, **kwargs: object) -> ToolResult:
+        captured.update(kwargs)
+        return ToolResult(control="pending_approval", content="提案 70 待审批")
+
+    monkeypatch.setattr(tool_dispatch, "propose_device_control", fake_propose_device_control)
+    dispatch = build_root_tool_dispatcher(db_session, session_id=21, actor_user_id=22)
+
+    result = await dispatch(
+        "propose_device_control",
+        {"asset_id": 9, "command_name": "port_disable", "interface_name": "Gi0/1", "reason": "端口异常"},
+    )
+    assert result.control == "pending_approval"
+    assert captured["command_name"] == "port_disable"
+    assert captured["interface_name"] == "Gi0/1"
 
 
 async def test_root_dispatcher_binds_context_to_remediation(

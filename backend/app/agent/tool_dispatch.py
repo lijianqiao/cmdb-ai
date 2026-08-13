@@ -25,6 +25,7 @@ from app.agent.hitl import HitlEventPublisher
 from app.agent.hitl_tools import (
     get_device_query_result,
     list_device_commands_for_asset,
+    propose_device_control,
     propose_remediation,
     query_device_command,
 )
@@ -102,8 +103,17 @@ class ProposeRemediationArgs(_Args):
     """根 Agent 整改提案的模型可控参数。"""
 
     asset_id: int = Field(ge=1)
-    action_type: Literal["notify", "device_control"]
+    action_type: Literal["notify"]
     payload: dict[str, object]
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class ProposeDeviceControlArgs(_Args):
+    """根 Agent 设备管控提案的模型可控参数。"""
+
+    asset_id: int = Field(ge=1)
+    command_name: CommandName
+    interface_name: str | None = Field(default=None, min_length=1, max_length=64)
     reason: str = Field(min_length=1, max_length=2000)
 
 
@@ -264,10 +274,10 @@ _ROOT_READ_ONLY_TOOLS: tuple[ToolName, ...] = (
 
 
 def root_tool_schemas() -> list[dict[str, Any]]:
-    """返回根 Agent 的七个只读工具、整改提案工具和三个设备命令工具 Schema。
+    """返回根 Agent 的七个只读工具、整改提案工具和四个设备命令工具 Schema。
 
     Returns:
-        OpenAI 兼容的十一个严格函数工具定义。
+        OpenAI 兼容的十二个严格函数工具定义。
     """
     propose_parameters = deepcopy(ProposeRemediationArgs.model_json_schema())
     propose_parameters.pop("title", None)
@@ -277,6 +287,11 @@ def root_tool_schemas() -> list[dict[str, Any]]:
     # 间接引用；内联展开成跟 action_type 一样的直接 enum，不依赖模型端点
     # 是否正确解析 $ref。
     query_parameters["properties"]["command_name"] = query_parameters.pop("$defs")["CommandName"]
+    propose_control_parameters = deepcopy(ProposeDeviceControlArgs.model_json_schema())
+    propose_control_parameters.pop("title", None)
+    propose_control_parameters["properties"]["command_name"] = propose_control_parameters.pop(
+        "$defs"
+    )["CommandName"]
     result_parameters = deepcopy(GetDeviceQueryResultArgs.model_json_schema())
     result_parameters.pop("title", None)
     list_parameters = deepcopy(ListDeviceCommandsArgs.model_json_schema())
@@ -322,6 +337,19 @@ def root_tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "propose_device_control",
+                "description": (
+                    f"[{ROOT_TOOL_SCHEMA_VERSION}] 对已配置凭据的资产发起会改变设备状态的命令"
+                    "（reboot/shutdown/port_enable/port_disable）。白名单命中且资产非动态凭据时"
+                    "会当场执行，否则进入人工审批。port_enable/port_disable 必须提供 interface_name。"
+                    "不确定这台设备支持哪些变更类命令时先调用 list_device_commands。"
+                ),
+                "parameters": propose_control_parameters,
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "get_device_query_result",
                 "description": (
                     f"[{ROOT_TOOL_SCHEMA_VERSION}] 回查一个已提交的设备命令查询提案的当前结果。"
@@ -350,7 +378,7 @@ def build_root_tool_dispatcher(
         publisher: 可选的 HITL 安全事件发布器。
 
     Returns:
-        可调用七个只读工具、整改提案工具和三个设备命令工具的调度函数。
+        可调用七个只读工具、整改提案工具和四个设备命令工具的调度函数。
     """
     read_dispatch = build_tool_dispatcher(db, _ROOT_READ_ONLY_TOOLS)
 
@@ -387,6 +415,31 @@ def build_root_tool_dispatcher(
                     asset_id=query_args.asset_id,
                     command_name=query_args.command_name,
                     reason=query_args.reason,
+                    publisher=publisher,
+                )
+            except Exception as exc:
+                return ToolResult(
+                    control="failed",
+                    content=f"工具 {name!r} 执行失败: {type(exc).__name__}",
+                )
+        if name == "propose_device_control":
+            try:
+                control_args = ProposeDeviceControlArgs.model_validate(arguments)
+            except ValidationError as exc:
+                return ToolResult(
+                    control="clarification",
+                    content=_validation_reason(name, exc),
+                )
+            try:
+                return await propose_device_control(
+                    db,
+                    session_id=session_id,
+                    actor_user_id=actor_user_id,
+                    proposed_by_agent_id=proposed_by_agent_id,
+                    asset_id=control_args.asset_id,
+                    command_name=control_args.command_name,
+                    interface_name=control_args.interface_name,
+                    reason=control_args.reason,
                     publisher=publisher,
                 )
             except Exception as exc:

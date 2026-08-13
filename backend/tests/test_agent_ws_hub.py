@@ -20,7 +20,7 @@ _SAFE_SUMMARY_KEYS = frozenset(
     {"proposal_id", "action_type", "status", "reason", "asset_id", "result_excerpt"}
 )
 # 原始动作载荷中不应出现在 WS 事件里的敏感键
-_SENSITIVE_KEYS = frozenset({"message", "command", "password"})
+_SENSITIVE_KEYS = frozenset({"message", "command", "command_name", "password"})
 
 
 class FakeWebSocket:
@@ -126,12 +126,13 @@ async def test_ws_hitl_publisher_maps_all_hitl_event_types() -> None:
                 "status": "APPROVED",
                 "reason": "端口禁用",
                 "asset_id": 9,
-                "command": "port_disable",
+                "command_name": "port_disable",
             },
         )
         assert len(ws.sent) == 1
         assert ws.sent[0]["type"] == event_type
         assert "command" not in ws.sent[0]["payload"]
+        assert "command_name" not in ws.sent[0]["payload"]
         assert set(ws.sent[0]["payload"].keys()) <= _SAFE_SUMMARY_KEYS
 
 

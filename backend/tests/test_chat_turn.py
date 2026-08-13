@@ -26,7 +26,7 @@ pytestmark = pytest.mark.asyncio
 
 type Headers = dict[str, str]
 
-_SENSITIVE_KEYS = frozenset({"message", "command", "password", "credential"})
+_SENSITIVE_KEYS = frozenset({"message", "command", "command_name", "password", "credential"})
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -218,8 +218,8 @@ async def test_chat_turn_pending_approval_emits_hitl_pending_without_secrets(
             tool_calls=[
                 ToolCall(
                     id="call_hitl",
-                    name="propose_remediation",
-                    arguments='{"asset_id": 1, "action_type": "device_control", "payload": {}}',
+                    name="propose_device_control",
+                    arguments='{"asset_id": 1, "command_name": "reboot", "reason": "重启设备"}',
                 )
             ],
             finish_reason="tool_calls",
@@ -228,7 +228,7 @@ async def test_chat_turn_pending_approval_emits_hitl_pending_without_secrets(
         )
 
     async def fake_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
-        assert name == "propose_remediation"
+        assert name == "propose_device_control"
         await publisher.publish(
             session_id=session_id,
             event_type="hitl_pending",
@@ -238,7 +238,7 @@ async def test_chat_turn_pending_approval_emits_hitl_pending_without_secrets(
                 "status": "PENDING",
                 "reason": "重启设备",
                 "asset_id": 1,
-                "command": "reboot",
+                "command_name": "reboot",
                 "password": "s3cret",
                 "message": "不得出现在 WS",
             },
