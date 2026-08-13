@@ -217,3 +217,48 @@ async def test_run_monitor_sweep_loop_explicit_interval_overrides_database(
         await run_monitor_sweep_loop(interval_seconds=5.0)
 
     assert recorded_delays == [5.0]
+
+
+async def test_second_sweep_same_status_updates_existing_event(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = await monitor_target_crud.create(
+        db_session,
+        {"cmdb_asset_id": None, "ip_address": "10.0.0.5", "port": 22, "is_active": True},
+    )
+    await db_session.commit()
+
+    async def fake_probe(ip: str, port: int, *, timeout_seconds: float) -> tuple[str, int | None, str]:
+        return "up", 5, ""
+
+    monkeypatch.setattr("app.services.monitor_sweep.probe_tcp", fake_probe)
+    await run_monitor_sweep_once(db_session)
+    first = (await monitor_status_event_crud.list_recent_for_target(db_session, target.id))[0]
+    first_id = first.id
+    first_checked = first.checked_at
+
+    await run_monitor_sweep_once(db_session)
+    events = await monitor_status_event_crud.list_recent_for_target(db_session, target.id)
+    assert len(events) == 1
+    assert events[0].id == first_id
+    assert events[0].checked_at >= first_checked
+
+
+async def test_status_change_inserts_new_event(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = await monitor_target_crud.create(
+        db_session,
+        {"cmdb_asset_id": None, "ip_address": "10.0.0.5", "port": 22, "is_active": True},
+    )
+    await db_session.commit()
+    statuses = iter([("up", 3, ""), ("down", None, "连接超时")])
+
+    async def fake_probe(ip: str, port: int, *, timeout_seconds: float) -> tuple[str, int | None, str]:
+        return next(statuses)
+
+    monkeypatch.setattr("app.services.monitor_sweep.probe_tcp", fake_probe)
+    await run_monitor_sweep_once(db_session)
+    await run_monitor_sweep_once(db_session)
+    events = await monitor_status_event_crud.list_recent_for_target(db_session, target.id)
+    assert [item.status for item in events] == ["down", "up"]

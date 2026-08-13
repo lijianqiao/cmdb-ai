@@ -6,6 +6,8 @@ ROW_NUMBER() window function rather than Postgres-only DISTINCT ON, so this
 whole subsystem needs no TEST_POSTGRES_DATABASE_URL-gated test file.
 """
 
+from datetime import UTC, datetime
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -34,6 +36,40 @@ class CRUDMonitorStatusEvent:
         db.add(event)
         await db.flush()
         return event
+
+    async def record_probe(
+        self,
+        db: AsyncSession,
+        *,
+        target_id: int,
+        status: str,
+        latency_ms: int | None = None,
+        detail: str = "",
+    ) -> MonitorStatusEvent:
+        """记录一次探测结果：同状态更新当前行，变状态追加新行。
+
+        Args:
+            db: 数据库会话。
+            target_id: 监控目标 ID。
+            status: 探测状态（``up`` 或 ``down``）。
+            latency_ms: 探测延迟（毫秒），失败时为 ``None``。
+            detail: 附加说明（如错误信息）。
+
+        Returns:
+            更新或新建的状态事件行。
+        """
+        latest = await self.get_latest_status_for_targets(db, [target_id])
+        current = latest.get(target_id)
+        if current is not None and current.status == status:
+            current.checked_at = datetime.now(UTC)
+            current.latency_ms = latency_ms
+            current.detail = detail
+            await db.flush()
+            db.expire(current, ["checked_at", "latency_ms", "detail"])
+            return current
+        return await self.record(
+            db, target_id=target_id, status=status, latency_ms=latency_ms, detail=detail
+        )
 
     async def list_recent_for_target(
         self, db: AsyncSession, target_id: int, *, limit: int = 20

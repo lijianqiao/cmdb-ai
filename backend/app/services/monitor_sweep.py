@@ -70,7 +70,7 @@ async def run_monitor_sweep_once(
         except Exception as exc:  # noqa: BLE001 - a single target's probe must never abort the sweep
             status, latency_ms, detail = "down", None, str(exc)
 
-        await monitor_status_event_crud.record(
+        await monitor_status_event_crud.record_probe(
             db, target_id=target.id, status=status, latency_ms=latency_ms, detail=detail
         )
 
