@@ -153,7 +153,7 @@ async def test_whitelisted_static_credential_query_executes_in_one_call(
     test_user: User,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """白名单 + 静态凭据：query_device_command 一次调用当场执行并返回输出。"""
+    """assist 档位下白名单 + 静态凭据：query_device_command 一次调用当场执行并返回输出。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     session_id, asset_id = await _make_session_and_switch_asset(
         db_session,
@@ -170,6 +170,10 @@ async def test_whitelisted_static_credential_query_executes_in_one_call(
         },
     )
     await db_session.commit()
+    session = await agent_session_crud.get(db_session, session_id)
+    assert session is not None
+    session.approval_mode = "assist"
+    await db_session.flush()
 
     dispatch = build_root_tool_dispatcher(
         db_session,
@@ -242,7 +246,6 @@ async def test_unclassified_command_creates_pending_proposal_visible_via_hitl_ap
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """未分类命令走 HITL：提案在审批 API 可见，批准后执行完成。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     session_id, asset_id = await _make_session_and_switch_asset(
         db_session,
@@ -298,7 +301,6 @@ async def test_dynamic_credential_requires_password_even_when_whitelisted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """动态凭据即使白名单也强制人工；decide 缺密码 422，补密码后执行。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     session_id, asset_id = await _make_session_and_switch_asset(
         db_session,
@@ -361,7 +363,6 @@ async def test_response_bodies_never_contain_plaintext_or_ciphertext_password(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """全程 HTTP 响应体不得出现已知明文密码或对应密文。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     known_password = "KNOWN_PLAINTEXT_SECRET_99"
     ciphertext = encrypt_credential_password(known_password)
@@ -493,7 +494,7 @@ async def test_whitelisted_reboot_executes_with_interactive_confirmation(
     test_user: User,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """白名单 + 静态凭据的交换机：propose_device_control 一次调用当场执行 reboot。"""
+    """assist 档位下白名单 + 静态凭据的交换机：propose_device_control 一次调用当场执行 reboot。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     session_id, asset_id = await _make_session_and_switch_asset(
         db_session,
@@ -510,6 +511,10 @@ async def test_whitelisted_reboot_executes_with_interactive_confirmation(
         },
     )
     await db_session.commit()
+    session = await agent_session_crud.get(db_session, session_id)
+    assert session is not None
+    session.approval_mode = "assist"
+    await db_session.flush()
 
     dispatch = build_root_tool_dispatcher(
         db_session,
@@ -586,7 +591,6 @@ async def test_unclassified_port_enable_creates_pending_and_requires_interface_n
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """未分类 port_enable：缺 interface_name 时在 propose 阶段拒绝；补齐后走 PENDING → 批准 → 执行。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     session_id, asset_id = await _make_session_and_switch_asset(
         db_session,
@@ -670,7 +674,6 @@ async def test_dynamic_credential_reboot_still_forces_manual_approval_even_when_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """动态凭据即使白名单 reboot 也强制人工；decide 缺密码 422，补密码后执行。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     session_id, asset_id = await _make_session_and_switch_asset(
         db_session,

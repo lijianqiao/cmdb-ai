@@ -8,7 +8,7 @@
 实现流程：
 1. propose_action 先合并顶层 asset_id，再用严格 Pydantic 模型校验动作载荷并检查 CMDB 资产。
 2. 载荷校验失败只回传固定中文原因与字段名，绝不拼接 ValidationError / 原始 input_value。
-3. 合法提案始终先以 PENDING 追加；只有低风险 notify 可按配置使用真实操作者自动批准并继续执行。
+3. 合法提案始终先以 PENDING 追加；assist/full 档位下按策略表自动批准并继续执行。
 4. decide_proposal 只复用 CRUD 的审批状态机，不隐式恢复执行，避免人工 API 路径重复执行。
 5. resume_proposal 仅执行 APPROVED 提案；EXECUTED 返回幂等摘要，其他状态明确拒绝。
 6. 对 Agent 和事件发布器只暴露安全摘要，不返回原始 payload，避免设备凭据或未知字段泄露。
@@ -37,11 +37,11 @@ from app.agent.executors import (
     ExecutionResult,
     NotifyExecutor,
 )
+from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
 from app.models.hitl_proposal import HitlProposal
-from app.services.system_config import get_effective_operations_config
 from app.utils.audit import log_audit
 
 type ActionType = Literal["notify", "device_control", "device_query"]
@@ -216,6 +216,37 @@ def _validated_payload(
     return {**validated, "asset_id": asset_id, "proposal_reason": reason}
 
 
+def should_auto_approve(
+    *,
+    approval_mode: str,
+    action_type: ActionType,
+    policy_decision: str | None,
+    credential_type: str,
+) -> bool:
+    """按会话审批档位判定提案是否可自动批准并执行。
+
+    Args:
+        approval_mode: 会话审批档位（ask / assist / full）。
+        action_type: HITL 动作类型。
+        policy_decision: 设备命令策略判定；notify 传入 None。
+        credential_type: 资产凭据类型。
+
+    Returns:
+        True 表示可自动批准并继续执行。
+    """
+    if action_type == "notify":
+        return approval_mode in ("assist", "full")
+    if action_type in ("device_query", "device_control"):
+        if credential_type == "dynamic":
+            return False
+        if policy_decision == "whitelist":
+            return approval_mode in ("assist", "full")
+        if policy_decision is None:
+            return approval_mode == "full"
+        return False
+    return False
+
+
 async def propose_action(
     db: AsyncSession,
     *,
@@ -305,6 +336,11 @@ async def propose_action(
     else:
         policy_decision = None
 
+    session = await agent_session_crud.get(db, session_id)
+    if session is None:
+        raise HitlProposalRejectedError("会话不存在")
+    approval_mode = session.approval_mode
+
     proposal = await hitl_proposal_crud.create(
         db,
         session_id=session_id,
@@ -314,11 +350,11 @@ async def propose_action(
     )
     await _publish(publisher, proposal=proposal, event_type="hitl_pending")
 
-    operations = await get_effective_operations_config(db)
-    if (action_type == "notify" and operations.hitl_notify_auto_approve) or (
-        action_type in ("device_query", "device_control")
-        and policy_decision == "whitelist"
-        and asset.credential_type != "dynamic"
+    if should_auto_approve(
+        approval_mode=approval_mode,
+        action_type=action_type,
+        policy_decision=policy_decision,
+        credential_type=asset.credential_type,
     ):
         await decide_proposal(
             db,

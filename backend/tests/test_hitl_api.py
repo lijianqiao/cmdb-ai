@@ -150,7 +150,6 @@ async def test_list_proposals_returns_approver_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """列表应对审批人返回完整 action_payload。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     await _grant_hitl_approve(db_session, test_user)
     session_id, proposal_id = await _make_pending_proposal(
         db_session,
@@ -182,7 +181,6 @@ async def test_approve_notify_executes_and_writes_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """批准 notify 应执行到 EXECUTED，并写入审批与执行审计。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     await _grant_hitl_approve(db_session, test_user)
     _, proposal_id = await _make_pending_proposal(
         db_session,
@@ -228,7 +226,6 @@ async def test_approve_device_control_stays_approved_second_decide_conflicts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """未分类 device_control 批准后连接失败应保持 APPROVED；再次审批返回 409。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     await _grant_hitl_approve(db_session, test_user)
     ciphertext = encrypt_credential_password("whatever")
@@ -292,7 +289,6 @@ async def test_reject_does_not_resume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """拒绝提案只更新状态，不应调用 resume。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     await _grant_hitl_approve(db_session, test_user)
     _, proposal_id = await _make_pending_proposal(
         db_session,
@@ -328,7 +324,6 @@ async def test_decide_device_query_requires_password_for_dynamic_credential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """批准动态凭据 device_query 时未提供密码应返回 422。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     await _grant_hitl_approve(db_session, test_user)
     _, proposal_id = await _make_pending_device_query_proposal(
         db_session,
@@ -351,7 +346,6 @@ async def test_decide_device_query_with_password_executes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """批准动态凭据 device_query 并提供密码应执行成功，且响应不含密码。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     await _grant_hitl_approve(db_session, test_user)
     _, proposal_id = await _make_pending_device_query_proposal(
@@ -383,7 +377,6 @@ async def test_retry_approved_device_control_executes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """APPROVED 且上次执行失败的提案可通过 /retry 再次执行。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     await _grant_hitl_approve(db_session, test_user)
     ciphertext = encrypt_credential_password("whatever")
@@ -452,7 +445,6 @@ async def test_retry_pending_proposal_conflicts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PENDING 提案不能走重试通道。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     await _grant_hitl_approve(db_session, test_user)
     _, proposal_id = await _make_pending_proposal(
         db_session,
@@ -491,7 +483,6 @@ async def test_retry_dynamic_device_query_requires_password(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """动态凭据资产重试时必须提供本次登录密码。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     await _grant_hitl_approve(db_session, test_user)
     _, proposal_id = await _make_pending_device_query_proposal(
         db_session,

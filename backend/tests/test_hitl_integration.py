@@ -89,10 +89,8 @@ async def test_scenario_a_notify_manual_approve_end_to_end(
     db_session: AsyncSession,
     test_user: User,
     auth_headers: Headers,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Scenario A：关闭通知自动批准时，根工具提案 → 人工批准 → EXECUTED 并写审计。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
+    """Scenario A：ask 档位下根工具提案 → 人工批准 → EXECUTED 并写审计。"""
     secret = "SECRET_PAYLOAD_TOKEN_NOTIFY_X9"
     session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
     dispatch = build_root_tool_dispatcher(
@@ -150,8 +148,7 @@ async def test_scenario_b_unclassified_device_control_forced_hitl_and_stub_stays
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Scenario B：未分类 device_control 即使 notify 自动批准开启仍强制 HITL；stub 失败保 APPROVED。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", True)
+    """Scenario B：ask 档位下未分类 device_control 仍强制 HITL；stub 失败保 APPROVED。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
     asset = await cmdb_asset_crud.get(db_session, asset_id)

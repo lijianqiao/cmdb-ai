@@ -32,7 +32,6 @@ from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
-from app.crud.system_config import system_config_crud
 from app.models.audit_log import AuditLog
 from app.models.hitl_proposal import HitlProposal
 from app.models.user import User
@@ -114,13 +113,23 @@ async def _proposal_count(db: AsyncSession) -> int:
     return int(result.scalar_one())
 
 
+async def _set_session_approval_mode(
+    db_session: AsyncSession,
+    session_id: int,
+    approval_mode: str,
+) -> None:
+    """切换会话审批档位，供自动批准矩阵测试使用。"""
+    session = await agent_session_crud.get(db_session, session_id)
+    assert session is not None
+    session.approval_mode = approval_mode
+    await db_session.flush()
+
+
 async def test_propose_merges_matching_asset_id_and_returns_safe_summary(
     db_session: AsyncSession,
     test_user: User,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """冗余且匹配的 asset_id 应被剥离、校验并安全合并存储。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     session_id, asset_id = await _make_context(db_session, test_user.id)
     publisher = RecordingPublisher()
 
@@ -303,11 +312,10 @@ async def test_propose_rejects_non_integer_actor_before_insert(
 async def test_notify_auto_approve_uses_actor_and_executes_once(
     db_session: AsyncSession,
     test_user: User,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """notify 自动审批应使用真实操作者并在一次调用内执行完成。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", True)
+    """assist 档位下 notify 自动审批应使用真实操作者并在一次调用内执行完成。"""
     session_id, asset_id = await _make_context(db_session, test_user.id)
+    await _set_session_approval_mode(db_session, session_id, "assist")
     publisher = RecordingPublisher()
 
     summary = await propose_action(
@@ -343,32 +351,26 @@ async def test_notify_auto_approve_uses_actor_and_executes_once(
     assert audit_count.scalar_one() == 1
 
 
-async def test_database_setting_can_auto_approve_notify_when_env_is_false(
+async def test_propose_rejects_missing_session_without_insert(
     db_session: AsyncSession,
     test_user: User,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """数据库开启 notify 自动审批时，应覆盖环境变量 False。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
-    session_id, asset_id = await _make_context(db_session, test_user.id)
-    await system_config_crud.upsert_values(
-        db_session,
-        {"HITL_NOTIFY_AUTO_APPROVE": "true"},
-        updated_by_user_id=None,
-    )
+    """不存在的会话不得创建 HITL 提案。"""
+    _, asset_id = await _make_context(db_session, test_user.id)
 
-    summary = await propose_action(
-        db_session,
-        session_id=session_id,
-        proposed_by_agent_id=None,
-        action_type="notify",
-        asset_id=asset_id,
-        payload={"message": "请检查设备"},
-        reason="告警通知",
-        actor_user_id=test_user.id,
-    )
+    with pytest.raises(HitlProposalRejectedError, match="会话不存在"):
+        await propose_action(
+            db_session,
+            session_id=999_999,
+            proposed_by_agent_id=None,
+            action_type="notify",
+            asset_id=asset_id,
+            payload={"message": "告警"},
+            reason="会话不存在",
+            actor_user_id=test_user.id,
+        )
 
-    assert summary.status == "EXECUTED"
+    assert await _proposal_count(db_session) == 0
 
 
 async def test_device_control_rejects_read_only_command_name(db_session: AsyncSession, test_user: User) -> None:
@@ -406,10 +408,8 @@ async def test_device_query_rejects_state_changing_command_name(db_session: Asyn
 async def test_decide_approve_does_not_resume_or_resolve(
     db_session: AsyncSession,
     test_user: User,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """人工批准只改变状态，不应隐式执行或发布 resolved。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     session_id, asset_id = await _make_context(db_session, test_user.id)
     proposal = await propose_action(
         db_session,
@@ -438,10 +438,8 @@ async def test_decide_approve_does_not_resume_or_resolve(
 async def test_decide_reject_publishes_resolved(
     db_session: AsyncSession,
     test_user: User,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """人工拒绝进入终态时应发布一次 resolved。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     session_id, asset_id = await _make_context(db_session, test_user.id)
     proposal = await propose_action(
         db_session,
@@ -471,11 +469,9 @@ async def test_decide_reject_publishes_resolved(
 async def test_resume_rejects_pending_and_rejected(
     db_session: AsyncSession,
     test_user: User,
-    monkeypatch: pytest.MonkeyPatch,
     reject_first: bool,
 ) -> None:
     """PENDING 与 REJECTED 均不允许绕过批准直接执行。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     session_id, asset_id = await _make_context(db_session, test_user.id)
     proposal = await propose_action(
         db_session,
@@ -774,10 +770,9 @@ async def test_resume_retry_after_failure_executes_and_clears_last_error(
 
 
 async def test_unclassified_device_control_stays_pending(
-    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+    db_session: AsyncSession, test_user: User
 ) -> None:
-    """未分类的变更类命令，即使 notify 自动批准打开，也必须停在 PENDING（跟 device_query 完全对称）。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", True)
+    """未分类的变更类命令在 ask 档位下必须停在 PENDING（跟 device_query 完全对称）。"""
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     asset_id = await _make_query_asset(
         db_session,
@@ -820,6 +815,7 @@ async def test_whitelisted_device_control_auto_executes_with_static_credential(
         },
     )
     await db_session.commit()
+    await _set_session_approval_mode(db_session, session_id, "assist")
 
     from unittest.mock import AsyncMock, patch
 
@@ -944,10 +940,8 @@ async def test_device_control_port_disable_rejects_illegal_interface_name(
 async def test_list_for_session_filters_status(
     db_session: AsyncSession,
     test_user: User,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """会话提案列表可按状态过滤，并保持创建顺序。"""
-    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
     session_id, asset_id = await _make_context(db_session, test_user.id)
     first = await propose_action(
         db_session,
@@ -1123,9 +1117,10 @@ async def test_device_query_blacklist_rejects_without_creating_proposal(
     assert proposals == []
 
 
-async def test_device_query_whitelist_auto_executes_for_static_credential(
+async def test_device_query_whitelist_pends_in_ask_mode_with_static_credential(
     db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """ask 档位下白名单 + 静态凭据的 device_query 应停在 PENDING。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     ciphertext = encrypt_credential_password("whatever")
@@ -1140,6 +1135,40 @@ async def test_device_query_whitelist_auto_executes_for_static_credential(
         },
     )
     await db_session.commit()
+
+    summary = await propose_action(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="device_query",
+        asset_id=asset_id,
+        payload={"command_name": "show_version"},
+        reason="test",
+        actor_user_id=test_user.id,
+    )
+
+    assert summary.status == "PENDING"
+
+
+async def test_device_query_whitelist_auto_executes_for_static_credential(
+    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """assist 档位下白名单 + 静态凭据的 device_query 应一次调用直接 EXECUTED。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    ciphertext = encrypt_credential_password("whatever")
+    asset_id = await _make_query_asset(db_session, credential_password_encrypted=ciphertext)
+    await device_command_policy_crud.create(
+        db_session,
+        {
+            "scope": "asset",
+            "asset_id": asset_id,
+            "command_name": "show_version",
+            "decision": "whitelist",
+        },
+    )
+    await db_session.commit()
+    await _set_session_approval_mode(db_session, session_id, "assist")
 
     from unittest.mock import AsyncMock, patch
 
@@ -1167,6 +1196,7 @@ async def test_device_query_whitelist_auto_executes_for_static_credential(
 async def test_device_query_whitelist_still_pends_for_dynamic_credential(
     db_session: AsyncSession, test_user: User
 ) -> None:
+    """动态凭据即使白名单且 full 档位也必须至少过一次人工。"""
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     asset_id = await _make_query_asset(db_session, credential_type="dynamic", credential_password_encrypted=None)
     await device_command_policy_crud.create(
@@ -1179,6 +1209,7 @@ async def test_device_query_whitelist_still_pends_for_dynamic_credential(
         },
     )
     await db_session.commit()
+    await _set_session_approval_mode(db_session, session_id, "full")
 
     summary = await propose_action(
         db_session,
@@ -1194,9 +1225,14 @@ async def test_device_query_whitelist_still_pends_for_dynamic_credential(
     assert summary.status == "PENDING"
 
 
-async def test_device_query_unclassified_command_pends(db_session: AsyncSession, test_user: User) -> None:
+@pytest.mark.parametrize("approval_mode", ["ask", "assist"])
+async def test_device_query_unclassified_command_pends(
+    db_session: AsyncSession, test_user: User, approval_mode: str
+) -> None:
+    """ask/assist 档位下未分类 device_query 应停在 PENDING。"""
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     asset_id = await _make_query_asset(db_session)
+    await _set_session_approval_mode(db_session, session_id, approval_mode)
 
     summary = await propose_action(
         db_session,
@@ -1210,6 +1246,71 @@ async def test_device_query_unclassified_command_pends(db_session: AsyncSession,
     )
 
     assert summary.status == "PENDING"
+
+
+async def test_device_query_unclassified_auto_executes_in_full_mode(
+    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """full 档位下未分类 + 静态凭据的 device_query 应一次调用直接 EXECUTED。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    ciphertext = encrypt_credential_password("whatever")
+    asset_id = await _make_query_asset(db_session, credential_password_encrypted=ciphertext)
+    await _set_session_approval_mode(db_session, session_id, "full")
+
+    from unittest.mock import AsyncMock, patch
+
+    fake_connection = AsyncMock()
+    fake_connection.send_command = AsyncMock(
+        return_value=type("Resp", (), {"result": "full mode output", "failed": False})()
+    )
+    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+        summary = await propose_action(
+            db_session,
+            session_id=session_id,
+            proposed_by_agent_id=None,
+            action_type="device_query",
+            asset_id=asset_id,
+            payload={"command_name": "show_version"},
+            reason="test",
+            actor_user_id=test_user.id,
+        )
+
+    assert summary.status == "EXECUTED"
+
+
+@pytest.mark.parametrize("approval_mode", ["ask", "assist", "full"])
+async def test_device_query_blacklist_rejects_in_all_approval_modes(
+    db_session: AsyncSession, test_user: User, approval_mode: str
+) -> None:
+    """三档审批模式下黑名单命令均不得创建提案。"""
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    asset_id = await _make_query_asset(db_session)
+    await device_command_policy_crud.create(
+        db_session,
+        {
+            "scope": "asset",
+            "asset_id": asset_id,
+            "command_name": "show_running_config",
+            "decision": "blacklist",
+        },
+    )
+    await db_session.commit()
+    await _set_session_approval_mode(db_session, session_id, approval_mode)
+
+    with pytest.raises(HitlProposalRejectedError):
+        await propose_action(
+            db_session,
+            session_id=session_id,
+            proposed_by_agent_id=None,
+            action_type="device_query",
+            asset_id=asset_id,
+            payload={"command_name": "show_running_config"},
+            reason="test",
+            actor_user_id=test_user.id,
+        )
+
+    assert await _proposal_count(db_session) == 0
 
 
 async def test_resume_proposal_passes_dynamic_password_to_executor(db_session: AsyncSession, test_user: User) -> None:
