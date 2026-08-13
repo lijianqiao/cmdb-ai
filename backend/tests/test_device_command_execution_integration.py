@@ -637,6 +637,8 @@ async def test_unclassified_port_enable_creates_pending_and_requires_interface_n
     assert decide_response.status_code == 200, decide_response.text
     assert decide_response.json()["data"]["status"] == "EXECUTED"
     assert "port enabled" in decide_response.text or "EXECUTED" in decide_response.text
+    fake_connection.send_configs.assert_awaited_once()
+    assert "static-pass" not in decide_response.text
 
 
 async def test_create_asset_type_scope_policy_for_reboot_is_rejected_via_api(
