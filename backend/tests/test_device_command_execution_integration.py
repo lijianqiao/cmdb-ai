@@ -2,14 +2,14 @@
 @Author: li
 @Email: lijianqiao2906@live.com
 @FileName: test_device_command_execution_integration.py
-@DateTime: 2026-08-12 22:20
-@Docs: 设备命令执行端到端验收：白名单自动执行、黑名单拒绝、动态凭据强制人工、密码零泄露。
+@DateTime: 2026-08-13 11:30
+@Docs: 设备命令执行端到端验收：查询与变更类命令的白名单自动执行、黑名单拒绝、动态凭据强制人工、密码零泄露。
 
 实现流程：
-1. 通过根调度器调用 query_device_command，串联策略判定、HITL 提案与 Scrapli 执行。
+1. 通过根调度器调用 query_device_command / propose_device_control，串联策略判定、HITL 提案与 Scrapli 执行。
 2. 白名单 + 静态凭据当场执行；黑名单直接拒绝且不建提案；未分类走人工审批 HTTP 链路。
-3. 动态凭据即使白名单也强制 PENDING，decide 缺密码 422、补密码后执行。
-4. 全程 HTTP 响应体不得出现已知明文密码或密文；子 Agent 调度器拒绝 query_device_command。
+3. 变更类 port_enable/port_disable 缺 interface_name 时在 propose 阶段拒绝；动态凭据即使白名单也强制 PENDING。
+4. asset_type 范围创建 reboot 策略被 API 拒绝；全程 HTTP 响应体不得出现已知明文密码或密文。
 """
 
 import re
@@ -30,13 +30,14 @@ from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
 from app.models.permission import Permission
+from app.models.role import role_permissions
 from app.models.user import User, user_roles
 
 pytestmark = pytest.mark.asyncio
 
 type Headers = dict[str, str]
 
-_PROPOSAL_ID_RE = re.compile(r"设备命令(?:查询)?\s+(\d+)")
+_PROPOSAL_ID_RE = re.compile(r"设备(?:命令(?:查询)?|管控(?:请求|命令))\s+(\d+)")
 
 
 def _generate_fernet_key() -> str:
@@ -96,12 +97,55 @@ async def _make_session_and_switch_asset(
 
 
 def _fake_scrapli_connection(output: str = "Cisco IOS XE Software") -> AsyncMock:
-    """构造 Scrapli 连接 mock，返回指定命令输出。"""
+    """构造 Scrapli 连接 mock，send_command 返回指定输出。"""
     fake_connection = AsyncMock()
     fake_connection.send_command = AsyncMock(
         return_value=type("Resp", (), {"result": output, "failed": False})()
     )
     return fake_connection
+
+
+def _fake_scrapli_reboot_connection(output: str = "System will reboot") -> AsyncMock:
+    """构造 Scrapli 连接 mock，reboot 走 send_interactive。"""
+    fake_connection = AsyncMock()
+    fake_connection.send_interactive = AsyncMock(
+        return_value=type("Resp", (), {"result": output, "failed": False})()
+    )
+    return fake_connection
+
+
+def _fake_scrapli_configs_connection(output: str = "ok") -> AsyncMock:
+    """构造 Scrapli 连接 mock，port_enable/port_disable 走 send_configs。"""
+    fake_connection = AsyncMock()
+    fake_response_item = type("R", (), {"result": output, "failed": False})()
+    fake_connection.send_configs = AsyncMock(return_value=[fake_response_item, fake_response_item])
+    return fake_connection
+
+
+async def _grant_policy_permissions(
+    db_session: AsyncSession,
+    test_user: User,
+    *,
+    read: bool = True,
+    manage: bool = True,
+) -> None:
+    """现场创建 device_command_policy 权限并挂到 test_user 角色上。"""
+    role_id = (
+        await db_session.execute(select(user_roles.c.role_id).where(user_roles.c.user_id == test_user.id))
+    ).scalar_one()
+    grants: list[tuple[str, str]] = []
+    if read:
+        grants.append(("device_command_policy:read", "查看设备命令策略"))
+    if manage:
+        grants.append(("device_command_policy:manage", "管理设备命令策略"))
+    for code, name in grants:
+        permission = Permission(name=name, code=code, module="设备命令策略")
+        db_session.add(permission)
+        await db_session.flush()
+        await db_session.execute(
+            role_permissions.insert().values(role_id=role_id, permission_id=permission.id)
+        )
+    await db_session.commit()
 
 
 async def test_whitelisted_static_credential_query_executes_in_one_call(
@@ -442,3 +486,239 @@ async def test_child_agent_dispatcher_rejects_query_device_command(
 
     assert result.control == "rejected"
     assert "未知工具" in result.content
+
+
+async def test_whitelisted_reboot_executes_with_interactive_confirmation(
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """白名单 + 静态凭据的交换机：propose_device_control 一次调用当场执行 reboot。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    session_id, asset_id = await _make_session_and_switch_asset(
+        db_session,
+        test_user.id,
+        credential_password_encrypted=encrypt_credential_password("reboot-static-pass"),
+    )
+    await device_command_policy_crud.create(
+        db_session,
+        {
+            "scope": "asset",
+            "asset_id": asset_id,
+            "command_name": "reboot",
+            "decision": "whitelist",
+        },
+    )
+    await db_session.commit()
+
+    dispatch = build_root_tool_dispatcher(
+        db_session,
+        session_id=session_id,
+        actor_user_id=test_user.id,
+    )
+    fake_connection = _fake_scrapli_reboot_connection("rebooting now")
+    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+        tool_result = await dispatch(
+            "propose_device_control",
+            {
+                "asset_id": asset_id,
+                "command_name": "reboot",
+                "reason": "故障恢复重启",
+            },
+        )
+
+    assert tool_result.control == "ok"
+    assert "rebooting now" in tool_result.content
+    assert "reboot-static-pass" not in tool_result.content
+    fake_connection.send_interactive.assert_awaited_once()
+    fake_connection.send_command.assert_not_called()
+
+
+async def test_blacklisted_port_disable_is_rejected_without_creating_proposal(
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """黑名单 port_disable 应直接拒绝，且不创建 HITL 提案。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    session_id, asset_id = await _make_session_and_switch_asset(
+        db_session,
+        test_user.id,
+        credential_password_encrypted=encrypt_credential_password("static-pass"),
+    )
+    await device_command_policy_crud.create(
+        db_session,
+        {
+            "scope": "asset",
+            "asset_id": asset_id,
+            "command_name": "port_disable",
+            "decision": "blacklist",
+        },
+    )
+    await db_session.commit()
+
+    dispatch = build_root_tool_dispatcher(
+        db_session,
+        session_id=session_id,
+        actor_user_id=test_user.id,
+    )
+    tool_result = await dispatch(
+        "propose_device_control",
+        {
+            "asset_id": asset_id,
+            "command_name": "port_disable",
+            "interface_name": "GigabitEthernet0/1",
+            "reason": "尝试禁用端口",
+        },
+    )
+
+    assert tool_result.control == "rejected"
+    assert "黑名单" in tool_result.content
+    proposals = await hitl_proposal_crud.list_for_session(db_session, session_id)
+    assert proposals == []
+
+
+async def test_unclassified_port_enable_creates_pending_and_requires_interface_name(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未分类 port_enable：缺 interface_name 时在 propose 阶段拒绝；补齐后走 PENDING → 批准 → 执行。"""
+    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    session_id, asset_id = await _make_session_and_switch_asset(
+        db_session,
+        test_user.id,
+        credential_password_encrypted=encrypt_credential_password("static-pass"),
+    )
+    await db_session.commit()
+
+    dispatch = build_root_tool_dispatcher(
+        db_session,
+        session_id=session_id,
+        actor_user_id=test_user.id,
+    )
+    missing_iface = await dispatch(
+        "propose_device_control",
+        {
+            "asset_id": asset_id,
+            "command_name": "port_enable",
+            "reason": "启用端口缺接口名",
+        },
+    )
+    assert missing_iface.control == "rejected"
+    assert "接口名" in missing_iface.content
+    proposals_before = await hitl_proposal_crud.list_for_session(db_session, session_id)
+    assert proposals_before == []
+
+    tool_result = await dispatch(
+        "propose_device_control",
+        {
+            "asset_id": asset_id,
+            "command_name": "port_enable",
+            "interface_name": "GigabitEthernet0/1",
+            "reason": "启用端口",
+        },
+    )
+    assert tool_result.control == "pending_approval"
+    proposal_id = _extract_proposal_id(tool_result.content)
+    await db_session.commit()
+
+    await _grant_hitl_approve(db_session, test_user)
+    fake_connection = _fake_scrapli_configs_connection("port enabled")
+    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+        decide_response = await client.post(
+            f"/api/v1/hitl/proposals/{proposal_id}/decide",
+            json={"approve": True},
+            headers=auth_headers,
+        )
+    assert decide_response.status_code == 200, decide_response.text
+    assert decide_response.json()["data"]["status"] == "EXECUTED"
+    assert "port enabled" in decide_response.text or "EXECUTED" in decide_response.text
+
+
+async def test_create_asset_type_scope_policy_for_reboot_is_rejected_via_api(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+) -> None:
+    """asset_type 范围创建 reboot 变更类策略应被 API 拒绝。"""
+    await _grant_policy_permissions(db_session, test_user)
+    response = await client.post(
+        "/api/v1/device-command-policies/policies",
+        json={
+            "scope": "asset_type",
+            "asset_type": "switch",
+            "command_name": "reboot",
+            "decision": "whitelist",
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 422, response.text
+
+
+async def test_dynamic_credential_reboot_still_forces_manual_approval_even_when_whitelisted(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """动态凭据即使白名单 reboot 也强制人工；decide 缺密码 422，补密码后执行。"""
+    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    session_id, asset_id = await _make_session_and_switch_asset(
+        db_session,
+        test_user.id,
+        credential_type="dynamic",
+        credential_password_encrypted=None,
+    )
+    await device_command_policy_crud.create(
+        db_session,
+        {
+            "scope": "asset",
+            "asset_id": asset_id,
+            "command_name": "reboot",
+            "decision": "whitelist",
+        },
+    )
+    await db_session.commit()
+
+    dispatch = build_root_tool_dispatcher(
+        db_session,
+        session_id=session_id,
+        actor_user_id=test_user.id,
+    )
+    tool_result = await dispatch(
+        "propose_device_control",
+        {
+            "asset_id": asset_id,
+            "command_name": "reboot",
+            "reason": "动态凭据白名单仍须人工",
+        },
+    )
+    assert tool_result.control == "pending_approval"
+    proposal_id = _extract_proposal_id(tool_result.content)
+    await db_session.commit()
+
+    await _grant_hitl_approve(db_session, test_user)
+    missing_password = await client.post(
+        f"/api/v1/hitl/proposals/{proposal_id}/decide",
+        json={"approve": True},
+        headers=auth_headers,
+    )
+    assert missing_password.status_code == 422, missing_password.text
+
+    fake_connection = _fake_scrapli_reboot_connection("dynamic reboot output")
+    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+        with_password = await client.post(
+            f"/api/v1/hitl/proposals/{proposal_id}/decide",
+            json={"approve": True, "dynamic_credential_password": "one-time-pass"},
+            headers=auth_headers,
+        )
+    assert with_password.status_code == 200, with_password.text
+    assert with_password.json()["data"]["status"] == "EXECUTED"
+    assert "one-time-pass" not in with_password.text

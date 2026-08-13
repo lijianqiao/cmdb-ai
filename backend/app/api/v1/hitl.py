@@ -117,7 +117,7 @@ async def decide_hitl_proposal(
     if existing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
 
-    if body.approve and existing.action_type == "device_query":
+    if body.approve and existing.action_type in ("device_query", "device_control"):
         raw_asset_id = existing.action_payload.get("asset_id")
         asset = await cmdb_asset_crud.get(db, raw_asset_id) if isinstance(raw_asset_id, int) else None
         if asset is not None and asset.credential_type == "dynamic" and not body.dynamic_credential_password:
