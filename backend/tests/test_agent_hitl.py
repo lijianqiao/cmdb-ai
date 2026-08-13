@@ -709,6 +709,72 @@ async def test_device_control_stub_failure_stays_approved(
     assert [event[1] for event in publisher.events] == ["hitl_execution_failed"]
 
 
+async def test_device_control_reboot_rejects_interface_name_with_credentialed_asset(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    """reboot 带 interface_name 时，凭据/厂商通过后应明确拒绝多余参数。"""
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    asset_id = await _make_query_asset(db_session)
+
+    with pytest.raises(HitlProposalRejectedError, match="不接受 interface_name"):
+        await propose_action(
+            db_session,
+            session_id=session_id,
+            proposed_by_agent_id=None,
+            action_type="device_control",
+            asset_id=asset_id,
+            payload={"command_name": "reboot", "interface_name": "GigabitEthernet0/1"},
+            reason="reboot 不接受接口名",
+            actor_user_id=test_user.id,
+        )
+
+    assert await _proposal_count(db_session) == 0
+
+
+async def test_device_control_port_disable_rejects_missing_interface_name(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    """port_disable 缺 interface_name 时，凭据/厂商通过后应要求合法接口名。"""
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    asset_id = await _make_query_asset(db_session)
+
+    with pytest.raises(HitlProposalRejectedError, match="合法的接口名"):
+        await propose_action(
+            db_session,
+            session_id=session_id,
+            proposed_by_agent_id=None,
+            action_type="device_control",
+            asset_id=asset_id,
+            payload={"command_name": "port_disable"},
+            reason="port_disable 缺接口名",
+            actor_user_id=test_user.id,
+        )
+
+    assert await _proposal_count(db_session) == 0
+
+
+async def test_device_control_port_disable_rejects_illegal_interface_name(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    """port_disable 接口名含非法字符时，凭据/厂商通过后应拒绝。"""
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    asset_id = await _make_query_asset(db_session)
+
+    with pytest.raises(HitlProposalRejectedError, match="合法的接口名"):
+        await propose_action(
+            db_session,
+            session_id=session_id,
+            proposed_by_agent_id=None,
+            action_type="device_control",
+            asset_id=asset_id,
+            payload={"command_name": "port_disable", "interface_name": "eth0; rm -rf /"},
+            reason="非法接口名",
+            actor_user_id=test_user.id,
+        )
+
+    assert await _proposal_count(db_session) == 0
+
+
 async def test_list_for_session_filters_status(
     db_session: AsyncSession,
     test_user: User,
