@@ -311,3 +311,134 @@ async def test_read_only_role_cannot_create(
         headers=auth_headers,
     )
     assert response.status_code == 403
+
+
+async def _make_asset_pair(db_session: AsyncSession) -> tuple[int, int]:
+    """直接落库创建一对资产，供依赖关系接口测试使用（不必经过创建资产 API）。"""
+    from app.crud.cmdb_asset import cmdb_asset_crud
+
+    parent = await cmdb_asset_crud.create(
+        db_session,
+        {"asset_type": "switch", "hostname": "sw-dep-01", "ip_address": "10.0.9.20", "vendor": "generic"},
+    )
+    child = await cmdb_asset_crud.create(
+        db_session,
+        {"asset_type": "server", "hostname": "srv-dep-01", "ip_address": "10.0.9.21", "vendor": "generic"},
+    )
+    await db_session.commit()
+    return parent.id, child.id
+
+
+async def test_create_dependency_then_list_shows_both_directions(
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+) -> None:
+    await _grant_cmdb_permissions(db_session, test_user)
+    parent_id, child_id = await _make_asset_pair(db_session)
+
+    create_resp = await client.post(
+        f"/api/v1/cmdb/assets/{parent_id}/dependencies",
+        json={"child_asset_id": child_id, "relation_type": "uplink"},
+        headers=auth_headers,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    body = create_resp.json()["data"]
+    assert body == {
+        "parent_asset_id": parent_id,
+        "child_asset_id": child_id,
+        "relation_type": "uplink",
+    } | {"created_at": body["created_at"]}
+
+    parent_list = await client.get(f"/api/v1/cmdb/assets/{parent_id}/dependencies", headers=auth_headers)
+    assert parent_list.status_code == 200
+    assert [c["child_asset_id"] for c in parent_list.json()["data"]["children"]] == [child_id]
+    assert parent_list.json()["data"]["parents"] == []
+
+    child_list = await client.get(f"/api/v1/cmdb/assets/{child_id}/dependencies", headers=auth_headers)
+    assert child_list.status_code == 200
+    assert [p["parent_asset_id"] for p in child_list.json()["data"]["parents"]] == [parent_id]
+    assert child_list.json()["data"]["children"] == []
+
+
+async def test_create_dependency_rejects_self_loop(
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+) -> None:
+    await _grant_cmdb_permissions(db_session, test_user)
+    parent_id, _child_id = await _make_asset_pair(db_session)
+
+    response = await client.post(
+        f"/api/v1/cmdb/assets/{parent_id}/dependencies",
+        json={"child_asset_id": parent_id, "relation_type": "uplink"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 422
+
+
+async def test_create_dependency_rejects_unknown_child_asset(
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+) -> None:
+    await _grant_cmdb_permissions(db_session, test_user)
+    parent_id, _child_id = await _make_asset_pair(db_session)
+
+    response = await client.post(
+        f"/api/v1/cmdb/assets/{parent_id}/dependencies",
+        json={"child_asset_id": 999999, "relation_type": "uplink"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 404
+
+
+async def test_create_duplicate_dependency_returns_409(
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+) -> None:
+    await _grant_cmdb_permissions(db_session, test_user)
+    parent_id, child_id = await _make_asset_pair(db_session)
+    payload = {"child_asset_id": child_id, "relation_type": "uplink"}
+
+    first = await client.post(
+        f"/api/v1/cmdb/assets/{parent_id}/dependencies", json=payload, headers=auth_headers
+    )
+    assert first.status_code == 201, first.text
+
+    second = await client.post(
+        f"/api/v1/cmdb/assets/{parent_id}/dependencies", json=payload, headers=auth_headers
+    )
+    assert second.status_code == 409
+
+
+async def test_delete_dependency_removes_edge(
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+) -> None:
+    await _grant_cmdb_permissions(db_session, test_user)
+    parent_id, child_id = await _make_asset_pair(db_session)
+    await client.post(
+        f"/api/v1/cmdb/assets/{parent_id}/dependencies",
+        json={"child_asset_id": child_id, "relation_type": "uplink"},
+        headers=auth_headers,
+    )
+
+    delete_resp = await client.delete(
+        f"/api/v1/cmdb/assets/{parent_id}/dependencies/{child_id}", headers=auth_headers
+    )
+    assert delete_resp.status_code == 200, delete_resp.text
+
+    delete_again = await client.delete(
+        f"/api/v1/cmdb/assets/{parent_id}/dependencies/{child_id}", headers=auth_headers
+    )
+    assert delete_again.status_code == 404
+
+
+async def test_dependency_endpoints_require_permission(
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+) -> None:
+    # test_user 默认没有任何 cmdb 权限（未调用 _grant_cmdb_permissions）
+    parent_id, child_id = await _make_asset_pair(db_session)
+
+    create_resp = await client.post(
+        f"/api/v1/cmdb/assets/{parent_id}/dependencies",
+        json={"child_asset_id": child_id, "relation_type": "uplink"},
+        headers=auth_headers,
+    )
+    assert create_resp.status_code == 403
+
+    list_resp = await client.get(f"/api/v1/cmdb/assets/{parent_id}/dependencies", headers=auth_headers)
+    assert list_resp.status_code == 403

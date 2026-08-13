@@ -19,9 +19,12 @@ from unittest.mock import patch
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.ws_hub import hub
 from app.core.llm import ChatMessage, ChatResult
+from app.models.permission import Permission
+from app.models.role import Role, role_permissions
 
 pytestmark = pytest.mark.asyncio
 
@@ -34,6 +37,21 @@ async def _clear_ws_hub() -> AsyncIterator[None]:
     hub._connections.clear()
     yield
     hub._connections.clear()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _grant_agent_use(db_session: AsyncSession, test_role: Role) -> None:
+    """自动给 test_role 挂上 agent:use——运维助手会话入口现在需要这个权限，
+    测试库的权限种子（conftest.py::test_permissions）不含 Agent 模块，需要
+    本文件自己现场创建，跟 test_hitl_api.py::_grant_hitl_approve 是同一模式。
+    """
+    permission = Permission(name="使用运维助手", code="agent:use", module="Agent")
+    db_session.add(permission)
+    await db_session.flush()
+    await db_session.execute(
+        role_permissions.insert().values(role_id=test_role.id, permission_id=permission.id)
+    )
+    await db_session.commit()
 
 
 class FakeWebSocket:

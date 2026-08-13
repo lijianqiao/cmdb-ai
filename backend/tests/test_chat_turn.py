@@ -10,6 +10,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +18,8 @@ from app.agent.loop import ToolResult
 from app.agent.ws_hub import AgentWsHub, WsHitlEventPublisher
 from app.core.llm import ChatMessage, ChatResult, ToolCall
 from app.crud.agent_session import agent_session_crud
+from app.models.permission import Permission
+from app.models.role import Role, role_permissions
 from app.models.user import User
 
 pytestmark = pytest.mark.asyncio
@@ -24,6 +27,20 @@ pytestmark = pytest.mark.asyncio
 type Headers = dict[str, str]
 
 _SENSITIVE_KEYS = frozenset({"message", "command", "password", "credential"})
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _grant_agent_use(db_session: AsyncSession, test_role: Role) -> None:
+    """自动给 test_role 挂上 agent:use——POST /agent/sessions/{id}/messages 走真实
+    HTTP 路径的用例需要这个权限，跟 test_hitl_api.py::_grant_hitl_approve 同一模式。
+    """
+    permission = Permission(name="使用运维助手", code="agent:use", module="Agent")
+    db_session.add(permission)
+    await db_session.flush()
+    await db_session.execute(
+        role_permissions.insert().values(role_id=test_role.id, permission_id=permission.id)
+    )
+    await db_session.commit()
 
 
 class FakeWebSocket:

@@ -6,7 +6,9 @@
 @Docs: Agent 会话 REST API：创建、列表、详情、硬删除、历史与发消息触发 chat turn。
 
 实现流程：
-1. 全部端点走 get_current_user 登录校验；Chat 页面对登录用户开放，无额外权限码。
+1. 全部端点走 require_permission("agent:use")：会话校验与权限判定合并一次查询，
+   超管自动放行；没有这个权限的用户完全用不了运维助手（旧版本只做登录校验，
+   任何登录用户都能用，属于遗留的权限缺口，这里补上）。
 2. 创建会话时写入当前用户 user_id，status 固定为 active；列表复用 list_for_user 分页。
 3. 详情 / 删除 / 消息历史先查会话，非所有者或不存在一律 404，避免枚举他人会话 ID。
 4. DELETE 为物理删除；消息、HITL、registry、trace 依赖库级 ON DELETE CASCADE。
@@ -20,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.chat_turn import run_chat_turn
 from app.core.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import require_permission
 from app.crud.agent_message import agent_message_crud
 from app.crud.agent_session import agent_session_crud
 from app.models.agent_session import AgentSession
@@ -73,7 +75,7 @@ async def _owned_session_or_404(
 async def create_session(
     body: AgentSessionCreate | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("agent:use")),
 ) -> ResponseEnvelope[AgentSessionResponse]:
     """为当前用户创建一条 Agent 会话。"""
     payload = body or AgentSessionCreate()
@@ -102,7 +104,7 @@ async def list_sessions(
     page: int = Query(default=1, ge=1, le=100_000),
     page_size: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("agent:use")),
 ) -> ResponseEnvelope[PaginatedData[AgentSessionResponse]]:
     """分页列出当前用户的会话（最新在前）。"""
     sessions, total = await agent_session_crud.list_for_user(
@@ -122,7 +124,7 @@ async def list_sessions(
 async def get_session(
     session_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("agent:use")),
 ) -> ResponseEnvelope[AgentSessionResponse]:
     """获取会话详情；非所有者返回 404。"""
     session = await _owned_session_or_404(db, session_id, current_user.id)
@@ -136,7 +138,7 @@ async def get_session(
 async def delete_session(
     session_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("agent:use")),
 ) -> ResponseEnvelope[None]:
     """硬删除当前用户拥有的会话；非所有者或不存在返回 404。"""
     await _owned_session_or_404(db, session_id, current_user.id)
@@ -157,7 +159,7 @@ async def delete_session(
 async def list_session_messages(
     session_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("agent:use")),
 ) -> ResponseEnvelope[list[AgentMessageResponse]]:
     """返回根 Agent 的会话历史（不含子 Agent 私有消息）。"""
     await _owned_session_or_404(db, session_id, current_user.id)
@@ -179,7 +181,7 @@ async def post_session_message(
     session_id: int,
     body: AgentMessageCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("agent:use")),
 ) -> ResponseEnvelope[AgentChatTurnResponse]:
     """
     发送用户消息并触发一轮 Agent turn。

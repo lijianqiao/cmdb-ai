@@ -13,9 +13,17 @@ from app.core.cmdb_credential import CmdbCredentialKeyMissingError, encrypt_cred
 from app.core.database import get_db
 from app.core.deps import get_client_ip, require_permission
 from app.crud.cmdb_asset import cmdb_asset_crud
+from app.crud.cmdb_asset_dependency import cmdb_asset_dependency_crud
 from app.models.cmdb_asset import CmdbAsset
 from app.models.user import User
-from app.schemas.cmdb import CmdbAssetCreate, CmdbAssetResponse, CmdbAssetUpdate
+from app.schemas.cmdb import (
+    CmdbAssetCreate,
+    CmdbAssetDependencyCreate,
+    CmdbAssetDependencyListResponse,
+    CmdbAssetDependencyResponse,
+    CmdbAssetResponse,
+    CmdbAssetUpdate,
+)
 from app.schemas.common import PaginatedData, ResponseEnvelope, paginated_response, success_response
 from app.utils.audit import log_audit
 
@@ -289,3 +297,106 @@ async def purge_asset(
     )
     await db.commit()
     return success_response(None, message="已永久删除")
+
+
+@router.post(
+    "/assets/{asset_id}/dependencies",
+    response_model=ResponseEnvelope[CmdbAssetDependencyResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_dependency(
+    dependency_in: CmdbAssetDependencyCreate,
+    request: Request,
+    asset_id: int = Path(gt=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("cmdb:manage")),
+) -> ResponseEnvelope[CmdbAssetDependencyResponse]:
+    """Add one dependency edge from `asset_id` (parent) to another asset (child)."""
+    if dependency_in.child_asset_id == asset_id:
+        raise HTTPException(status_code=422, detail="资产不能依赖自身")
+
+    parent = await cmdb_asset_crud.get(db, asset_id)
+    if parent is None:
+        raise HTTPException(status_code=404, detail="父资产不存在")
+    child = await cmdb_asset_crud.get(db, dependency_in.child_asset_id)
+    if child is None:
+        raise HTTPException(status_code=404, detail="子资产不存在")
+
+    existing_children = await cmdb_asset_dependency_crud.get_children(db, asset_id)
+    if any(edge.child_asset_id == dependency_in.child_asset_id for edge in existing_children):
+        raise HTTPException(status_code=409, detail="依赖关系已存在")
+
+    edge = await cmdb_asset_dependency_crud.create(
+        db,
+        parent_asset_id=asset_id,
+        child_asset_id=dependency_in.child_asset_id,
+        relation_type=dependency_in.relation_type,
+    )
+    await log_audit(
+        db,
+        user_id=current_user.id,
+        action="create_cmdb_asset_dependency",
+        target=f"cmdb_asset:{asset_id}",
+        detail=f"新增依赖: {asset_id} -> {dependency_in.child_asset_id}（{dependency_in.relation_type}）",
+        ip=get_client_ip(request),
+    )
+    await db.commit()
+    return success_response(
+        CmdbAssetDependencyResponse.model_validate(edge),
+        message="创建成功",
+        code=status.HTTP_201_CREATED,
+    )
+
+
+@router.get(
+    "/assets/{asset_id}/dependencies",
+    response_model=ResponseEnvelope[CmdbAssetDependencyListResponse],
+)
+async def list_dependencies(
+    asset_id: int = Path(gt=0),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("cmdb:read")),
+) -> ResponseEnvelope[CmdbAssetDependencyListResponse]:
+    """List one asset's direct dependency edges in both directions."""
+    asset = await cmdb_asset_crud.get(db, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="资产不存在")
+
+    children = await cmdb_asset_dependency_crud.get_children(db, asset_id)
+    parents = await cmdb_asset_dependency_crud.get_parents(db, asset_id)
+    return success_response(
+        CmdbAssetDependencyListResponse(
+            children=[CmdbAssetDependencyResponse.model_validate(edge) for edge in children],
+            parents=[CmdbAssetDependencyResponse.model_validate(edge) for edge in parents],
+        )
+    )
+
+
+@router.delete(
+    "/assets/{asset_id}/dependencies/{child_asset_id}",
+    response_model=ResponseEnvelope[None],
+)
+async def delete_dependency(
+    request: Request,
+    asset_id: int = Path(gt=0),
+    child_asset_id: int = Path(gt=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("cmdb:manage")),
+) -> ResponseEnvelope[None]:
+    """Remove one dependency edge."""
+    removed = await cmdb_asset_dependency_crud.remove(
+        db, parent_asset_id=asset_id, child_asset_id=child_asset_id
+    )
+    if not removed:
+        raise HTTPException(status_code=404, detail="依赖关系不存在")
+
+    await log_audit(
+        db,
+        user_id=current_user.id,
+        action="delete_cmdb_asset_dependency",
+        target=f"cmdb_asset:{asset_id}",
+        detail=f"删除依赖: {asset_id} -> {child_asset_id}",
+        ip=get_client_ip(request),
+    )
+    await db.commit()
+    return success_response(None, message="删除成功")

@@ -72,6 +72,34 @@ async def test_traverse_up_follows_reverse_direction(db_session: AsyncSession) -
     assert reached == [(switch_id, 1)]
 
 
+async def test_remove_deletes_existing_edge(db_session: AsyncSession) -> None:
+    switch_id = await _make_asset(db_session, "sw-01")
+    server_id = await _make_asset(db_session, "srv-01")
+    await cmdb_asset_dependency_crud.create(
+        db_session, parent_asset_id=switch_id, child_asset_id=server_id, relation_type="uplink"
+    )
+    await db_session.commit()
+
+    removed = await cmdb_asset_dependency_crud.remove(
+        db_session, parent_asset_id=switch_id, child_asset_id=server_id
+    )
+    await db_session.commit()
+
+    assert removed is True
+    assert await cmdb_asset_dependency_crud.get_children(db_session, switch_id) == []
+
+
+async def test_remove_returns_false_when_edge_missing(db_session: AsyncSession) -> None:
+    switch_id = await _make_asset(db_session, "sw-01")
+    server_id = await _make_asset(db_session, "srv-01")
+
+    removed = await cmdb_asset_dependency_crud.remove(
+        db_session, parent_asset_id=switch_id, child_asset_id=server_id
+    )
+
+    assert removed is False
+
+
 async def test_traverse_is_cycle_safe(db_session: AsyncSession) -> None:
     a_id = await _make_asset(db_session, "a")
     b_id = await _make_asset(db_session, "b")

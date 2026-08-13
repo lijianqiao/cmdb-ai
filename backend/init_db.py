@@ -188,6 +188,12 @@ SEED_PERMISSIONS: tuple[SeedPermission, ...] = (
         "description": "创建/更新/删除设备命令白/黑名单策略",
     },
     {
+        "name": "使用运维助手",
+        "code": "agent:use",
+        "module": "Agent",
+        "description": "创建/使用运维助手会话（旧版本任何登录用户都能用，现在需要这个权限）",
+    },
+    {
         "name": "审批 HITL 提案",
         "code": "agent:hitl_approve",
         "module": "Agent",

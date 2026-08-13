@@ -8,11 +8,13 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.websockets import WebSocketDisconnect
 
@@ -20,8 +22,9 @@ from app.agent.ws_hub import hub
 from app.core.security import hash_password
 from app.crud.agent_session import agent_session_crud
 from app.main import app
-from app.models.role import Role
-from app.models.user import User
+from app.models.permission import Permission
+from app.models.role import Role, role_permissions
+from app.models.user import User, user_roles
 from app.schemas.agent_ws import AgentWsServerMessage
 
 pytestmark = pytest.mark.asyncio
@@ -35,6 +38,21 @@ async def _clear_ws_hub() -> AsyncIterator[None]:
     hub._connections.clear()
     yield
     hub._connections.clear()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _grant_agent_use(db_session: AsyncSession, test_role: Role) -> None:
+    """自动给 test_role 挂上 agent:use——运维助手会话入口现在需要这个权限，
+    测试库的权限种子（conftest.py::test_permissions）不含 Agent 模块，需要
+    本文件自己现场创建，跟 test_hitl_api.py::_grant_hitl_approve 是同一模式。
+    """
+    permission = Permission(name="使用运维助手", code="agent:use", module="Agent")
+    db_session.add(permission)
+    await db_session.flush()
+    await db_session.execute(
+        role_permissions.insert().values(role_id=test_role.id, permission_id=permission.id)
+    )
+    await db_session.commit()
 
 
 def _access_token_from_headers(headers: Headers) -> str:
@@ -233,3 +251,104 @@ async def test_ws_first_frame_auth_connects(
         websocket.send_json({"type": "auth", "access_token": token})
         websocket.portal.call(_wait_until_hub_has, session.id)
         assert len(hub._connections[session.id]) == 1
+
+
+async def test_ws_without_agent_use_permission_closes_4403(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    login_user,  # noqa: ANN001
+) -> None:
+    """没有 agent:use 权限的用户，即使会话就是自己的，也应该在握手阶段被拒绝。"""
+    role = Role(name="无权限角色", description="", permissions=[])
+    db_session.add(role)
+    await db_session.flush()
+    user = User(
+        username="nopermws",
+        email="nopermws@example.com",
+        hashed_password=hash_password("nopermpassword123"),
+        nickname="无权限用户",
+        is_active=True,
+        is_superuser=False,
+        roles=[role],
+    )
+    db_session.add(user)
+    await db_session.flush()
+    session = await agent_session_crud.create(
+        db_session, {"user_id": user.id, "title": "无权限", "status": "active"}
+    )
+    await db_session.commit()
+
+    headers = await login_user("nopermws", "nopermpassword123")
+    token = _access_token_from_headers(headers)
+
+    code, reason = _connect_expect_close(f"/api/v1/ws/agent/{session.id}?access_token={token}")
+    assert code == 4403
+    assert reason
+
+
+async def test_periodic_reauth_closes_socket_when_permission_revoked(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+) -> None:
+    """连接建立后权限被收回，下一轮周期性复查应主动关闭连接。
+
+    直接单测 _periodic_reauth 本身，不经过真实 WebSocket 收发栈 + TestClient
+    的跨线程 portal——那条路径下测试自己的 DB 写入和服务端复查任务的 DB 读取
+    会在同一个 StaticPool 单连接上产生真实的并发访问，导致收尾时序不稳定
+    （偶发 "no active connection"，跟这里要验证的行为本身无关）。这里让
+    revoke 和 _periodic_reauth 的 DB 访问都跑在测试自己的事件循环上，天然
+    没有跨循环/跨线程的问题；连接建立阶段权限缺失会直接 4403 的分支已经由
+    test_ws_without_agent_use_permission_closes_4403 做真实集成验证。
+    """
+    import app.api.v1.agent_ws as agent_ws_module
+    from app.core.security import decode_token
+
+    session = await agent_session_crud.create(
+        db_session, {"user_id": test_user.id, "title": "复查权限", "status": "active"}
+    )
+    await db_session.commit()
+    token = _access_token_from_headers(auth_headers)
+    payload = decode_token(token)
+
+    close_calls: list[tuple[int, str]] = []
+
+    async def fake_close(*, code: int, reason: str) -> None:
+        close_calls.append((code, reason))
+
+    fake_websocket = AsyncMock()
+    fake_websocket.app = app
+    fake_websocket.close = fake_close
+
+    reauth_task = asyncio.create_task(
+        agent_ws_module._periodic_reauth(
+            fake_websocket,
+            user_id=test_user.id,
+            family_id=payload.sid,
+            token_version=payload.ver,
+            session_id=session.id,
+            interval_seconds=0.02,
+        )
+    )
+    try:
+        role_id = (
+            await db_session.execute(select(user_roles.c.role_id).where(user_roles.c.user_id == test_user.id))
+        ).scalar_one()
+        permission_id = (
+            await db_session.execute(select(Permission.id).where(Permission.code == "agent:use"))
+        ).scalar_one()
+        await db_session.execute(
+            delete(role_permissions).where(
+                role_permissions.c.role_id == role_id,
+                role_permissions.c.permission_id == permission_id,
+            )
+        )
+        await db_session.commit()
+
+        await asyncio.wait_for(reauth_task, timeout=2.0)
+    finally:
+        if not reauth_task.done():
+            reauth_task.cancel()
+
+    assert close_calls == [(4403, "权限已被收回")]

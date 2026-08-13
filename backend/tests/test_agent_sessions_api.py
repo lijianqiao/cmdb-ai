@@ -7,18 +7,35 @@
 """
 
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import hash_password
 from app.crud.agent_message import agent_message_crud
 from app.crud.agent_session import agent_session_crud
-from app.models.role import Role
+from app.models.permission import Permission
+from app.models.role import Role, role_permissions
 from app.models.user import User
 
 pytestmark = pytest.mark.asyncio
 
 type Headers = dict[str, str]
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _grant_agent_use(db_session: AsyncSession, test_role: Role) -> None:
+    """自动给 test_role 挂上 agent:use——运维助手会话入口现在需要这个权限，
+    测试库的权限种子（conftest.py::test_permissions）不含 Agent 模块，需要
+    本文件自己现场创建，跟 test_hitl_api.py::_grant_hitl_approve 是同一模式。
+    """
+    permission = Permission(name="使用运维助手", code="agent:use", module="Agent")
+    db_session.add(permission)
+    await db_session.flush()
+    await db_session.execute(
+        role_permissions.insert().values(role_id=test_role.id, permission_id=permission.id)
+    )
+    await db_session.commit()
 
 
 async def _other_user(db: AsyncSession, role: Role) -> User:
@@ -228,3 +245,35 @@ async def test_delete_session_hard_and_cascade(
         agent_id=None,
     )
     assert messages == []
+
+
+async def test_session_endpoints_require_agent_use_permission(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    login_user,
+) -> None:
+    """没有 agent:use 权限的用户不能创建/查看运维助手会话。"""
+    role = Role(name="无权限角色", description="", permissions=[])
+    db_session.add(role)
+    await db_session.flush()
+    user = User(
+        username="nopermsession",
+        email="nopermsession@example.com",
+        hashed_password=hash_password("testpassword123"),
+        nickname="无权限用户",
+        is_active=True,
+        is_superuser=False,
+        roles=[role],
+    )
+    db_session.add(user)
+    await db_session.commit()
+
+    headers = await login_user("nopermsession", "testpassword123")
+
+    create_resp = await client.post(
+        "/api/v1/agent/sessions", json={"title": "无权限"}, headers=headers
+    )
+    assert create_resp.status_code == 403
+
+    list_resp = await client.get("/api/v1/agent/sessions", headers=headers)
+    assert list_resp.status_code == 403

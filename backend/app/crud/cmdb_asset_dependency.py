@@ -35,6 +35,21 @@ class CRUDCmdbAssetDependency:
         await db.flush()
         return edge
 
+    async def remove(
+        self, db: AsyncSession, *, parent_asset_id: int, child_asset_id: int
+    ) -> bool:
+        """Delete one dependency edge; return whether a row was actually removed."""
+        stmt = select(CmdbAssetDependency).where(
+            CmdbAssetDependency.parent_asset_id == parent_asset_id,
+            CmdbAssetDependency.child_asset_id == child_asset_id,
+        )
+        edge = (await db.execute(stmt)).scalar_one_or_none()
+        if edge is None:
+            return False
+        await db.delete(edge)
+        await db.flush()
+        return True
+
     async def get_children(self, db: AsyncSession, parent_asset_id: int) -> list[CmdbAssetDependency]:
         """Return every edge where `parent_asset_id` is the parent."""
         stmt = select(CmdbAssetDependency).where(

@@ -1759,9 +1759,11 @@ async def test_default_runner_feeds_tool_failed_back_for_correction(
     assert terminal.result_summary == "corrected final"
     assert terminal.budget.steps_used == 2
     assert len(histories) == 2
+    from app.agent.session import _TOOL_RESULT_UNTRUSTED_PREFIX
+
     assert histories[1][-1] == ChatMessage(
         role="tool",
-        content="工具 'kb_read' 执行失败: OSError",
+        content=_TOOL_RESULT_UNTRUSTED_PREFIX + "工具 'kb_read' 执行失败: OSError",
         tool_call_id="read-1",
     )
     await manager.close_agent(child.child_id)

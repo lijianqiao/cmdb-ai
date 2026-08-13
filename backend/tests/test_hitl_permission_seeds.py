@@ -10,6 +10,7 @@ REQUIRED = {
     "cmdb:manage",
     "monitor:read",
     "monitor:manage",
+    "agent:use",
     "agent:hitl_approve",
     "system_config:manage",
 }

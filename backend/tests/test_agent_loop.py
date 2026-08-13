@@ -105,7 +105,7 @@ async def test_loop_dispatches_tool_and_continues_to_final_answer(
     roles = [m.role for m in history]
     assert roles == ["user", "assistant", "tool", "assistant"]
     assert history[2].tool_call_id == "call_1"
-    assert history[2].content == "10.0.0.5 状态: up"
+    assert history[2].content.endswith("10.0.0.5 状态: up")
 
 
 async def test_loop_stops_early_on_pending_approval(
@@ -191,9 +191,9 @@ async def test_loop_backfills_skipped_tool_calls_after_early_exit_in_batch(
     history = await build_model_history(db_session, session_id)
     tool_messages = [m for m in history if m.role == "tool"]
     assert [m.tool_call_id for m in tool_messages] == ["call_1", "call_2", "call_3"]
-    assert tool_messages[0].content == "状态: up"
-    assert tool_messages[1].content == "已创建提案,等待审批"
-    assert tool_messages[2].content == "已跳过：等待前一个工具调用的处理结果"
+    assert tool_messages[0].content.endswith("状态: up")
+    assert tool_messages[1].content.endswith("已创建提案,等待审批")
+    assert tool_messages[2].content.endswith("已跳过：等待前一个工具调用的处理结果")
 
 
 async def test_loop_stops_when_budget_exceeded(db_session: AsyncSession, test_user: User) -> None:

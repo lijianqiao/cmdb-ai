@@ -112,3 +112,28 @@ class CmdbAssetResponse(ApiModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class CmdbAssetDependencyCreate(ApiModel):
+    """Add one dependency edge from an existing parent asset to another asset."""
+
+    child_asset_id: int = Field(ge=1)
+    relation_type: str = Field(min_length=1, max_length=50)
+
+
+class CmdbAssetDependencyResponse(ApiModel):
+    """One directed dependency edge between two CMDB assets."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    parent_asset_id: int
+    child_asset_id: int
+    relation_type: str
+    created_at: datetime
+
+
+class CmdbAssetDependencyListResponse(ApiModel):
+    """One asset's direct dependency edges in both directions."""
+
+    children: list[CmdbAssetDependencyResponse]
+    parents: list[CmdbAssetDependencyResponse]
