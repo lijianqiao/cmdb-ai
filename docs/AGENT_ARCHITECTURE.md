@@ -442,7 +442,7 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 | 层级 | 本项目的具体落地 |
 | :--- | :--- |
 | L1 能力最小化 | 除 `propose_remediation`、`propose_device_control` 外全部工具只读（`query_device_command` 为只读诊断，经策略门控但不改设备状态）；`kb_grep`/`kb_read` 路径必须落在 `knowledge/` 目录内，代码层做 realpath 前缀校验防目录穿越 |
-| L2 动作审查 | `propose_remediation.payload` 做 JSON Schema 校验，`action_type` 白名单枚举，不接受自由文本命令 |
+| L2 动作审查 | `propose_remediation.payload` 做 JSON Schema 校验，`action_type` 白名单枚举，不接受自由文本命令；`propose_device_control` 的 `command_name` 必须在设备命令目录内且通过参数校验（如 `interface_name` 约束），不接受自由文本 CLI |
 | L3 风险分级 | `notify` 默认可配置自动批准（低风险）；`device_control` 未分类或需动态凭据时强制 HITL；白名单+非动态凭据凭策略可当场执行，豁免人工审批 |
 | L4 执行沙箱 | `device_control` 已接入真实执行通道：白名单+非动态凭据可当场执行；动态凭据强制人工审批；生产启用 `state_changing` 白名单前须在测试网段完成手工验证（见第 11 节 A6） |
 | L5 审计 | `AgentMessage`/`MonitorStatusEvent`/`HitlProposal`/`AuditLog` 全部 append-only |
@@ -507,7 +507,7 @@ uv add httpx              # 调用本地 llama.cpp OpenAI 兼容接口（现有 
 | **T07** | 知识库子系统：`KnowledgeCategory`/`Document`/`Chunk` 模型，`kb_glob`/`kb_grep`/`kb_read`/`kb_semantic_search` 工具，上传 API，pgvector 集成，`classifier`/`kb_explorer` 角色 | P2 | T06 |
 | **T08** | CMDB + 监控子系统：`CmdbAsset`/`CmdbAssetDependency`/`MonitorTarget`/`MonitorStatusEvent` 模型，`monitor_sweep`/`cmdb_diff_job` 确定性任务，`query_cmdb`/`query_monitor_status`/`query_cmdb_dependencies` 工具，`ops_explorer` 角色 | 不依赖 spawn，纯确定性管道 + 只读工具 | T06 |
 | **T09** | Spawn 编排 + 角色目录：`app/agent/spawn.py`，`ChildReceipt` 落地，`investigator`/`reviewer` 角色，两个编排范式（批量归类并行、根因排查并行） | P3–P4 | T07 + T08 |
-| **T10** | HITL + 安全闸门：`app/agent/hitl.py` 状态机，`propose_remediation`/`propose_device_control`/`query_device_command` 工具，`DeviceControlExecutor` 已接入 Scrapli 执行通道，新增权限码（`knowledge:*`/`cmdb:*`/`monitor:*`/`agent:hitl_approve`） | P1 + 安全基线（第 9 节） | T06 |
+| **T10** | HITL + 安全闸门：`app/agent/hitl.py` 状态机，`propose_remediation`/`propose_device_control`/`query_device_command` 工具，设备命令经 Scrapli `DeviceQueryExecutor` 执行通道落地，新增权限码（`knowledge:*`/`cmdb:*`/`monitor:*`/`agent:hitl_approve`） | P1 + 安全基线（第 9 节） | T06 |
 | **T11** | 前端 Chat 页面：`OpsAssistantPage`、WebSocket 客户端、消息流组件、`HitlApprovalCard`、`KnowledgeUploadDialog` | 对应前端集成 | T06（至少要有可用的 WS 端点，可用 mock 提前并行开发） |
 
 ### 14. 任务依赖图
