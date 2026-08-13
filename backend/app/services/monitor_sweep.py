@@ -60,6 +60,8 @@ async def run_monitor_sweep_once(
     if probe_timeout_seconds is None:
         operations = await get_effective_operations_config(db)
         probe_timeout_seconds = operations.monitor_probe_timeout_seconds
+    else:
+        operations = None
 
     targets = await monitor_target_crud.list_active(db)
     for target in targets:
@@ -73,6 +75,12 @@ async def run_monitor_sweep_once(
         await monitor_status_event_crud.record_probe(
             db, target_id=target.id, status=status, latency_ms=latency_ms, detail=detail
         )
+
+    if operations is None:
+        operations = await get_effective_operations_config(db)
+    await monitor_status_event_crud.purge_older_than(
+        db, retention_days=operations.monitor_event_retention_days
+    )
 
     await db.commit()
     return len(targets)

@@ -1,5 +1,7 @@
 """CRUD tests for MonitorStatusEvent, including the latest-status window query."""
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,3 +61,51 @@ async def test_get_latest_status_for_targets_omits_targets_with_no_events(
     latest = await monitor_status_event_crud.get_latest_status_for_targets(db_session, [target_id])
 
     assert latest == {}
+
+
+async def test_purge_older_than_removes_old_history_keeps_latest(db_session: AsyncSession) -> None:
+    """超过保留期的历史行应被删除，但每台目标最新一行始终保留。"""
+    target_id = await _make_target(db_session)
+
+    old_event = await monitor_status_event_crud.record(
+        db_session, target_id=target_id, status="down", detail="旧故障"
+    )
+    new_event = await monitor_status_event_crud.record(
+        db_session, target_id=target_id, status="up", latency_ms=5
+    )
+    await db_session.flush()
+
+    old_event.checked_at = datetime.now(UTC) - timedelta(days=10)
+    await db_session.flush()
+    db_session.expire(old_event, ["checked_at"])
+
+    deleted = await monitor_status_event_crud.purge_older_than(db_session, retention_days=7)
+    await db_session.commit()
+
+    events = await monitor_status_event_crud.list_recent_for_target(db_session, target_id)
+
+    assert deleted == 1
+    assert len(events) == 1
+    assert events[0].status == "up"
+    assert events[0].id == new_event.id
+
+
+async def test_purge_older_than_keeps_single_stale_event(db_session: AsyncSession) -> None:
+    """仅有一行且已过期时，该行作为最新状态仍应保留。"""
+    target_id = await _make_target(db_session)
+
+    event = await monitor_status_event_crud.record(db_session, target_id=target_id, status="down")
+    await db_session.flush()
+
+    event.checked_at = datetime.now(UTC) - timedelta(days=10)
+    await db_session.flush()
+    db_session.expire(event, ["checked_at"])
+
+    deleted = await monitor_status_event_crud.purge_older_than(db_session, retention_days=7)
+    await db_session.commit()
+
+    events = await monitor_status_event_crud.list_recent_for_target(db_session, target_id)
+
+    assert deleted == 0
+    assert len(events) == 1
+    assert events[0].status == "down"

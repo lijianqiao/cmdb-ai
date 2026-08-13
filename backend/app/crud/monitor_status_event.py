@@ -1,14 +1,14 @@
-"""CRUD operations for monitor status events (append-only).
-
-`get_latest_status_for_targets` is this module's key query: it derives each
-target's "current" status from the latest event row, using a portable
-ROW_NUMBER() window function rather than Postgres-only DISTINCT ON, so this
-whole subsystem needs no TEST_POSTGRES_DATABASE_URL-gated test file.
+"""
+@Author: li
+@Email: lijianqiao2906@live.com
+@FileName: monitor_status_event.py
+@DateTime: 2026-08-13
+@Docs: 监控状态事件 CRUD，含最新状态查询与过期清理
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -113,6 +113,48 @@ class CRUDMonitorStatusEvent:
         result = await db.execute(stmt)
         events = result.scalars().all()
         return {event.target_id: event for event in events}
+
+    async def purge_older_than(
+        self,
+        db: AsyncSession,
+        *,
+        retention_days: int,
+    ) -> int:
+        """删除超过保留天数的过期历史事件行。
+
+        按 ``target_id`` 分区、``checked_at desc, id desc`` 排序计算行号；
+        仅删除 ``rn > 1`` 且 ``checked_at`` 早于保留截止时间的行，
+        每台目标最新一行（``rn == 1``）始终保留。
+
+        Args:
+            db: 数据库会话。
+            retention_days: 保留天数。
+
+        Returns:
+            本次删除的行数。
+        """
+        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+        row_number = (
+            func.row_number()
+            .over(
+                partition_by=MonitorStatusEvent.target_id,
+                order_by=(MonitorStatusEvent.checked_at.desc(), MonitorStatusEvent.id.desc()),
+            )
+            .label("rn")
+        )
+        ranked = select(
+            MonitorStatusEvent.id,
+            MonitorStatusEvent.checked_at,
+            row_number,
+        ).subquery()
+        stale_ids = select(ranked.c.id).where(
+            ranked.c.rn > 1,
+            ranked.c.checked_at < cutoff,
+        )
+        result = await db.execute(
+            delete(MonitorStatusEvent).where(MonitorStatusEvent.id.in_(stale_ids))
+        )
+        return result.rowcount or 0
 
 
 monitor_status_event_crud = CRUDMonitorStatusEvent()
