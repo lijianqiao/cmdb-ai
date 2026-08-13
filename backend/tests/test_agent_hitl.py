@@ -670,13 +670,17 @@ async def test_concurrent_resume_executes_successful_action_once(
     assert first_summary.status == "EXECUTED"
 
 
-async def test_device_control_stub_failure_stays_approved(
-    db_session: AsyncSession,
-    test_user: User,
+async def test_device_control_real_execution_failure_stays_approved(
+    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """device_control stub 失败后保持 APPROVED 并发布失败事件。"""
+    """未分类命令批准后，若真实设备连接失败，必须保持 APPROVED（不伪造 EXECUTED）。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
-    asset_id = await _make_query_asset(db_session, vendor="linux")
+    ciphertext = encrypt_credential_password("whatever")
+    asset_id = await _make_query_asset(
+        db_session, vendor="linux", credential_type="static",
+        credential_password_encrypted=ciphertext,
+    )
     proposal = await propose_action(
         db_session,
         session_id=session_id,
@@ -687,6 +691,7 @@ async def test_device_control_stub_failure_stays_approved(
         reason="维护窗口",
         actor_user_id=test_user.id,
     )
+    assert proposal.status == "PENDING"
     await decide_proposal(
         db_session,
         proposal_id=proposal.proposal_id,
@@ -695,18 +700,119 @@ async def test_device_control_stub_failure_stays_approved(
     )
     publisher = RecordingPublisher()
 
-    summary = await resume_proposal(
-        db_session,
-        proposal_id=proposal.proposal_id,
-        actor_user_id=test_user.id,
-        publisher=publisher,
-    )
+    from unittest.mock import patch
+
+    with patch("app.agent.executors._open_scrapli_connection", side_effect=ConnectionError("unreachable")):
+        summary = await resume_proposal(
+            db_session,
+            proposal_id=proposal.proposal_id,
+            actor_user_id=test_user.id,
+            publisher=publisher,
+        )
 
     stored = await hitl_proposal_crud.get(db_session, proposal.proposal_id)
     assert stored is not None
     assert summary.status == "APPROVED"
     assert stored.executed_at is None
     assert [event[1] for event in publisher.events] == ["hitl_execution_failed"]
+
+
+async def test_unclassified_device_control_stays_pending(
+    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未分类的变更类命令，即使 notify 自动批准打开，也必须停在 PENDING（跟 device_query 完全对称）。"""
+    monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", True)
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    asset_id = await _make_query_asset(
+        db_session, vendor="cisco_iosxe", credential_type="static",
+        credential_password_encrypted="placeholder",
+    )
+    summary = await propose_action(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="device_control",
+        asset_id=asset_id,
+        payload={"command_name": "reboot"},
+        reason="故障恢复",
+        actor_user_id=test_user.id,
+    )
+    assert summary.status == "PENDING"
+
+
+async def test_whitelisted_device_control_auto_executes_with_static_credential(
+    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """白名单 + 静态凭据：跟 device_query 一样一次调用直接 EXECUTED。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    ciphertext = encrypt_credential_password("whatever")
+    asset_id = await _make_query_asset(
+        db_session, vendor="cisco_iosxe", credential_password_encrypted=ciphertext,
+    )
+    await device_command_policy_crud.create(
+        db_session,
+        {
+            "scope": "asset",
+            "asset_id": asset_id,
+            "command_name": "reboot",
+            "decision": "whitelist",
+        },
+    )
+    await db_session.commit()
+
+    from unittest.mock import AsyncMock, patch
+
+    fake_connection = AsyncMock()
+    fake_connection.send_interactive = AsyncMock(
+        return_value=type("Resp", (), {"result": "rebooting", "failed": False})()
+    )
+    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+        summary = await propose_action(
+            db_session,
+            session_id=session_id,
+            proposed_by_agent_id=None,
+            action_type="device_control",
+            asset_id=asset_id,
+            payload={"command_name": "reboot"},
+            reason="故障恢复",
+            actor_user_id=test_user.id,
+        )
+
+    assert summary.status == "EXECUTED"
+
+
+async def test_dynamic_credential_device_control_never_auto_executes(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    """跟 device_query 的既有规则完全对称：动态凭据永远至少过一次人工。"""
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    asset_id = await _make_query_asset(
+        db_session, credential_type="dynamic", credential_password_encrypted=None,
+    )
+    await device_command_policy_crud.create(
+        db_session,
+        {
+            "scope": "asset",
+            "asset_id": asset_id,
+            "command_name": "reboot",
+            "decision": "whitelist",
+        },
+    )
+    await db_session.commit()
+
+    summary = await propose_action(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="device_control",
+        asset_id=asset_id,
+        payload={"command_name": "reboot"},
+        reason="故障恢复",
+        actor_user_id=test_user.id,
+    )
+
+    assert summary.status == "PENDING"
 
 
 async def test_device_control_reboot_rejects_interface_name_with_credentialed_asset(

@@ -36,7 +36,6 @@ from app.agent.executors import (
     DeviceQueryExecutor,
     ExecutionResult,
     NotifyExecutor,
-    NotImplementedExecutor,
 )
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
@@ -114,7 +113,6 @@ class ProposalSafeSummary:
 
 
 _NOTIFY_EXECUTOR = NotifyExecutor()
-_DEVICE_CONTROL_EXECUTOR = NotImplementedExecutor()
 _DEVICE_QUERY_EXECUTOR = DeviceQueryExecutor()
 _EXECUTION_LOCKS: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
@@ -319,7 +317,7 @@ async def propose_action(
     if (
         action_type == "notify" and operations.hitl_notify_auto_approve
     ) or (
-        action_type == "device_query"
+        action_type in ("device_query", "device_control")
         and policy_decision == "whitelist"
         and asset.credential_type != "dynamic"
     ):
@@ -425,9 +423,7 @@ async def resume_proposal(
                 payload=proposal.action_payload,
                 actor_user_id=actor_user_id,
             )
-        elif proposal.action_type == "device_control":
-            execution_result = await _DEVICE_CONTROL_EXECUTOR.execute(proposal.action_payload)
-        elif proposal.action_type == "device_query":
+        elif proposal.action_type in ("device_query", "device_control"):
             raw_asset_id = proposal.action_payload.get("asset_id")
             asset_for_query = (
                 await cmdb_asset_crud.get(db, raw_asset_id) if isinstance(raw_asset_id, int) else None
@@ -436,18 +432,20 @@ async def resume_proposal(
                 execution_result = ExecutionResult(ok=False, message="资产不存在")
             else:
                 raw_command_name = proposal.action_payload.get("command_name")
+                raw_interface_name = proposal.action_payload.get("interface_name")
                 execution_result = await _DEVICE_QUERY_EXECUTOR.execute(
                     db,
                     asset=asset_for_query,
                     command_name=str(raw_command_name),
                     dynamic_password=dynamic_password,
+                    interface_name=raw_interface_name if isinstance(raw_interface_name, str) else None,
                 )
         else:
             raise HitlResumeError(f"不支持的 HITL 动作类型：{proposal.action_type}")
 
         if execution_result.ok:
             proposal = await hitl_proposal_crud.mark_executed(db, proposal.id)
-            if proposal.action_type == "device_query":
+            if proposal.action_type in ("device_query", "device_control"):
                 output = execution_result.detail.get("output")
                 if isinstance(output, str):
                     proposal.action_payload = {

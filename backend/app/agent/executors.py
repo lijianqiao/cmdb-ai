@@ -3,17 +3,18 @@
 @Email: lijianqiao2906@live.com
 @FileName: executors.py
 @DateTime: 2026-08-12
-@Docs: HITL 动作执行器：notify 写审计日志，device_control 预留 stub。
+@Docs: HITL 动作执行器：notify 写审计日志，device_query/device_control 走 Scrapli。
 
 实现流程：
 1. ExecutionResult 是 hitl.resume 与各类执行器之间的统一返回契约（ok/message/detail）。
 2. NotifyExecutor 从 payload 读取 message，校验非空后调用 log_audit(action=hitl_notify_executed)。
-3. NotImplementedExecutor 作为 device_control 占位实现，永远返回失败，避免 stub 伪造 EXECUTED。
+3. DeviceQueryExecutor 同时服务只读诊断与变更管控：按目录分派 send_command、
+   send_interactive（reboot/shutdown 确认）或 send_configs（接口启停）。
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, cast
 
 from scrapli.driver.core import AsyncIOSXEDriver, AsyncJunosDriver
 from scrapli.driver.generic import AsyncGenericDriver
@@ -22,8 +23,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.device_commands import (
     UnknownDeviceCommandError,
-    UnsupportedVendorError,
+    VendorName,
+    command_supports_vendor,
     get_command_template,
+    get_device_command,
+    validate_interface_name,
 )
 from app.core.cmdb_credential import decrypt_credential_password
 from app.core.config import settings
@@ -38,22 +42,6 @@ class ExecutionResult:
     ok: bool
     message: str
     detail: dict[str, object] = field(default_factory=dict)
-
-
-class DeviceControlExecutor(Protocol):
-    """设备管控执行器协议；真正接入通道前由 stub 实现。"""
-
-    async def execute(self, payload: Mapping[str, object]) -> ExecutionResult:
-        """执行设备管控动作并返回结果。"""
-        ...
-
-
-class NotImplementedExecutor:
-    """device_control 占位执行器，保证 APPROVED 后无法伪装成 EXECUTED。"""
-
-    async def execute(self, payload: Mapping[str, object]) -> ExecutionResult:
-        """返回固定失败，表示执行器尚未接入。"""
-        return ExecutionResult(ok=False, message="device_control 执行器尚未接入")
 
 
 class NotifyExecutor:
@@ -135,7 +123,7 @@ async def _open_scrapli_connection(
 
 
 class DeviceQueryExecutor:
-    """只读诊断命令执行器：解析凭据、按厂商选真实命令、跑 Scrapli、截断输出。"""
+    """设备诊断/管控命令执行器：解析凭据、按厂商选真实命令、跑 Scrapli、截断输出。"""
 
     async def execute(
         self,
@@ -144,8 +132,9 @@ class DeviceQueryExecutor:
         asset: CmdbAsset,
         command_name: str,
         dynamic_password: str | None,
+        interface_name: str | None = None,
     ) -> ExecutionResult:
-        """执行一次设备诊断命令查询并返回安全结果。
+        """执行一次设备命令并返回安全结果。
 
         Args:
             db: 当前事务的数据库会话（目前未使用，保留是为了跟其它执行器
@@ -153,6 +142,7 @@ class DeviceQueryExecutor:
             asset: 目标 CMDB 资产，须已配置 vendor 与凭据。
             command_name: 目录里的命令名，调用方保证已通过白名单/校验。
             dynamic_password: 动态凭据时的一次性明文密码；静态凭据时忽略。
+            interface_name: port_enable/port_disable 等需要接口名的命令参数。
 
         Returns:
             ok=True 时 detail 含 output/truncated；ok=False 时 message 只给
@@ -170,15 +160,20 @@ class DeviceQueryExecutor:
             return ExecutionResult(ok=False, message="资产未配置登录凭据")
 
         try:
-            template = get_command_template(command_name, asset.vendor)
+            definition = get_device_command(command_name)
         except UnknownDeviceCommandError:
             return ExecutionResult(ok=False, message="未知命令名")
-        except UnsupportedVendorError:
-            return ExecutionResult(ok=False, message="该设备厂商不支持这个命令")
-        # 防御：目录若误留 <placeholder>，禁止原样下发到设备。
-        if "<" in template or ">" in template:
-            return ExecutionResult(ok=False, message="命令模板含未解析占位符")
 
+        if definition.requires_argument == "interface_name":
+            if not interface_name or not validate_interface_name(interface_name):
+                return ExecutionResult(ok=False, message="接口名参数无效")
+        elif interface_name is not None:
+            return ExecutionResult(ok=False, message="该命令不接受接口名参数")
+
+        if not command_supports_vendor(command_name, asset.vendor):
+            return ExecutionResult(ok=False, message="该设备厂商不支持这个命令")
+
+        vendor = cast(VendorName, asset.vendor)
         connection = None
         try:
             connection = await _open_scrapli_connection(
@@ -188,19 +183,50 @@ class DeviceQueryExecutor:
                 password=password,
                 timeout_seconds=settings.DEVICE_COMMAND_TIMEOUT_SECONDS,
             )
-            response = await connection.send_command(template)
+
+            if definition.config_templates is not None and vendor in definition.config_templates:
+                rendered = [
+                    line.format(interface=interface_name)
+                    for line in definition.config_templates[vendor]
+                ]
+                if any("<" in line or ">" in line for line in rendered):
+                    return ExecutionResult(ok=False, message="命令模板含未解析占位符")
+                responses = await connection.send_configs(rendered)
+                failed = any(getattr(item, "failed", False) for item in responses)
+                output = "\n".join(str(getattr(item, "result", "")) for item in responses)
+            elif definition.confirmation is not None and vendor in definition.confirmation:
+                confirm = definition.confirmation[vendor]
+                template = definition.templates[vendor]
+                response = await connection.send_interactive(
+                    [(template, confirm.prompt_pattern, False), (confirm.response, r".*", True)]
+                )
+                failed = getattr(response, "failed", False)
+                output = str(getattr(response, "result", ""))
+            else:
+                template = get_command_template(command_name, asset.vendor)
+                if "<" in template or ">" in template:
+                    return ExecutionResult(ok=False, message="命令模板含未解析占位符")
+                response = await connection.send_command(template)
+                failed = getattr(response, "failed", False)
+                output = str(getattr(response, "result", ""))
         except Exception:
-            return ExecutionResult(ok=False, message="连接或执行命令失败")
+            return ExecutionResult(
+                ok=False,
+                message="连接或执行命令失败；如果是重启/关机类命令，设备可能已经生效，请人工核实",
+            )
         finally:
             if connection is not None:
-                await connection.close()
+                try:
+                    await connection.close()
+                except Exception:
+                    pass
 
-        if getattr(response, "failed", False):
+        if failed:
             return ExecutionResult(ok=False, message="设备返回命令执行失败")
 
-        output, truncated = _truncate_output(str(response.result))
+        rendered_output, truncated = _truncate_output(output)
         return ExecutionResult(
             ok=True,
             message="命令执行完成",
-            detail={"output": output, "truncated": truncated},
+            detail={"output": rendered_output, "truncated": truncated},
         )

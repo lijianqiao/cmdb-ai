@@ -9,12 +9,14 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from cryptography.fernet import Fernet
 from httpx import AsyncClient
 from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.hitl import propose_action
+from app.core.cmdb_credential import encrypt_credential_password
 from app.core.config import settings
 from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
@@ -225,22 +227,50 @@ async def test_approve_device_control_stays_approved_second_decide_conflicts(
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """device_control stub 失败应保持 APPROVED；再次审批返回 409。"""
+    """未分类 device_control 批准后连接失败应保持 APPROVED；再次审批返回 409。"""
     monkeypatch.setattr(settings, "HITL_NOTIFY_AUTO_APPROVE", False)
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     await _grant_hitl_approve(db_session, test_user)
-    _, proposal_id = await _make_pending_proposal(
+    ciphertext = encrypt_credential_password("whatever")
+    session = await agent_session_crud.create(
         db_session,
-        user_id=test_user.id,
+        {"user_id": test_user.id, "title": "HITL API device_control", "status": "active"},
+    )
+    asset = await cmdb_asset_crud.create(
+        db_session,
+        {
+            "asset_type": "server",
+            "hostname": "srv-hitl-ctrl",
+            "ip_address": "10.0.0.32",
+            "vendor": "linux",
+            "credential_type": "static",
+            "credential_username": "admin",
+            "credential_password_encrypted": ciphertext,
+        },
+    )
+    await db_session.flush()
+    summary = await propose_action(
+        db_session,
+        session_id=session.id,
+        proposed_by_agent_id=None,
         action_type="device_control",
-        payload={"command": "reboot"},
+        asset_id=asset.id,
+        payload={"command_name": "reboot"},
         reason="故障恢复",
+        actor_user_id=test_user.id,
     )
+    await db_session.commit()
+    proposal_id = summary.proposal_id
 
-    first = await client.post(
-        f"/api/v1/hitl/proposals/{proposal_id}/decide",
-        json={"approve": True},
-        headers=auth_headers,
-    )
+    with patch(
+        "app.agent.executors._open_scrapli_connection",
+        side_effect=ConnectionError("unreachable"),
+    ):
+        first = await client.post(
+            f"/api/v1/hitl/proposals/{proposal_id}/decide",
+            json={"approve": True},
+            headers=auth_headers,
+        )
     assert first.status_code == 200, first.text
     assert first.json()["data"]["status"] == "APPROVED"
 
