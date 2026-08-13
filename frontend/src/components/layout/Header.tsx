@@ -66,6 +66,29 @@ function getBreadcrumbs(pathname: string): Crumb[] {
       { label: "系统管理" },
       { label: "系统配置", path: ROUTES.SYSTEM_CONFIG },
     ],
+    [ROUTES.OPS_ASSISTANT]: [{ label: "运维助手" }],
+    [ROUTES.CMDB]: [
+      { label: "运维管理" },
+      { label: "CMDB 资产", path: ROUTES.CMDB },
+    ],
+    [ROUTES.CMDB_TRASH]: [
+      { label: "运维管理" },
+      { label: "CMDB 资产", path: ROUTES.CMDB },
+      { label: "回收站" },
+    ],
+    [ROUTES.MONITOR_TARGETS]: [
+      { label: "运维管理" },
+      { label: "监控目标", path: ROUTES.MONITOR_TARGETS },
+    ],
+    [ROUTES.DEVICE_COMMAND_POLICIES]: [
+      { label: "运维管理" },
+      { label: "设备命令策略", path: ROUTES.DEVICE_COMMAND_POLICIES },
+    ],
+    [ROUTES.DEVICE_COMMAND_POLICIES_TRASH]: [
+      { label: "运维管理" },
+      { label: "设备命令策略", path: ROUTES.DEVICE_COMMAND_POLICIES },
+      { label: "回收站" },
+    ],
     [ROUTES.PROFILE]: [{ label: "个人中心" }],
     [ROUTES.AUDIT]: [{ label: "操作日志" }],
   }

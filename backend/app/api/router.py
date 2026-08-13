@@ -15,6 +15,7 @@ from app.api.v1.device_command_policies import router as device_command_policies
 from app.api.v1.hitl import router as hitl_router
 from app.api.v1.knowledge import router as knowledge_router
 from app.api.v1.me import router as me_router
+from app.api.v1.monitor import router as monitor_router
 from app.api.v1.permissions import router as permissions_router
 from app.api.v1.roles import router as roles_router
 from app.api.v1.system_config import router as system_config_router
@@ -31,6 +32,7 @@ api_router.include_router(me_router, prefix="/me", tags=["个人中心"])
 api_router.include_router(dashboard_router, prefix="/dashboard", tags=["仪表盘"])
 api_router.include_router(audit_logs_router, prefix="/audit-logs", tags=["审计日志"])
 api_router.include_router(cmdb_router, prefix="/cmdb", tags=["CMDB 资产"])
+api_router.include_router(monitor_router, prefix="/monitor", tags=["监控目标"])
 api_router.include_router(
     device_command_policies_router,
     prefix="/device-command-policies",

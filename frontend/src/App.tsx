@@ -22,6 +22,7 @@ import { CmdbAssetsPage } from "@/pages/CmdbAssetsPage"
 import { CmdbAssetsTrashPage } from "@/pages/CmdbAssetsTrashPage"
 import { DeviceCommandPoliciesPage } from "@/pages/DeviceCommandPoliciesPage"
 import { DeviceCommandPoliciesTrashPage } from "@/pages/DeviceCommandPoliciesTrashPage"
+import { MonitorTargetsPage } from "@/pages/MonitorTargetsPage"
 import { UsersPage } from "@/pages/UsersPage"
 import { UsersTrashPage } from "@/pages/UsersTrashPage"
 import { SystemConfigPage } from "@/pages/SystemConfigPage"
@@ -119,6 +120,14 @@ export function App() {
             element={
               <ProtectedRoute permission={PERMISSIONS.CMDB_MANAGE}>
                 <CmdbAssetsTrashPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path={ROUTES.MONITOR_TARGETS}
+            element={
+              <ProtectedRoute permission={PERMISSIONS.MONITOR_READ}>
+                <MonitorTargetsPage />
               </ProtectedRoute>
             }
           />

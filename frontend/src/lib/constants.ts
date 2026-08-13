@@ -11,6 +11,7 @@ export const ROUTES = {
   PERMISSIONS_TRASH: "/permissions/trash",
   CMDB: "/cmdb",
   CMDB_TRASH: "/cmdb/trash",
+  MONITOR_TARGETS: "/monitor-targets",
   DEVICE_COMMAND_POLICIES: "/device-command-policies",
   DEVICE_COMMAND_POLICIES_TRASH: "/device-command-policies/trash",
   PROFILE: "/profile",

@@ -116,7 +116,7 @@ export function OperationsConfigCard({
       </CardHeader>
       <form onSubmit={form.handleSubmit(handleSubmit)}>
         <CardContent>
-          <FieldGroup>
+          <FieldGroup className="gap-4">
             <Controller
               control={form.control}
               name="hitl_notify_auto_approve"
@@ -151,80 +151,82 @@ export function OperationsConfigCard({
               </Alert>
             ) : null}
 
-            <Controller
-              control={form.control}
-              name="monitor_probe_timeout_seconds"
-              render={({ field, fieldState }) => (
-                <Field data-invalid={fieldState.invalid}>
-                  <FieldLabel htmlFor="monitor-probe-timeout">
-                    探测超时（秒）
-                  </FieldLabel>
-                  <Input
-                    id="monitor-probe-timeout"
-                    type="number"
-                    min={1}
-                    max={30}
-                    aria-invalid={fieldState.invalid}
-                    {...field}
-                  />
-                  <FieldDescription>
-                    单个 TCP 连接探测允许等待的最长时间，范围为 (0, 30]
-                    秒；下一轮监控探测生效。
-                  </FieldDescription>
-                  <FieldError errors={[fieldState.error]} />
-                </Field>
-              )}
-            />
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <Controller
+                control={form.control}
+                name="monitor_probe_timeout_seconds"
+                render={({ field, fieldState }) => (
+                  <Field data-invalid={fieldState.invalid}>
+                    <FieldLabel htmlFor="monitor-probe-timeout">
+                      探测超时（秒）
+                    </FieldLabel>
+                    <Input
+                      id="monitor-probe-timeout"
+                      type="number"
+                      min={1}
+                      max={30}
+                      aria-invalid={fieldState.invalid}
+                      {...field}
+                    />
+                    <FieldDescription>
+                      单个 TCP 连接探测允许等待的最长时间，范围为 (0, 30]
+                      秒；下一轮监控探测生效。
+                    </FieldDescription>
+                    <FieldError errors={[fieldState.error]} />
+                  </Field>
+                )}
+              />
 
-            <Controller
-              control={form.control}
-              name="monitor_sweep_interval_seconds"
-              render={({ field, fieldState }) => (
-                <Field data-invalid={fieldState.invalid}>
-                  <FieldLabel htmlFor="monitor-sweep-interval">
-                    巡检间隔（秒）
-                  </FieldLabel>
-                  <Input
-                    id="monitor-sweep-interval"
-                    type="number"
-                    min={5}
-                    max={3600}
-                    aria-invalid={fieldState.invalid}
-                    {...field}
-                  />
-                  <FieldDescription>
-                    全部启用目标探测完成后，到下一轮开始前的全局等待时间，范围为
-                    [5, 3600] 秒。
-                  </FieldDescription>
-                  <FieldError errors={[fieldState.error]} />
-                </Field>
-              )}
-            />
+              <Controller
+                control={form.control}
+                name="monitor_sweep_interval_seconds"
+                render={({ field, fieldState }) => (
+                  <Field data-invalid={fieldState.invalid}>
+                    <FieldLabel htmlFor="monitor-sweep-interval">
+                      巡检间隔（秒）
+                    </FieldLabel>
+                    <Input
+                      id="monitor-sweep-interval"
+                      type="number"
+                      min={5}
+                      max={3600}
+                      aria-invalid={fieldState.invalid}
+                      {...field}
+                    />
+                    <FieldDescription>
+                      全部启用目标探测完成后，到下一轮开始前的全局等待时间，范围为
+                      [5, 3600] 秒。
+                    </FieldDescription>
+                    <FieldError errors={[fieldState.error]} />
+                  </Field>
+                )}
+              />
 
-            <Controller
-              control={form.control}
-              name="cmdb_diff_interval_seconds"
-              render={({ field, fieldState }) => (
-                <Field data-invalid={fieldState.invalid}>
-                  <FieldLabel htmlFor="cmdb-diff-interval">
-                    CMDB 差异巡检（秒）
-                  </FieldLabel>
-                  <Input
-                    id="cmdb-diff-interval"
-                    type="number"
-                    min={60}
-                    max={86400}
-                    aria-invalid={fieldState.invalid}
-                    {...field}
-                  />
-                  <FieldDescription>
-                    比较监控在线 IP 与 CMDB 资产台账的周期，范围为 [60, 86400]
-                    秒；只记录差异审计，不自动修改资产。
-                  </FieldDescription>
-                  <FieldError errors={[fieldState.error]} />
-                </Field>
-              )}
-            />
+              <Controller
+                control={form.control}
+                name="cmdb_diff_interval_seconds"
+                render={({ field, fieldState }) => (
+                  <Field data-invalid={fieldState.invalid}>
+                    <FieldLabel htmlFor="cmdb-diff-interval">
+                      CMDB 差异巡检（秒）
+                    </FieldLabel>
+                    <Input
+                      id="cmdb-diff-interval"
+                      type="number"
+                      min={60}
+                      max={86400}
+                      aria-invalid={fieldState.invalid}
+                      {...field}
+                    />
+                    <FieldDescription>
+                      比较监控在线 IP 与 CMDB 资产台账的周期，范围为 [60, 86400]
+                      秒；只记录差异审计，不自动修改资产。
+                    </FieldDescription>
+                    <FieldError errors={[fieldState.error]} />
+                  </Field>
+                )}
+              />
+            </div>
           </FieldGroup>
         </CardContent>
         <CardFooter className="justify-end border-t pt-4">

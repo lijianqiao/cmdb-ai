@@ -216,78 +216,80 @@ export function LlmConfigCard({ value, onSaved }: LlmConfigCardProps) {
           <FieldGroup>
             <FieldSet>
               <FieldLegend>Chat</FieldLegend>
-              <FieldGroup>
-                <Controller
-                  control={form.control}
-                  name="chat_base_url"
-                  render={({ field, fieldState }) => (
-                    <Field data-invalid={fieldState.invalid}>
-                      <FieldLabel htmlFor="chat-base-url">Base URL</FieldLabel>
-                      <Input
-                        id="chat-base-url"
-                        placeholder="https://api.example.com/v1"
-                        aria-invalid={fieldState.invalid}
-                        {...field}
-                      />
-                      <FieldError errors={[fieldState.error]} />
-                    </Field>
-                  )}
-                />
-                <Controller
-                  control={form.control}
-                  name="chat_model"
-                  render={({ field, fieldState }) => (
-                    <Field data-invalid={fieldState.invalid}>
-                      <FieldLabel htmlFor="chat-model">模型名</FieldLabel>
-                      <Input
-                        id="chat-model"
-                        aria-invalid={fieldState.invalid}
-                        {...field}
-                      />
-                      <FieldError errors={[fieldState.error]} />
-                    </Field>
-                  )}
-                />
-                <Controller
-                  control={form.control}
-                  name="chat_input_cost_per_million_usd"
-                  render={({ field, fieldState }) => (
-                    <Field data-invalid={fieldState.invalid}>
-                      <FieldLabel htmlFor="chat-input-cost">
-                        输入价格 / 百万 tokens（USD）
-                      </FieldLabel>
-                      <Input
-                        id="chat-input-cost"
-                        type="number"
-                        min={0}
-                        step="any"
-                        aria-invalid={fieldState.invalid}
-                        {...field}
-                      />
-                      <FieldError errors={[fieldState.error]} />
-                    </Field>
-                  )}
-                />
-                <Controller
-                  control={form.control}
-                  name="chat_output_cost_per_million_usd"
-                  render={({ field, fieldState }) => (
-                    <Field data-invalid={fieldState.invalid}>
-                      <FieldLabel htmlFor="chat-output-cost">
-                        输出价格 / 百万 tokens（USD）
-                      </FieldLabel>
-                      <Input
-                        id="chat-output-cost"
-                        type="number"
-                        min={0}
-                        step="any"
-                        aria-invalid={fieldState.invalid}
-                        {...field}
-                      />
-                      <FieldError errors={[fieldState.error]} />
-                    </Field>
-                  )}
-                />
+              <FieldGroup className="gap-4">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Controller
+                    control={form.control}
+                    name="chat_base_url"
+                    render={({ field, fieldState }) => (
+                      <Field data-invalid={fieldState.invalid}>
+                        <FieldLabel htmlFor="chat-base-url">Base URL</FieldLabel>
+                        <Input
+                          id="chat-base-url"
+                          placeholder="https://api.example.com/v1"
+                          aria-invalid={fieldState.invalid}
+                          {...field}
+                        />
+                        <FieldError errors={[fieldState.error]} />
+                      </Field>
+                    )}
+                  />
+                  <Controller
+                    control={form.control}
+                    name="chat_model"
+                    render={({ field, fieldState }) => (
+                      <Field data-invalid={fieldState.invalid}>
+                        <FieldLabel htmlFor="chat-model">模型名</FieldLabel>
+                        <Input
+                          id="chat-model"
+                          aria-invalid={fieldState.invalid}
+                          {...field}
+                        />
+                        <FieldError errors={[fieldState.error]} />
+                      </Field>
+                    )}
+                  />
+                  <Controller
+                    control={form.control}
+                    name="chat_input_cost_per_million_usd"
+                    render={({ field, fieldState }) => (
+                      <Field data-invalid={fieldState.invalid}>
+                        <FieldLabel htmlFor="chat-input-cost">
+                          输入价格 / 百万 tokens（USD）
+                        </FieldLabel>
+                        <Input
+                          id="chat-input-cost"
+                          type="number"
+                          min={0}
+                          step="any"
+                          aria-invalid={fieldState.invalid}
+                          {...field}
+                        />
+                        <FieldError errors={[fieldState.error]} />
+                      </Field>
+                    )}
+                  />
+                  <Controller
+                    control={form.control}
+                    name="chat_output_cost_per_million_usd"
+                    render={({ field, fieldState }) => (
+                      <Field data-invalid={fieldState.invalid}>
+                        <FieldLabel htmlFor="chat-output-cost">
+                          输出价格 / 百万 tokens（USD）
+                        </FieldLabel>
+                        <Input
+                          id="chat-output-cost"
+                          type="number"
+                          min={0}
+                          step="any"
+                          aria-invalid={fieldState.invalid}
+                          {...field}
+                        />
+                        <FieldError errors={[fieldState.error]} />
+                      </Field>
+                    )}
+                  />
+                </div>
                 <Controller
                   control={form.control}
                   name="chat_api_key"
@@ -321,40 +323,42 @@ export function LlmConfigCard({ value, onSaved }: LlmConfigCardProps) {
 
             <FieldSet>
               <FieldLegend>Embedding</FieldLegend>
-              <FieldGroup>
-                <Controller
-                  control={form.control}
-                  name="embedding_base_url"
-                  render={({ field, fieldState }) => (
-                    <Field data-invalid={fieldState.invalid}>
-                      <FieldLabel htmlFor="embedding-base-url">
-                        Base URL
-                      </FieldLabel>
-                      <Input
-                        id="embedding-base-url"
-                        placeholder="https://api.example.com/v1"
-                        aria-invalid={fieldState.invalid}
-                        {...field}
-                      />
-                      <FieldError errors={[fieldState.error]} />
-                    </Field>
-                  )}
-                />
-                <Controller
-                  control={form.control}
-                  name="embedding_model"
-                  render={({ field, fieldState }) => (
-                    <Field data-invalid={fieldState.invalid}>
-                      <FieldLabel htmlFor="embedding-model">模型名</FieldLabel>
-                      <Input
-                        id="embedding-model"
-                        aria-invalid={fieldState.invalid}
-                        {...field}
-                      />
-                      <FieldError errors={[fieldState.error]} />
-                    </Field>
-                  )}
-                />
+              <FieldGroup className="gap-4">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Controller
+                    control={form.control}
+                    name="embedding_base_url"
+                    render={({ field, fieldState }) => (
+                      <Field data-invalid={fieldState.invalid}>
+                        <FieldLabel htmlFor="embedding-base-url">
+                          Base URL
+                        </FieldLabel>
+                        <Input
+                          id="embedding-base-url"
+                          placeholder="https://api.example.com/v1"
+                          aria-invalid={fieldState.invalid}
+                          {...field}
+                        />
+                        <FieldError errors={[fieldState.error]} />
+                      </Field>
+                    )}
+                  />
+                  <Controller
+                    control={form.control}
+                    name="embedding_model"
+                    render={({ field, fieldState }) => (
+                      <Field data-invalid={fieldState.invalid}>
+                        <FieldLabel htmlFor="embedding-model">模型名</FieldLabel>
+                        <Input
+                          id="embedding-model"
+                          aria-invalid={fieldState.invalid}
+                          {...field}
+                        />
+                        <FieldError errors={[fieldState.error]} />
+                      </Field>
+                    )}
+                  />
+                </div>
                 <Controller
                   control={form.control}
                   name="embedding_api_key"

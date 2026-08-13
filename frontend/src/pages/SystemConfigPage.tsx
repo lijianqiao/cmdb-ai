@@ -58,9 +58,9 @@ export function SystemConfigPage() {
                 <Skeleton className="h-6 w-32" />
                 <Skeleton className="mt-2 h-4 w-64" />
               </CardHeader>
-              <CardContent className="flex flex-col gap-4">
+              <CardContent className="grid gap-4 sm:grid-cols-2">
                 {Array.from({ length: 4 }).map((__, fieldIndex) => (
-                  <Skeleton key={fieldIndex} className="h-10 w-full" />
+                  <Skeleton key={fieldIndex} className="h-16 w-full" />
                 ))}
               </CardContent>
             </Card>

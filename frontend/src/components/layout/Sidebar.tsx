@@ -107,6 +107,13 @@ const NAV_ENTRIES: NavEntry[] = [
       },
       {
         type: "item",
+        label: "监控目标",
+        path: ROUTES.MONITOR_TARGETS,
+        icon: Server02Icon,
+        permission: PERMISSIONS.MONITOR_READ,
+      },
+      {
+        type: "item",
         label: "设备命令策略",
         path: ROUTES.DEVICE_COMMAND_POLICIES,
         icon: AuditIcon,
