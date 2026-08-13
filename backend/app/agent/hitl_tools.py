@@ -28,6 +28,7 @@ from app.agent.hitl import (
     propose_action,
 )
 from app.agent.loop import ToolResult
+from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
 
@@ -304,9 +305,31 @@ async def get_device_query_result(
     )
 
 
+def _policy_label_for_mode(decision: str | None, approval_mode: str) -> str:
+    """按会话审批档位生成命令策略的中文说明。
+
+    Args:
+        decision: 设备命令策略判定（blacklist / whitelist / None）。
+        approval_mode: 会话审批档位（ask / assist / full）。
+
+    Returns:
+        给模型看的策略文案。
+    """
+    if decision == "blacklist":
+        return "黑名单（禁止执行）"
+    if decision == "whitelist":
+        if approval_mode == "ask":
+            return "白名单（当前为请求审批，需人工批准）"
+        return "白名单（可自动执行）"
+    if approval_mode == "full":
+        return "未分类（完全访问，可自动执行）"
+    return "未分类（需人工审批）"
+
+
 async def list_device_commands_for_asset(
     db: AsyncSession,
     *,
+    session_id: int,
     asset_id: int,
 ) -> ToolResult:
     """列出一台资产可用的诊断命令、审批策略与凭据前提。
@@ -316,11 +339,18 @@ async def list_device_commands_for_asset(
 
     Args:
         db: 当前事务使用的异步数据库会话。
+        session_id: 根 Agent 所属会话 ID。
         asset_id: 目标 CMDB 资产 ID。
 
     Returns:
         含命令名、说明、审批策略与凭据状态的安全工具结果。
     """
+    session = await agent_session_crud.get(db, session_id)
+    if session is None:
+        return ToolResult(control="rejected", content="会话不存在")
+
+    approval_mode = session.approval_mode
+
     asset = await cmdb_asset_crud.get(db, asset_id)
     if asset is None:
         return ToolResult(control="rejected", content=f"CMDB 资产不存在：{asset_id}")
@@ -345,12 +375,7 @@ async def list_device_commands_for_asset(
             asset_type=asset.asset_type,
             command_name=definition.name,
         )
-        if decision == "blacklist":
-            policy_label = "黑名单（禁止执行）"
-        elif decision == "whitelist":
-            policy_label = "白名单（自动执行）"
-        else:
-            policy_label = "需人工审批"
+        policy_label = _policy_label_for_mode(decision, approval_mode)
         lines.append(f"- {definition.name}：{definition.description}；策略：{policy_label}")
 
     if not supported_any:

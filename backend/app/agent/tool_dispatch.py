@@ -392,7 +392,9 @@ def build_root_tool_dispatcher(
                     content=_validation_reason(name, exc),
                 )
             try:
-                return await list_device_commands_for_asset(db, asset_id=list_args.asset_id)
+                return await list_device_commands_for_asset(
+                    db, session_id=session_id, asset_id=list_args.asset_id
+                )
             except Exception as exc:
                 return ToolResult(
                     control="failed",

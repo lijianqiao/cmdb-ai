@@ -576,8 +576,12 @@ async def test_query_device_command_reports_auto_execute_failure(
 
 async def test_list_device_commands_rejects_missing_asset(
     db_session: AsyncSession,
+    test_user: User,
 ) -> None:
-    result = await hitl_tools.list_device_commands_for_asset(db_session, asset_id=987654)
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    result = await hitl_tools.list_device_commands_for_asset(
+        db_session, session_id=session_id, asset_id=987654
+    )
     assert result.control == "rejected"
     assert "不存在" in result.content
 
@@ -587,9 +591,11 @@ async def test_list_device_commands_rejects_asset_without_vendor(
     test_user: User,
 ) -> None:
     """vendor 为空时要给出可行动提示，而不是泛泛失败。"""
-    _, asset_id = await _make_session_and_asset(db_session, test_user.id)
+    session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
 
-    result = await hitl_tools.list_device_commands_for_asset(db_session, asset_id=asset_id)
+    result = await hitl_tools.list_device_commands_for_asset(
+        db_session, session_id=session_id, asset_id=asset_id
+    )
 
     assert result.control == "rejected"
     assert "vendor" in result.content
@@ -602,7 +608,7 @@ async def test_list_device_commands_reports_policy_and_credential_state(
     """命令清单应含白名单/黑名单/需审批标注与凭据前提提示。"""
     from app.crud.device_command_policy import device_command_policy_crud
 
-    _, asset_id = await _make_session_and_asset(db_session, test_user.id)
+    session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
     asset = await cmdb_asset_crud.get(db_session, asset_id)
     assert asset is not None
     asset.vendor = "cisco_iosxe"
@@ -628,15 +634,29 @@ async def test_list_device_commands_reports_policy_and_credential_state(
     )
     await db_session.commit()
 
-    result = await hitl_tools.list_device_commands_for_asset(db_session, asset_id=asset_id)
+    result = await hitl_tools.list_device_commands_for_asset(
+        db_session, session_id=session_id, asset_id=asset_id
+    )
 
     assert result.control == "ok"
     assert "show_version：" in result.content
-    assert "白名单（自动执行）" in result.content
+    assert "白名单（当前为请求审批，需人工批准）" in result.content
+    assert "可自动执行" not in result.content
     assert "黑名单（禁止执行）" in result.content
-    assert "需人工审批" in result.content
+    assert "未分类（需人工审批）" in result.content
     # 未配凭据的资产要提示先去 CMDB 配置凭据。
     assert "未配置登录凭据" in result.content
+
+    session = await agent_session_crud.get(db_session, session_id)
+    assert session is not None
+    session.approval_mode = "assist"
+    await db_session.commit()
+
+    assist_result = await hitl_tools.list_device_commands_for_asset(
+        db_session, session_id=session_id, asset_id=asset_id
+    )
+    assert assist_result.control == "ok"
+    assert "白名单（可自动执行）" in assist_result.content
 
 
 async def test_root_dispatcher_routes_list_device_commands(
@@ -655,7 +675,7 @@ async def test_root_dispatcher_routes_list_device_commands(
 
     ok_result = await dispatch("list_device_commands", {"asset_id": 9})
     assert ok_result.control == "ok"
-    assert captured == {"asset_id": 9}
+    assert captured == {"asset_id": 9, "session_id": 1}
 
     bad_result = await dispatch("list_device_commands", {})
     assert bad_result.control == "clarification"
