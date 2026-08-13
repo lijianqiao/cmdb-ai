@@ -8,6 +8,7 @@ REQUIRED = {
     "knowledge:manage",
     "cmdb:read",
     "cmdb:manage",
+    "cmdb:credential_read",
     "monitor:read",
     "monitor:manage",
     "monitor_log:read",

@@ -9,7 +9,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.cmdb_credential import CmdbCredentialKeyMissingError, encrypt_credential_password
+from app.core.cmdb_credential import (
+    CmdbCredentialDecryptError,
+    CmdbCredentialKeyMissingError,
+    decrypt_credential_password,
+    encrypt_credential_password,
+)
 from app.core.database import get_db
 from app.core.deps import get_client_ip, require_permission
 from app.crud.cmdb_asset import cmdb_asset_crud
@@ -23,11 +28,16 @@ from app.schemas.cmdb import (
     CmdbAssetDependencyResponse,
     CmdbAssetResponse,
     CmdbAssetUpdate,
+    CmdbCredentialRevealResponse,
 )
 from app.schemas.common import PaginatedData, ResponseEnvelope, paginated_response, success_response
 from app.utils.audit import log_audit
 
 router = APIRouter()
+
+_CREDENTIAL_KEY_MISSING_DETAIL = (
+    "未配置 CMDB_CREDENTIAL_KEY，无法保存静态密码，请联系管理员配置"
+)
 
 
 def _to_response(asset: CmdbAsset) -> CmdbAssetResponse:
@@ -190,6 +200,47 @@ async def get_asset(
     if asset is None:
         raise HTTPException(status_code=404, detail="资产不存在")
     return success_response(_to_response(asset))
+
+
+@router.get(
+    "/assets/{asset_id}/credential",
+    response_model=ResponseEnvelope[CmdbCredentialRevealResponse],
+)
+async def reveal_asset_credential(
+    request: Request,
+    asset_id: int = Path(gt=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("cmdb:credential_read")),
+) -> ResponseEnvelope[CmdbCredentialRevealResponse]:
+    """按需解密并返回静态凭据明文，同时写入审计。"""
+    asset = await cmdb_asset_crud.get(db, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="资产不存在")
+
+    if asset.credential_type != "static" or not asset.credential_password_encrypted:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="该资产没有可查看的静态密码",
+        )
+
+    try:
+        password = decrypt_credential_password(asset.credential_password_encrypted)
+    except (CmdbCredentialKeyMissingError, CmdbCredentialDecryptError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_CREDENTIAL_KEY_MISSING_DETAIL,
+        ) from exc
+
+    await log_audit(
+        db,
+        user_id=current_user.id,
+        action="view_cmdb_credential",
+        target=f"cmdb_asset:{asset_id}",
+        detail=f"查看静态凭据: {asset.hostname}",
+        ip=get_client_ip(request),
+    )
+    await db.commit()
+    return success_response(CmdbCredentialRevealResponse(password=password))
 
 
 @router.patch("/assets/{asset_id}", response_model=ResponseEnvelope[CmdbAssetResponse])

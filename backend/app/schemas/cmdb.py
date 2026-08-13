@@ -137,3 +137,9 @@ class CmdbAssetDependencyListResponse(ApiModel):
 
     children: list[CmdbAssetDependencyResponse]
     parents: list[CmdbAssetDependencyResponse]
+
+
+class CmdbCredentialRevealResponse(ApiModel):
+    """按需解密的静态凭据明文，仅通过专用查看接口返回。"""
+
+    password: str

@@ -164,6 +164,12 @@ SEED_PERMISSIONS: tuple[SeedPermission, ...] = (
         "description": "创建/更新/删除 CMDB 资产",
     },
     {
+        "name": "查看 CMDB 静态凭据",
+        "code": "cmdb:credential_read",
+        "module": "CMDB",
+        "description": "查看已保存的静态登录密码明文",
+    },
+    {
         "name": "查看监控目标与状态",
         "code": "monitor:read",
         "module": "监控",
