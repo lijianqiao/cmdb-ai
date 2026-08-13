@@ -17,8 +17,9 @@
 | `AgentSession` | `id / user_id / title / status` | 加一列 `approval_mode`，默认 `ask` |
 | `POST/GET /api/v1/agent/sessions` | 已有创建、列表、详情；**尚无 PATCH** | 列表/详情带出档位；**新增** `PATCH /sessions/{id}` 只改档位（仍走 `agent:use` + 所有者校验） |
 | `_owned_session_or_404` | 非所有者一律 404 | PATCH 复用，不新建权限码 |
-| `propose_action` 自动批准分支 | `notify` 看 `operations.hitl_notify_auto_approve`；设备白名单+非动态凭据一律当场执行 | 改为读会话 `approval_mode`；不再读取系统配置该项 |
-| 黑名单 / 白名单 / 未分类 | `device_command_policy_crud.resolve_policy` | 判定表继续用这三个结果；黑名单仍在建提案前硬拒绝 |
+| `propose_action` 自动批准分支 | `notify` 看 `operations.hitl_notify_auto_approve`；设备白名单+非动态凭据一律当场执行 | 改为读该 `session_id` 的 `approval_mode`；会话不存在则拒绝提案；不再读取系统配置该项 |
+| `list_device_commands_for_asset` | 文案写死「白名单（自动执行）」「需人工审批」，且工具函数目前不接收 `session_id` | 必须按当前会话档位改文案（见 §3.2）；`tool_dispatch` 已有 `session_id`，传进去 |
+| 黑名单 / 白名单 / 未分类 | `device_command_policy_crud.resolve_policy` 返回 `blacklist` / `whitelist` / `None` | 判定表继续用这三个结果；黑名单仍在建提案前硬拒绝 |
 | 动态凭据批准密码 | `HitlApprovalCard` 已有密码框；明文不落库 | 本期不改 OTP 交互；三档都不能在没密码时自动执行动态凭据 |
 | `log_audit` | 写操作与审计同一事务 | 改档记 `update_session_approval_mode` |
 | `init_db` 种子 | 幂等写入运行配置键 | **幂等删除** `HITL_NOTIFY_AUTO_APPROVE`，并不再写入 |
@@ -59,8 +60,23 @@
 - **`assist` 接近今天「打开 notify 自动审批」之后的设备行为**：notify 自动过，白名单当场执行，未分类弹卡。
 - **`full` 只多放开「未分类」**：仍然拒绝黑名单；动态凭据仍然要人输入密码。
 - 子 Agent 发起的提案挂在同一个 `session_id` 上，**共用父会话的档位**，不给 child 单独设档。
+- `credential_type == "none"` 仍在策略判定之前就被 `propose_action` 拒绝（「未配置登录凭据」），不进本表。
 
 自动批准时仍走现有 `decide_proposal(..., reviewed_by_user_id=actor_user_id)` + `resume_proposal`，审计行为与今天自动批准分支一致。
+
+### 3.2 给模型看的策略文案必须跟档位一致
+
+`list_device_commands_for_asset` 今天对白名单固定写「自动执行」、对未分类固定写「需人工审批」。默认改为 `ask` 之后，这两句会对模型撒谎（白名单也会弹卡）。
+
+工具改为接收 `session_id`，读出 `approval_mode` 后再写策略句：
+
+| 策略 | `ask` | `assist` | `full` |
+| :--- | :--- | :--- | :--- |
+| 黑名单 | 禁止执行 | 禁止执行 | 禁止执行 |
+| 白名单 | 白名单（当前为请求审批，需人工批准） | 白名单（可自动执行） | 白名单（可自动执行） |
+| 未分类 | 未分类（需人工审批） | 未分类（需人工审批） | 未分类（完全访问，可自动执行） |
+
+动态凭据那句「所有命令都需要人工审批并当场输入密码」三档都保留。
 
 ## 4. 数据与迁移
 
@@ -100,11 +116,11 @@ body: { "approval_mode": "ask" | "assist" | "full" }
   - `action`: `update_session_approval_mode`
   - `target`: `agent_session:{id}`
   - `detail`: `旧档→新档`（例如 `ask→full`），不含密码
-- 改成相同档位也允许（幂等），仍写审计或跳过审计二选一：**跳过审计**（没有实际变更不刷操作日志）
+- 改成相同档位也允许（幂等），**不写审计**（没有实际变更不刷操作日志）
 
 前端操作日志 `ACTION_LABELS.update_session_approval_mode = "变更会话审批模式"`。
 
-不为此单独推 WebSocket 事件：改档的人就在当前页，成功后更新本地会话列表即可。
+不为此单独推 WebSocket 事件。PATCH 成功后必须同时更新：输入框选择器、当前会话对象、侧栏列表里对应那一项，三处档位一致。
 
 ## 6. 前端
 
@@ -114,7 +130,9 @@ body: { "approval_mode": "ask" | "assist" | "full" }
 
 - 没有选中会话：选择器禁用
 - 已选中会话：始终可改，不因「已经选过」而禁用
-- 受控值来自当前会话的 `approval_mode`
+- 受控值来自当前会话的 `approval_mode`；在完全访问的确认 Dialog 关闭前，选择器仍显示旧档，禁止先把 UI 改成 `full` 再等确认
+
+改档请求由 `OpsAssistantPage` 发起（`ChatInput` 只回调选中的档位），避免输入框自己打 API。
 
 ### 6.2 完全访问警告
 
@@ -122,9 +140,9 @@ body: { "approval_mode": "ask" | "assist" | "full" }
 
 1. 先弹出 `Dialog`（`DialogTitle` 必填：「确认开启完全访问」）
 2. 正文：未分类的设备命令将不再询问你；黑名单仍然拒绝；动态凭据仍要你输入本次密码。此设置只对当前对话有效。
-3. 取消：不发请求，选择器回到原档
+3. 取消：不发请求，选择器保持旧档
 4. 确认：再 `PATCH`；失败 toast，保持原档
-5. 成功后再把本地会话改成 `full`
+5. 成功后再把本地会话、侧栏该项、选择器改成 `full`
 
 从 `full` 改回 `ask` / `assist`：不警告，直接 PATCH。
 
@@ -156,6 +174,7 @@ body: { "approval_mode": "ask" | "assist" | "full" }
 - 创建会话：`approval_mode == "ask"`
 - PATCH：所有者成功；他人 404；非法值 422；`full` 可写库（警告只在前端）
 - HITL：`ask` 下 notify 与白名单均为 PENDING；`assist` 下 notify 自动过、白名单执行、未分类 PENDING；`full` 下未分类也执行；三档黑名单均拒绝且不建待批；动态凭据在 `assist`/`full` + 白名单下仍 PENDING
+- `list_device_commands_for_asset`：同一条白名单命令，在 `ask` 会话下的返回文本不得再写「自动执行」
 - 系统配置：种子后无 `HITL_NOTIFY_AUTO_APPROVE`；运行参数表单/API 不再出现该字段
 - 改档审计：有变更才有 `update_session_approval_mode`
 
@@ -169,3 +188,4 @@ body: { "approval_mode": "ask" | "assist" | "full" }
 
 - 默认 `ask` 会改变现网体感：以前白名单 `show` 类命令可能直接跑，现在新对话每条都要批。这是所有者选择的「最安全默认」，产品上要在选择器里让「帮我审批」好找。
 - 完全访问不校验 `agent:hitl_approve`：能用助手的人就能对自己的对话放开未分类命令。黑名单与动态凭据仍是硬闸门。
+- 自动批准分支今天会先推 `hitl_pending` 再立刻批准执行；本期保持该顺序，不单独为三档改事件时序。
