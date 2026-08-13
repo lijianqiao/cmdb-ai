@@ -31,7 +31,6 @@ KEY_LLM_CHAT_OUTPUT_COST_PER_MILLION_USD = "LLM_CHAT_OUTPUT_COST_PER_MILLION_USD
 KEY_LLM_EMBEDDING_BASE_URL = "LLM_EMBEDDING_BASE_URL"
 KEY_LLM_EMBEDDING_API_KEY = "LLM_EMBEDDING_API_KEY"
 KEY_LLM_EMBEDDING_MODEL = "LLM_EMBEDDING_MODEL"
-KEY_HITL_NOTIFY_AUTO_APPROVE = "HITL_NOTIFY_AUTO_APPROVE"
 KEY_MONITOR_PROBE_TIMEOUT_SECONDS = "MONITOR_PROBE_TIMEOUT_SECONDS"
 KEY_MONITOR_SWEEP_INTERVAL_SECONDS = "MONITOR_SWEEP_INTERVAL_SECONDS"
 KEY_CMDB_DIFF_INTERVAL_SECONDS = "CMDB_DIFF_INTERVAL_SECONDS"
@@ -49,7 +48,6 @@ LLM_CONFIG_KEYS = (
 )
 
 OPERATIONS_CONFIG_KEYS = (
-    KEY_HITL_NOTIFY_AUTO_APPROVE,
     KEY_MONITOR_PROBE_TIMEOUT_SECONDS,
     KEY_MONITOR_SWEEP_INTERVAL_SECONDS,
     KEY_CMDB_DIFF_INTERVAL_SECONDS,
@@ -87,9 +85,8 @@ class EffectiveLlmConfig:
 
 @dataclass(frozen=True, slots=True)
 class EffectiveOperationsConfig:
-    """HITL 与监控有效运行配置快照。"""
+    """监控与 CMDB 巡检有效运行配置快照。"""
 
-    hitl_notify_auto_approve: bool
     monitor_probe_timeout_seconds: float
     monitor_sweep_interval_seconds: float
     cmdb_diff_interval_seconds: float
@@ -115,12 +112,6 @@ def _resolve_int_value(row: SystemConfig | None, fallback: int) -> int:
     if row is None or row.value is None:
         return fallback
     return int(row.value)
-
-
-def _resolve_bool_value(row: SystemConfig | None, fallback: bool) -> bool:
-    if row is None or row.value is None:
-        return fallback
-    return row.value.strip().lower() == "true"
 
 
 def _resolve_api_key(
@@ -197,7 +188,7 @@ async def get_effective_llm_config(db: AsyncSession) -> EffectiveLlmConfig:
 
 async def get_effective_operations_config(db: AsyncSession) -> EffectiveOperationsConfig:
     """
-    读取并校验 HITL 与监控五项有效配置。
+    读取并校验监控与 CMDB 巡检四项有效配置。
 
     Args:
         db: 异步数据库会话
@@ -207,10 +198,6 @@ async def get_effective_operations_config(db: AsyncSession) -> EffectiveOperatio
     """
     rows = await system_config_crud.get_by_keys(db, OPERATIONS_CONFIG_KEYS)
     validated = OperationsSystemConfigUpdate(
-        hitl_notify_auto_approve=_resolve_bool_value(
-            rows.get(KEY_HITL_NOTIFY_AUTO_APPROVE),
-            settings.HITL_NOTIFY_AUTO_APPROVE,
-        ),
         monitor_probe_timeout_seconds=_resolve_float_value(
             rows.get(KEY_MONITOR_PROBE_TIMEOUT_SECONDS),
             settings.MONITOR_PROBE_TIMEOUT_SECONDS,
@@ -229,7 +216,6 @@ async def get_effective_operations_config(db: AsyncSession) -> EffectiveOperatio
         ),
     )
     return EffectiveOperationsConfig(
-        hitl_notify_auto_approve=validated.hitl_notify_auto_approve,
         monitor_probe_timeout_seconds=validated.monitor_probe_timeout_seconds,
         monitor_sweep_interval_seconds=validated.monitor_sweep_interval_seconds,
         cmdb_diff_interval_seconds=validated.cmdb_diff_interval_seconds,
@@ -299,9 +285,6 @@ async def save_operations_config(
     await system_config_crud.upsert_values(
         db,
         {
-            KEY_HITL_NOTIFY_AUTO_APPROVE: (
-                "true" if payload.hitl_notify_auto_approve else "false"
-            ),
             KEY_MONITOR_PROBE_TIMEOUT_SECONDS: str(
                 payload.monitor_probe_timeout_seconds
             ),
@@ -343,7 +326,6 @@ async def build_system_config_response(db: AsyncSession) -> SystemConfigResponse
             embedding_api_key_source=llm.embedding_api_key_source,
         ),
         operations=OperationsSystemConfigResponse(
-            hitl_notify_auto_approve=operations.hitl_notify_auto_approve,
             monitor_probe_timeout_seconds=operations.monitor_probe_timeout_seconds,
             monitor_sweep_interval_seconds=operations.monitor_sweep_interval_seconds,
             cmdb_diff_interval_seconds=operations.cmdb_diff_interval_seconds,

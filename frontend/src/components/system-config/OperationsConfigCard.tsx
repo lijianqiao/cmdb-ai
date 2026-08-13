@@ -1,4 +1,4 @@
-/** HITL 与监控运行参数配置卡片 */
+/** 监控与 CMDB 巡检运行参数配置卡片 */
 
 import { useEffect } from "react"
 import { Controller, useForm } from "react-hook-form"
@@ -6,8 +6,6 @@ import { zodResolver } from "@hookform/resolvers/zod"
 import { isAxiosError } from "axios"
 import { toast } from "sonner"
 
-import { Alert02Icon } from "@/lib/icons"
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -26,7 +24,6 @@ import {
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
-import { Switch } from "@/components/ui/switch"
 import { updateOperationsSystemConfig } from "@/lib/system-config-api"
 import type {
   OperationsSystemConfig,
@@ -67,7 +64,6 @@ function readErrorMessage(error: unknown, fallback: string): string {
 
 function toFormValues(value: OperationsSystemConfig): OperationsConfigFormValues {
   return {
-    hitl_notify_auto_approve: value.hitl_notify_auto_approve,
     monitor_probe_timeout_seconds: value.monitor_probe_timeout_seconds,
     monitor_sweep_interval_seconds: value.monitor_sweep_interval_seconds,
     cmdb_diff_interval_seconds: value.cmdb_diff_interval_seconds,
@@ -76,7 +72,7 @@ function toFormValues(value: OperationsSystemConfig): OperationsConfigFormValues
 }
 
 /**
- * HITL 与监控运行参数表单卡片。
+ * 监控与 CMDB 巡检运行参数表单卡片。
  *
  * Args:
  *   value: 当前运行参数快照
@@ -95,8 +91,6 @@ export function OperationsConfigCard({
     form.reset(toFormValues(value))
   }, [value, form])
 
-  const autoApprove = form.watch("hitl_notify_auto_approve")
-
   const handleSubmit = async (data: OperationsConfigFormValues) => {
     try {
       const next = await updateOperationsSystemConfig(data)
@@ -112,46 +106,12 @@ export function OperationsConfigCard({
       <CardHeader>
         <CardTitle>运行参数</CardTitle>
         <CardDescription>
-          配置 HITL 自动批准策略与监控巡检周期
+          配置监控巡检周期、CMDB 差异对账与监控日志保留策略
         </CardDescription>
       </CardHeader>
       <form onSubmit={form.handleSubmit(handleSubmit)}>
         <CardContent>
           <FieldGroup className="gap-4">
-            <Controller
-              control={form.control}
-              name="hitl_notify_auto_approve"
-              render={({ field }) => (
-                <Field>
-                  <div className="flex items-center justify-between gap-4">
-                    <FieldLabel htmlFor="hitl-notify-auto-approve">
-                      notify 自动批准
-                    </FieldLabel>
-                    <Switch
-                      id="hitl-notify-auto-approve"
-                      checked={field.value}
-                      onCheckedChange={field.onChange}
-                      aria-label="notify 自动批准"
-                    />
-                  </div>
-                  <FieldDescription>
-                    开启后，notify 类型提案会跳过人工审批并立即执行；不会自动批准
-                    device_query 或 device_control。
-                  </FieldDescription>
-                </Field>
-              )}
-            />
-
-            {autoApprove ? (
-              <Alert className="border-amber-500/40 bg-amber-500/10">
-                <Alert02Icon />
-                <AlertTitle>已开启 notify 自动批准</AlertTitle>
-                <AlertDescription>
-                  notify 类型提案将跳过人工审批并立即执行，请确认符合安全策略。
-                </AlertDescription>
-              </Alert>
-            ) : null}
-
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               <Controller
                 control={form.control}

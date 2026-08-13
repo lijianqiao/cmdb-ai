@@ -24,7 +24,6 @@ describe("OperationsConfigCard", () => {
     render(
       <OperationsConfigCard
         value={{
-          hitl_notify_auto_approve: false,
           monitor_probe_timeout_seconds: 3,
           monitor_sweep_interval_seconds: 30,
           cmdb_diff_interval_seconds: 3600,
@@ -34,10 +33,7 @@ describe("OperationsConfigCard", () => {
       />,
     )
     expect(
-      screen.getByText(/notify 类型提案会跳过人工审批/),
-    ).toBeInTheDocument()
-    expect(
-      screen.getByText(/不会自动批准 device_query 或 device_control/),
+      screen.getByText(/配置监控巡检周期、CMDB 差异对账与监控日志保留策略/),
     ).toBeInTheDocument()
     expect(
       screen.getByText(/单个 TCP 连接探测允许等待的最长时间/),
@@ -45,6 +41,9 @@ describe("OperationsConfigCard", () => {
     expect(screen.getByText(/全部启用目标探测完成后/)).toBeInTheDocument()
     expect(
       screen.getByText(/只记录差异审计，不自动修改资产/),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/过期变化记录会被清理，每台最新一条会保留/),
     ).toBeInTheDocument()
   })
 })

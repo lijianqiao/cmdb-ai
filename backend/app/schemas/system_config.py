@@ -79,9 +79,8 @@ class LlmSystemConfigUpdate(ApiModel):
 
 
 class OperationsSystemConfigUpdate(ApiModel):
-    """更新 HITL 与监控运行参数。"""
+    """更新监控与 CMDB 巡检运行参数。"""
 
-    hitl_notify_auto_approve: bool
     monitor_probe_timeout_seconds: float = Field(gt=0, le=30, allow_inf_nan=False)
     monitor_sweep_interval_seconds: float = Field(ge=5, le=3600, allow_inf_nan=False)
     cmdb_diff_interval_seconds: float = Field(ge=60, le=86_400, allow_inf_nan=False)
@@ -106,7 +105,6 @@ class LlmSystemConfigResponse(ApiModel):
 class OperationsSystemConfigResponse(ApiModel):
     """运行参数有效配置响应。"""
 
-    hitl_notify_auto_approve: bool
     monitor_probe_timeout_seconds: float
     monitor_sweep_interval_seconds: float
     cmdb_diff_interval_seconds: float

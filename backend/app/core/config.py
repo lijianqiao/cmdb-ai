@@ -4,6 +4,7 @@
 生产环境对密钥、Cookie 和调试选项采用 fail-fast 策略。
 """
 
+import os
 from functools import lru_cache
 from ipaddress import ip_network
 from pathlib import Path
@@ -23,6 +24,14 @@ DEFAULT_DATABASE_URL = (
     "postgresql+psycopg://fastapi_admin_app:password@localhost:5432/fastapi_admin"
 )
 
+
+def _settings_env_file() -> Path | None:
+    """测试环境不读取开发者本地 .env，避免已下线键或脏配置污染用例。"""
+    if os.getenv("ENVIRONMENT") == "test":
+        return None
+    return ENV_FILE
+
+
 type Environment = Literal["development", "test", "production"]
 
 
@@ -30,7 +39,7 @@ class Settings(BaseSettings):
     """类型安全的应用配置。"""
 
     model_config = SettingsConfigDict(
-        env_file=ENV_FILE,
+        env_file=_settings_env_file(),
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="forbid",
@@ -82,7 +91,6 @@ class Settings(BaseSettings):
     AGENT_RECEIPT_GC_INTERVAL_SECONDS: float = Field(
         default=60.0, gt=0, allow_inf_nan=False
     )
-    HITL_NOTIFY_AUTO_APPROVE: bool = False
     # 数据库可逆秘密值的共享 Fernet 密钥：同时保护 CMDB 静态密码和 LLM API Key。
     # 泄露、丢失或轮换会同时影响两类密文；必须稳定备份，禁止与 JWT SECRET_KEY 混用。
     CMDB_CREDENTIAL_KEY: SecretStr | None = None

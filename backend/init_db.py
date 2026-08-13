@@ -11,7 +11,7 @@ import sys
 from typing import TypedDict
 
 from pydantic import ValidationError
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
@@ -19,6 +19,7 @@ from app.core.database import AsyncSessionLocal, engine
 from app.core.security import hash_password_async
 from app.crud.system_config import system_config_crud
 from app.models.permission import Permission
+from app.models.system_config import SystemConfig
 from app.models.user import User
 from app.schemas.auth import UserRegister
 from app.utils.audit import log_audit
@@ -301,15 +302,12 @@ async def seed_permissions() -> int:
 
 def _system_config_seed_values() -> dict[str, str]:
     """
-    从当前 Settings 构建五项运行配置种子值。
+    从当前 Settings 构建四项运行配置种子值。
 
     Returns:
-        仅包含 HITL 与监控相关键的默认字符串映射
+        仅包含监控与 CMDB 巡检相关键的默认字符串映射
     """
     return {
-        "HITL_NOTIFY_AUTO_APPROVE": (
-            "true" if settings.HITL_NOTIFY_AUTO_APPROVE else "false"
-        ),
         "MONITOR_PROBE_TIMEOUT_SECONDS": str(
             settings.MONITOR_PROBE_TIMEOUT_SECONDS
         ),
@@ -323,12 +321,17 @@ def _system_config_seed_values() -> dict[str, str]:
 
 async def seed_system_configs() -> int:
     """
-    幂等写入 HITL 与监控运行配置种子（不触碰 LLM/Embedding 键）。
+    幂等写入监控与 CMDB 巡检运行配置种子（不触碰 LLM/Embedding 键）。
 
     Returns:
         新插入的配置条数
     """
     async with AsyncSessionLocal() as db:
+        await db.execute(
+            delete(SystemConfig).where(
+                SystemConfig.key == "HITL_NOTIFY_AUTO_APPROVE"
+            )
+        )
         created = await system_config_crud.create_missing(
             db,
             _system_config_seed_values(),

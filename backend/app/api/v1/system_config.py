@@ -22,7 +22,6 @@ from app.schemas.system_config import (
 )
 from app.services.system_config import (
     KEY_CMDB_DIFF_INTERVAL_SECONDS,
-    KEY_HITL_NOTIFY_AUTO_APPROVE,
     KEY_LLM_CHAT_BASE_URL,
     KEY_LLM_CHAT_INPUT_COST_PER_MILLION_USD,
     KEY_LLM_CHAT_MODEL,
@@ -125,9 +124,6 @@ async def _build_operations_audit_detail(
     """
     existing = await system_config_crud.get_by_keys(db, OPERATIONS_CONFIG_KEYS)
     new_values = {
-        KEY_HITL_NOTIFY_AUTO_APPROVE: (
-            "true" if payload.hitl_notify_auto_approve else "false"
-        ),
         KEY_MONITOR_PROBE_TIMEOUT_SECONDS: str(payload.monitor_probe_timeout_seconds),
         KEY_MONITOR_SWEEP_INTERVAL_SECONDS: str(payload.monitor_sweep_interval_seconds),
         KEY_CMDB_DIFF_INTERVAL_SECONDS: str(payload.cmdb_diff_interval_seconds),

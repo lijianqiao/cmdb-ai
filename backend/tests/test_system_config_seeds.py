@@ -21,16 +21,17 @@ def test_system_config_permission_is_seeded_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_seed_system_configs_creates_only_five_operational_keys(
+async def test_seed_system_configs_creates_only_four_operational_keys(
     db_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """首次种子应写入五项运行配置，且不包含任何 LLM/Embedding 键。"""
+    """首次种子应写入四项运行配置，且不包含任何 LLM/Embedding 键。"""
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
     monkeypatch.setattr(init_db, "AsyncSessionLocal", session_factory)
 
     assert "MONITOR_EVENT_RETENTION_DAYS" in OPERATIONS_CONFIG_KEYS
-    assert await init_db.seed_system_configs() == 5
+    assert "HITL_NOTIFY_AUTO_APPROVE" not in OPERATIONS_CONFIG_KEYS
+    assert await init_db.seed_system_configs() == 4
     assert await init_db.seed_system_configs() == 0
 
     async with session_factory() as db:
@@ -56,10 +57,36 @@ async def test_seed_system_configs_preserves_existing_values(
         )
         await db.commit()
 
-    assert await init_db.seed_system_configs() == 4
+    assert await init_db.seed_system_configs() == 3
 
     async with session_factory() as db:
         rows = await system_config_crud.get_by_keys(
             db, ["MONITOR_SWEEP_INTERVAL_SECONDS"]
         )
     assert rows["MONITOR_SWEEP_INTERVAL_SECONDS"].value == "45.0"
+
+
+@pytest.mark.asyncio
+async def test_seed_system_configs_removes_legacy_hitl_notify_auto_approve_key(
+    db_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """种子应幂等删除已下线的 HITL_NOTIFY_AUTO_APPROVE 配置行。"""
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    monkeypatch.setattr(init_db, "AsyncSessionLocal", session_factory)
+
+    async with session_factory() as db:
+        await system_config_crud.create_missing(
+            db,
+            {"HITL_NOTIFY_AUTO_APPROVE": "true"},
+            updated_by_user_id=None,
+        )
+        await db.commit()
+
+    await init_db.seed_system_configs()
+
+    async with session_factory() as db:
+        rows = await system_config_crud.get_by_keys(
+            db, ["HITL_NOTIFY_AUTO_APPROVE"]
+        )
+    assert "HITL_NOTIFY_AUTO_APPROVE" not in rows

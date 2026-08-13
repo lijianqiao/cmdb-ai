@@ -145,7 +145,6 @@ async def test_save_and_read_operations_config_round_trip(
     db_session: AsyncSession,
 ) -> None:
     payload = OperationsSystemConfigUpdate(
-        hitl_notify_auto_approve=True,
         monitor_probe_timeout_seconds=5.0,
         monitor_sweep_interval_seconds=60.0,
         cmdb_diff_interval_seconds=7200.0,
@@ -157,7 +156,6 @@ async def test_save_and_read_operations_config_round_trip(
         updated_by_user_id=None,
     )
     config = await get_effective_operations_config(db_session)
-    assert config.hitl_notify_auto_approve is True
     assert config.monitor_probe_timeout_seconds == 5.0
     assert config.monitor_sweep_interval_seconds == 60.0
     assert config.cmdb_diff_interval_seconds == 7200.0
@@ -323,7 +321,6 @@ def test_operations_update_rejects_out_of_range_values(
     value: float | int,
 ) -> None:
     payload = {
-        "hitl_notify_auto_approve": False,
         "monitor_probe_timeout_seconds": 3.0,
         "monitor_sweep_interval_seconds": 30.0,
         "cmdb_diff_interval_seconds": 3600.0,

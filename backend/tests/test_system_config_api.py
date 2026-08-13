@@ -66,7 +66,6 @@ def _llm_payload(**overrides: object) -> dict[str, object]:
 
 def _operations_payload(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
-        "hitl_notify_auto_approve": False,
         "monitor_probe_timeout_seconds": 3,
         "monitor_sweep_interval_seconds": 30,
         "cmdb_diff_interval_seconds": 3600,
@@ -124,10 +123,13 @@ async def test_non_superuser_with_manage_permission_can_read_and_update(
     put_response = await client.put(
         "/api/v1/system-config/operations",
         headers=auth_headers,
-        json=_operations_payload(hitl_notify_auto_approve=True),
+        json=_operations_payload(monitor_event_retention_days=14),
     )
     assert put_response.status_code == 200, put_response.text
-    assert put_response.json()["data"]["operations"]["hitl_notify_auto_approve"] is True
+    assert (
+        put_response.json()["data"]["operations"]["monitor_event_retention_days"]
+        == 14
+    )
 
 
 async def test_superuser_can_save_api_key_but_response_and_audit_are_redacted(

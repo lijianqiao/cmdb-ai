@@ -60,7 +60,7 @@ LLM_CHAT_API_KEY=...
 LLM_CHAT_MODEL=...
 ```
 
-Knowledge upload / semantic search need embedding settings (see `.env.example`). Optional: `HITL_NOTIFY_AUTO_APPROVE=true` auto-approves `notify` HITL actions (default `false`).
+Knowledge upload / semantic search need embedding settings (see `.env.example`).
 
 First-time bootstrap (optional but recommended):
 
@@ -96,7 +96,6 @@ Useful flags in `.env`:
 | `SQL_ECHO` | Set `true` only while debugging SQL |
 | `REGISTRATION_ENABLED` | Public self-registration (off by default) |
 | `LLM_CHAT_*` / `LLM_EMBEDDING_*` | Chat and embedding models |
-| `HITL_NOTIFY_AUTO_APPROVE` | Auto-approve `notify` HITL actions |
 | `AGENT_*` | Child-agent concurrency/depth/cost caps (see `.env.example`) |
 
 ## Main API modules (`/api/v1`)

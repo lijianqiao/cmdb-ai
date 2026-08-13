@@ -96,7 +96,6 @@ export const llmConfigFormSchema = llmConfigFormObjectSchema.superRefine(
 
 /** 运行参数表单校验 schema */
 export const operationsConfigFormSchema = z.object({
-  hitl_notify_auto_approve: z.boolean(),
   monitor_probe_timeout_seconds: z.coerce
     .number()
     .finite()

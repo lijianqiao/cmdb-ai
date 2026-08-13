@@ -60,7 +60,7 @@ LLM_CHAT_API_KEY=...
 LLM_CHAT_MODEL=...
 ```
 
-知识库上传/语义检索还需 embedding 相关变量（见 `.env.example`）。可选：`HITL_NOTIFY_AUTO_APPROVE=true` 让 `notify` 类 HITL 自动通过（默认 `false`）。
+知识库上传/语义检索还需 embedding 相关变量（见 `.env.example`）。
 
 首次初始化建议配置：
 
@@ -96,7 +96,6 @@ uv run python main.py
 | `SQL_ECHO` | 仅排查 SQL 时设为 `true` |
 | `REGISTRATION_ENABLED` | 是否开放自助注册（默认关闭） |
 | `LLM_CHAT_*` / `LLM_EMBEDDING_*` | 聊天与向量模型 |
-| `HITL_NOTIFY_AUTO_APPROVE` | `notify` 动作是否自动批准 |
 | `AGENT_*` | 子 Agent 并发/深度/成本上限（见 `.env.example`） |
 
 ## 主要 API 模块（`/api/v1`）

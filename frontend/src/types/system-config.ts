@@ -16,7 +16,6 @@ export interface LlmSystemConfig {
 }
 
 export interface OperationsSystemConfig {
-  hitl_notify_auto_approve: boolean
   monitor_probe_timeout_seconds: number
   monitor_sweep_interval_seconds: number
   cmdb_diff_interval_seconds: number

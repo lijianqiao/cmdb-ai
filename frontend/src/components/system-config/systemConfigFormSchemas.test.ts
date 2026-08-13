@@ -28,7 +28,6 @@ function validLlmForm(
 }
 
 const validOperationsForm = {
-  hitl_notify_auto_approve: false,
   monitor_probe_timeout_seconds: 3,
   monitor_sweep_interval_seconds: 30,
   cmdb_diff_interval_seconds: 3600,
