@@ -33,6 +33,19 @@ export interface MonitorTargetCreate {
   cmdb_asset_id?: number | null
 }
 
+/** 单条监控状态变化日志 */
+export interface MonitorLogItem {
+  id: number
+  target_id: number
+  label: string
+  ip_address: string
+  port: number
+  status: MonitorLatestStatus
+  latency_ms: number | null
+  detail: string
+  checked_at: string
+}
+
 /** 更新监控目标请求 */
 export interface MonitorTargetUpdate {
   ip_address?: string

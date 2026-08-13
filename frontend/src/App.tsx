@@ -23,6 +23,7 @@ import { CmdbAssetsTrashPage } from "@/pages/CmdbAssetsTrashPage"
 import { DeviceCommandPoliciesPage } from "@/pages/DeviceCommandPoliciesPage"
 import { DeviceCommandPoliciesTrashPage } from "@/pages/DeviceCommandPoliciesTrashPage"
 import { MonitorTargetsPage } from "@/pages/MonitorTargetsPage"
+import { MonitorLogsPage } from "@/pages/MonitorLogsPage"
 import { UsersPage } from "@/pages/UsersPage"
 import { UsersTrashPage } from "@/pages/UsersTrashPage"
 import { SystemConfigPage } from "@/pages/SystemConfigPage"
@@ -148,6 +149,14 @@ export function App() {
             }
           />
           <Route path={ROUTES.PROFILE} element={<ProfilePage />} />
+          <Route
+            path={ROUTES.MONITOR_LOGS}
+            element={
+              <ProtectedRoute permission={PERMISSIONS.MONITOR_LOG_READ}>
+                <MonitorLogsPage />
+              </ProtectedRoute>
+            }
+          />
           <Route
             path={ROUTES.AUDIT}
             element={

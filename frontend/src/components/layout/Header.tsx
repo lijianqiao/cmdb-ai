@@ -90,7 +90,14 @@ function getBreadcrumbs(pathname: string): Crumb[] {
       { label: "回收站" },
     ],
     [ROUTES.PROFILE]: [{ label: "个人中心" }],
-    [ROUTES.AUDIT]: [{ label: "操作日志" }],
+    [ROUTES.MONITOR_LOGS]: [
+      { label: "日志管理" },
+      { label: "监控日志" },
+    ],
+    [ROUTES.AUDIT]: [
+      { label: "日志管理" },
+      { label: "操作日志" },
+    ],
   }
   return map[pathname] ?? [{ label: "页面" }]
 }

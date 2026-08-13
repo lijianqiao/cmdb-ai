@@ -158,11 +158,26 @@ const NAV_ENTRIES: NavEntry[] = [
     ],
   },
   {
-    type: "item",
-    label: "操作日志",
-    path: ROUTES.AUDIT,
+    type: "group",
+    id: "logs",
+    label: "日志管理",
     icon: FileEditIcon,
-    permission: PERMISSIONS.AUDIT_READ,
+    children: [
+      {
+        type: "item",
+        label: "监控日志",
+        path: ROUTES.MONITOR_LOGS,
+        icon: AuditIcon,
+        permission: PERMISSIONS.MONITOR_LOG_READ,
+      },
+      {
+        type: "item",
+        label: "操作日志",
+        path: ROUTES.AUDIT,
+        icon: FileEditIcon,
+        permission: PERMISSIONS.AUDIT_READ,
+      },
+    ],
   },
 ]
 

@@ -12,6 +12,7 @@ export const ROUTES = {
   CMDB: "/cmdb",
   CMDB_TRASH: "/cmdb/trash",
   MONITOR_TARGETS: "/monitor-targets",
+  MONITOR_LOGS: "/monitor-logs",
   DEVICE_COMMAND_POLICIES: "/device-command-policies",
   DEVICE_COMMAND_POLICIES_TRASH: "/device-command-policies/trash",
   PROFILE: "/profile",
@@ -53,6 +54,7 @@ export const PERMISSIONS = {
   // 监控模块
   MONITOR_READ: "monitor:read",
   MONITOR_MANAGE: "monitor:manage",
+  MONITOR_LOG_READ: "monitor_log:read",
   // Agent HITL
   AGENT_HITL_APPROVE: "agent:hitl_approve",
   // 设备命令策略

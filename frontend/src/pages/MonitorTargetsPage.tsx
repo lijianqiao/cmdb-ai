@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react"
-import { useSearchParams } from "react-router"
+import { useNavigate, useSearchParams } from "react-router"
 import dayjs from "dayjs"
 import { toast } from "sonner"
 
@@ -15,6 +15,7 @@ import {
   Delete02Icon,
   MoreHorizontalIcon,
   InboxIcon,
+  FileEditIcon,
 } from "@/lib/icons"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -50,7 +51,7 @@ import { MonitorTargetFormDialog } from "@/components/monitor/MonitorTargetFormD
 import api from "@/lib/api"
 import { usePaginatedQuery } from "@/hooks/use-paginated-query"
 import { usePermission } from "@/hooks/use-permission"
-import { PERMISSIONS } from "@/lib/constants"
+import { PERMISSIONS, ROUTES } from "@/lib/constants"
 import type {
   MonitorRuntime,
   MonitorTarget,
@@ -84,6 +85,7 @@ function statusVariant(
 }
 
 export function MonitorTargetsPage() {
+  const navigate = useNavigate()
   const { hasPermission } = usePermission()
   const [searchParams, setSearchParams] = useSearchParams()
   const [search, setSearch] = useState("")
@@ -119,6 +121,8 @@ export function MonitorTargetsPage() {
   const [deleteTarget, setDeleteTarget] = useState<MonitorTarget | null>(null)
 
   const canManage = hasPermission(PERMISSIONS.MONITOR_MANAGE)
+  const canViewLogs = hasPermission(PERMISSIONS.MONITOR_LOG_READ)
+  const showActions = canManage || canViewLogs
 
   useEffect(() => {
     if (
@@ -330,7 +334,7 @@ export function MonitorTargetsPage() {
                       {target.ip_address}:{target.port}
                     </CardDescription>
                   </div>
-                  {canManage ? (
+                  {showActions ? (
                     <DropdownMenu>
                       <DropdownMenuTrigger
                         render={
@@ -345,17 +349,33 @@ export function MonitorTargetsPage() {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         <DropdownMenuGroup>
-                          <DropdownMenuItem onClick={() => handleEdit(target)}>
-                            <PencilEdit02Icon />
-                            <span>编辑</span>
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() => handleDeleteClick(target)}
-                            className="text-destructive"
-                          >
-                            <Delete02Icon />
-                            <span>删除</span>
-                          </DropdownMenuItem>
+                          {canViewLogs ? (
+                            <DropdownMenuItem
+                              onClick={() =>
+                                navigate(
+                                  `${ROUTES.MONITOR_LOGS}?target_id=${target.id}`,
+                                )
+                              }
+                            >
+                              <FileEditIcon />
+                              <span>查看日志</span>
+                            </DropdownMenuItem>
+                          ) : null}
+                          {canManage ? (
+                            <>
+                              <DropdownMenuItem onClick={() => handleEdit(target)}>
+                                <PencilEdit02Icon />
+                                <span>编辑</span>
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={() => handleDeleteClick(target)}
+                                className="text-destructive"
+                              >
+                                <Delete02Icon />
+                                <span>删除</span>
+                              </DropdownMenuItem>
+                            </>
+                          ) : null}
                         </DropdownMenuGroup>
                       </DropdownMenuContent>
                     </DropdownMenu>
