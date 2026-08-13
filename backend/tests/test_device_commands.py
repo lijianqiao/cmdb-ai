@@ -7,6 +7,7 @@ from app.agent.device_commands import (
     UnknownDeviceCommandError,
     UnsupportedVendorError,
     command_supports_vendor,
+    command_type_of,
     get_command_template,
     get_device_command,
     list_commands_for_vendor,
@@ -148,6 +149,30 @@ def test_junos_port_config_template_includes_explicit_commit() -> None:
     port_disable = get_device_command("port_disable")
     assert port_disable.config_templates is not None
     assert "commit" in port_disable.config_templates["juniper_junos"]
+    port_enable = get_device_command("port_enable")
+    assert port_enable.config_templates is not None
+    assert "commit" in port_enable.config_templates["juniper_junos"]
+
+
+def test_command_type_of_returns_risk_level_for_known_commands() -> None:
+    assert command_type_of("show_version") == "read_only"
+    assert command_type_of("ping") == "read_only"
+    assert command_type_of("reboot") == "state_changing"
+    assert command_type_of("port_disable") == "state_changing"
+
+
+def test_command_type_of_returns_none_for_unknown_command() -> None:
+    assert command_type_of("drop_table") is None
+
+
+def test_shutdown_unsupported_on_network_vendors() -> None:
+    assert command_supports_vendor("shutdown", "cisco_iosxe") is False
+
+
+def test_get_command_template_rejects_config_mode_only_commands() -> None:
+    """port 命令 templates={}，get_command_template 必须 fail-closed。"""
+    with pytest.raises(UnsupportedVendorError):
+        get_command_template("port_disable", "cisco_iosxe")
 
 
 @pytest.mark.parametrize(
