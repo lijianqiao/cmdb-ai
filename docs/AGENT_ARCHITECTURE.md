@@ -299,7 +299,11 @@ classDiagram
 
 | 工具 | 参数 | 返回 | 副作用分级 |
 | :--- | :--- | :--- | :--- |
-| `propose_remediation` | `asset_id, action_type(notify\|device_control), payload, reason` | 创建 `HitlProposal`（状态 `PENDING`），**不直接执行** | 写（HITL 门控） |
+| `propose_remediation` | `asset_id, action_type(notify), payload, reason` | 创建 `HitlProposal`（`notify` 可自动批准并执行）；**不直接执行设备命令** | 写（HITL 门控） |
+| `query_device_command` | `asset_id, command_name, reason` | 只读诊断命令：白名单+非动态凭据当场执行返回输出；否则 `PENDING` 待审批 | 读（经 HITL 门控） |
+| `propose_device_control` | `asset_id, command_name, interface_name?, reason` | 变更类命令（`reboot`/`shutdown`/`port_enable`/`port_disable`）：白名单+非动态凭据当场执行；否则 `PENDING` 待审批 | 写（HITL 门控） |
+| `list_device_commands` | `asset_id` | 该资产可用命令名、说明、白/黑名单策略与凭据前提（只读，无审批） | 读 |
+| `get_device_query_result` | `proposal_id` | 按会话回查已提交的设备命令查询提案状态或执行结果（只读，无审批） | 读 |
 
 **Spawn 原语类**（照抄 [guide.md 7.2](./guide.md#72-对照三家产品的工具面)）：
 
@@ -395,7 +399,7 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 | action_type | 执行器 | 当前状态 |
 | :--- | :--- | :--- |
 | `notify` | 写 `audit_logs` + 站内消息经 WebSocket 推给相关人 | 已实现，无额外基建需求 |
-| `device_control` | `DeviceControlExecutor` 抽象接口，`execute(payload) -> ExecutionResult` | **预留接口，当前唯一实现是 `NotImplementedExecutor`**：`APPROVED` 后调用直接返回失败，proposal 停留在 `APPROVED`，不会伪装成 `EXECUTED`。真正接入设备管控通道是后续独立工作 |
+| `device_control` | Scrapli 执行通道（`send_interactive` / `send_configs`），复用 `device_query` 的命令目录与策略解析 | **已接入**：白名单+静态/无凭据当场执行，动态凭据强制人工审批，命令目录与 `device_query` 共用（见 [docs/superpowers/plans/2026-08-13-device-control-execution.md](./superpowers/plans/2026-08-13-device-control-execution.md)） |
 
 ### 7. 确定性管道
 
@@ -440,7 +444,7 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 | L1 能力最小化 | 除 `propose_remediation` 外全部工具只读；`kb_grep`/`kb_read` 路径必须落在 `knowledge/` 目录内，代码层做 realpath 前缀校验防目录穿越 |
 | L2 动作审查 | `propose_remediation.payload` 做 JSON Schema 校验，`action_type` 白名单枚举，不接受自由文本命令 |
 | L3 风险分级 | `notify` 默认可配置自动批准（低风险）；`device_control` 强制 HITL，无豁免通道 |
-| L4 执行沙箱 | `device_control` 执行器当前是 stub，物理上不可能产生真实副作用 |
+| L4 执行沙箱 | `device_control` 已接入真实执行通道：白名单+非动态凭据可当场执行；动态凭据强制人工审批；生产启用 `state_changing` 白名单前须在测试网段完成手工验证（见第 11 节 A6） |
 | L5 审计 | `AgentMessage`/`MonitorStatusEvent`/`HitlProposal`/`AuditLog` 全部 append-only |
 | L6 预算 | 见第 5 节 spawn 预算划拨 + 会话级 `max_total_cost_usd` |
 
@@ -467,7 +471,7 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 | A3 | `ripgrep`（`rg`）作为外部二进制部署到运行环境 | 不是 Python 包依赖，Windows/Linux 都需要单独安装，需写进部署文档 |
 | A4 | 监控探活第一期只做 TCP，ICMP 是后续可选扩展点 | 已在工具契约/数据模型里预留空间（`MonitorTarget.port` 必填即代表 TCP 模式），不阻塞后续加 ICMP |
 | A5 | WebSocket 断线重连策略留到实现阶段细化 | 本设计只定义消息契约，不定义重连协议 |
-| A6 | `device_control` 执行器何时真正接入设备管控通道 | 本设计只定义接口和 HITL 门控，不包含真实设备操作的实现范围 |
+| A6 | `device_control` 生产启用前的手工验证 | 已接入 Scrapli 执行通道；**生产启用 `state_changing` 命令白名单前**，须在测试网段真实/虚拟设备上手工验证 `reboot`（`send_interactive` 确认提示命中）、`port_disable`/`port_enable`（`send_configs` 含 Junos `commit`）行为，验证记录归档后方可对生产资产创建白名单策略 |
 | A7 | `HitlProposal.action_payload` 中的 `asset_id` 是松引用（存 int 值，不建数据库外键约束到 `CmdbAsset`） | 使 T08（CMDB）和 T10（HITL）可以并行独立开发；校验 `asset_id` 是否存在留给调用 `propose_remediation` 的工具实现层（届时 T08 应已就绪），不在数据库层强耦合 |
 
 ---
