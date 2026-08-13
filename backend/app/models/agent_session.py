@@ -17,6 +17,7 @@ class AgentSession(Base, TimestampMixin):
     )
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    approval_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="ask")
 
     def __repr__(self) -> str:
         return f"<AgentSession(id={self.id}, user_id={self.user_id}, status={self.status!r})>"

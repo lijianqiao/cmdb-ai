@@ -2,7 +2,7 @@
 @Author: li
 @Email: lijianqiao2906@live.com
 @FileName: agent_sessions.py
-@DateTime: 2026-08-12 12:43
+@DateTime: 2026-08-13
 @Docs: Agent 会话 REST API：创建、列表、详情、硬删除、历史与发消息触发 chat turn。
 
 实现流程：
@@ -33,10 +33,12 @@ from app.schemas.agent_session import (
     AgentChatTurnResponse,
     AgentMessageCreate,
     AgentMessageResponse,
+    AgentSessionApprovalUpdate,
     AgentSessionCreate,
     AgentSessionResponse,
 )
 from app.schemas.common import PaginatedData, ResponseEnvelope, paginated_response, success_response
+from app.utils.audit import log_audit
 
 router = APIRouter()
 
@@ -130,6 +132,37 @@ async def get_session(
 ) -> ResponseEnvelope[AgentSessionResponse]:
     """获取会话详情；非所有者返回 404。"""
     session = await _owned_session_or_404(db, session_id, current_user.id)
+    return success_response(AgentSessionResponse.model_validate(session))
+
+
+@router.patch(
+    "/sessions/{session_id}",
+    response_model=ResponseEnvelope[AgentSessionResponse],
+)
+async def patch_session_approval_mode(
+    session_id: int,
+    body: AgentSessionApprovalUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("agent:use")),
+) -> ResponseEnvelope[AgentSessionResponse]:
+    """更新会话审批模式；非所有者返回 404；相同档位不写审计。"""
+    session = await _owned_session_or_404(db, session_id, current_user.id)
+    old_mode = session.approval_mode
+    if old_mode != body.approval_mode:
+        session = await agent_session_crud.update(
+            db,
+            session_id,
+            {"approval_mode": body.approval_mode},
+        )
+        await log_audit(
+            db,
+            user_id=current_user.id,
+            action="update_session_approval_mode",
+            target=f"agent_session:{session_id}",
+            detail=f"{old_mode}→{body.approval_mode}",
+        )
+    await db.commit()
+    await db.refresh(session)
     return success_response(AgentSessionResponse.model_validate(session))
 
 

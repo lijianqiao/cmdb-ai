@@ -75,6 +75,7 @@ async def test_create_and_list_sessions(
     created = create_resp.json()["data"]
     assert created["title"] == "网段巡检"
     assert created["status"] == "active"
+    assert created["approval_mode"] == "ask"
     assert "id" in created
     assert "user_id" in created
 
@@ -95,6 +96,9 @@ async def test_create_and_list_sessions(
     titles = {item["title"] for item in payload["items"]}
     assert "网段巡检" in titles
     assert "" in titles
+    for item in payload["items"]:
+        assert "approval_mode" in item
+        assert item["approval_mode"] == "ask"
 
 
 async def test_get_session_detail_and_non_owner_404(
@@ -119,6 +123,7 @@ async def test_get_session_detail_and_non_owner_404(
     assert own.status_code == 200, own.text
     assert own.json()["data"]["id"] == session.id
     assert own.json()["data"]["title"] == "我的会话"
+    assert own.json()["data"]["approval_mode"] == "ask"
 
     missing = await client.get("/api/v1/agent/sessions/999999", headers=auth_headers)
     assert missing.status_code == 404
@@ -127,6 +132,82 @@ async def test_get_session_detail_and_non_owner_404(
     other_headers = await login_user(other.username, "testpassword123")
     forbidden = await client.get(
         f"/api/v1/agent/sessions/{session.id}",
+        headers=other_headers,
+    )
+    assert forbidden.status_code == 404
+
+
+async def test_patch_approval_mode_owner_and_audit(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+) -> None:
+    create_resp = await client.post(
+        "/api/v1/agent/sessions",
+        json={"title": "改档"},
+        headers=auth_headers,
+    )
+    session_id = create_resp.json()["data"]["id"]
+
+    patched = await client.patch(
+        f"/api/v1/agent/sessions/{session_id}",
+        json={"approval_mode": "assist"},
+        headers=auth_headers,
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["data"]["approval_mode"] == "assist"
+
+    from sqlalchemy import func, select
+    from app.models.audit_log import AuditLog
+
+    count = await db_session.scalar(
+        select(func.count()).select_from(AuditLog).where(
+            AuditLog.action == "update_session_approval_mode"
+        )
+    )
+    assert count == 1
+
+    same = await client.patch(
+        f"/api/v1/agent/sessions/{session_id}",
+        json={"approval_mode": "assist"},
+        headers=auth_headers,
+    )
+    assert same.status_code == 200
+    count_after = await db_session.scalar(
+        select(func.count()).select_from(AuditLog).where(
+            AuditLog.action == "update_session_approval_mode"
+        )
+    )
+    assert count_after == 1
+
+
+async def test_patch_approval_mode_rejects_invalid_and_non_owner(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_role: Role,
+    auth_headers: Headers,
+    login_user,
+) -> None:
+    create_resp = await client.post(
+        "/api/v1/agent/sessions",
+        json={"title": "他人"},
+        headers=auth_headers,
+    )
+    session_id = create_resp.json()["data"]["id"]
+
+    bad = await client.patch(
+        f"/api/v1/agent/sessions/{session_id}",
+        json={"approval_mode": "bypass"},
+        headers=auth_headers,
+    )
+    assert bad.status_code == 422
+
+    other = await _other_user(db_session, test_role)
+    other_headers = await login_user(other.username, "testpassword123")
+    forbidden = await client.patch(
+        f"/api/v1/agent/sessions/{session_id}",
+        json={"approval_mode": "full"},
         headers=other_headers,
     )
     assert forbidden.status_code == 404
