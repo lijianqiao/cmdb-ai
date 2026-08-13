@@ -304,8 +304,8 @@ classDiagram
 | 工具                      | 参数                                              | 返回                                                                                                             | 副作用分级         |
 | :------------------------ | :------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------- | :----------------- |
 | `propose_remediation`     | `asset_id, action_type(notify), payload, reason`  | 创建 `HitlProposal`；`assist`/`full` 档 `notify` 可自动批准并执行，默认 `ask` 档弹卡待审批；**不直接执行设备命令** | 写（HITL 门控）    |
-| `query_device_command`    | `asset_id, command_name, reason`                  | 只读诊断命令：按会话 `approval_mode` 判定——`assist`/`full` 且白名单+非动态凭据可当场返回输出；默认 `ask` 及未分类/动态凭据走 `PENDING` | 读（经 HITL 门控） |
-| `propose_device_control`  | `asset_id, command_name, interface_name?, reason` | 变更类命令（`reboot`/`shutdown`/`port_enable`/`port_disable`）：`assist`/`full` 且白名单+非动态凭据可当场执行；默认 `ask` 及未分类/动态凭据 `PENDING` 待审批 | 写（HITL 门控）    |
+| `query_device_command`    | `asset_id, command_name, reason`                  | 只读诊断命令：按会话 `approval_mode` 判定——`assist` 且白名单+非动态凭据可当场返回输出；`full` 另可当场执行未分类非动态命令；默认 `ask` 及动态凭据走 `PENDING` | 读（经 HITL 门控） |
+| `propose_device_control`  | `asset_id, command_name, interface_name?, reason` | 变更类命令（`reboot`/`shutdown`/`port_enable`/`port_disable`）：`assist` 且白名单+非动态凭据可当场执行；`full` 另可当场执行未分类非动态命令；默认 `ask` 及动态凭据 `PENDING` 待审批 | 写（HITL 门控）    |
 | `list_device_commands`    | `asset_id`                                        | 该资产可用命令名、说明、白/黑名单策略与凭据前提（只读，无审批）；策略文案随当前会话 `approval_mode` 变化，避免模型误判自动执行范围 | 读                 |
 | `get_device_query_result` | `proposal_id`                                     | 按会话回查已提交的设备命令查询提案状态或执行结果（只读，无审批）                                                 | 读                 |
 

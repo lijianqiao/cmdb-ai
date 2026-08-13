@@ -121,9 +121,10 @@ async def query_device_command(
 ) -> ToolResult:
     """对已配置凭据的资产发起只读诊断命令查询。
 
-    白名单命中且资产非动态凭据时会在这次调用里直接执行完成，返回 ok 并
-    附带命令输出；其它情况停在 pending_approval，需要人工审批（动态凭据
-    资产还需要在批准时当场输入密码）。
+    是否当场执行取决于当前会话审批档位（默认请求审批）；以 list_device_commands
+    返回的策略句与本工具返回的 control/content 为准。当场执行完成时返回 ok 并
+    附带命令输出；停在 pending_approval 时需人工审批（动态凭据资产批准时还需
+    当场输入密码）。
 
     Args:
         db: 当前事务使用的异步数据库会话。
@@ -189,8 +190,9 @@ async def propose_device_control(
 ) -> ToolResult:
     """对已配置凭据的资产发起会改变设备状态的命令（reboot/shutdown/port_enable/port_disable）。
 
-    命中白名单且资产非动态凭据时当场执行；否则停在 pending_approval，
-    需要人工审批（动态凭据资产还需要在批准时当场输入密码）。
+    是否当场执行取决于当前会话审批档位（默认请求审批）；以 list_device_commands
+    返回的策略句与本工具返回的 control/content 为准。当场执行时返回 ok；
+    停在 pending_approval 时需人工审批（动态凭据资产批准时还需当场输入密码）。
 
     Args:
         db: 当前事务使用的异步数据库会话。

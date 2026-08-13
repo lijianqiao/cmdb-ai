@@ -156,6 +156,8 @@ uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_
 
 在确认数据库备份后，按顺序执行：
 
+若本地 `backend/.env` 仍留有已删除的 `HITL_NOTIFY_AUTO_APPROVE`，`Settings(extra="forbid")` 会在非测试启动时失败，必须删掉该行。
+
 1. **迁移表结构**（`backend/`）：
    ```bash
    uv run alembic upgrade head

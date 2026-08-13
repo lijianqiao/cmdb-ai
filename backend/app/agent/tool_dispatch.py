@@ -304,7 +304,7 @@ def root_tool_schemas() -> list[dict[str, Any]]:
                 "name": "list_device_commands",
                 "description": (
                     f"[{ROOT_TOOL_SCHEMA_VERSION}] 列出一台资产支持的设备诊断命令、"
-                    "审批策略（白名单/黑名单/需人工审批）与凭据前提。"
+                    "审批策略与凭据前提（策略句会随当前会话审批档位变化）。"
                     "不确定命令名或是否需要审批时先调用这个工具。"
                 ),
                 "parameters": list_parameters,
@@ -326,7 +326,8 @@ def root_tool_schemas() -> list[dict[str, Any]]:
                 "name": "query_device_command",
                 "description": (
                     f"[{ROOT_TOOL_SCHEMA_VERSION}] 对已配置凭据的资产发起只读诊断命令查询"
-                    "（白名单自动执行，否则需要人工审批）。command_name 必须是 show_version"
+                    "（是否当场执行取决于当前会话审批档位，以 list_device_commands 策略句"
+                    "与工具返回为准）。command_name 必须是 show_version"
                     "（版本信息）/show_running_config（当前配置）/show_interfaces（接口状态）"
                     "/ping（连通性测试）之一——这是命令目录里的语义 key，不是某个厂商的原始 "
                     "CLI 语法，真实命令字符串由平台按资产厂商自动转换。"
@@ -340,8 +341,9 @@ def root_tool_schemas() -> list[dict[str, Any]]:
                 "name": "propose_device_control",
                 "description": (
                     f"[{ROOT_TOOL_SCHEMA_VERSION}] 对已配置凭据的资产发起会改变设备状态的命令"
-                    "（reboot/shutdown/port_enable/port_disable）。白名单命中且资产非动态凭据时"
-                    "会当场执行，否则进入人工审批。port_enable/port_disable 必须提供 interface_name。"
+                    "（reboot/shutdown/port_enable/port_disable）。是否当场执行取决于当前会话"
+                    "审批档位，以 list_device_commands 策略句与工具返回为准。"
+                    "port_enable/port_disable 必须提供 interface_name。"
                     "不确定这台设备支持哪些变更类命令时先调用 list_device_commands。"
                 ),
                 "parameters": propose_control_parameters,
