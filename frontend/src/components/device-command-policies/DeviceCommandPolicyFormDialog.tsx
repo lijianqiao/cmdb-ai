@@ -10,6 +10,9 @@ import { Controller, useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
 
+import { Alert02Icon } from "@/lib/icons"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -39,6 +42,8 @@ import { Spinner } from "@/components/ui/spinner"
 import { Textarea } from "@/components/ui/textarea"
 import {
   DEVICE_COMMAND_NAMES,
+  isStateChangingCommand,
+  STATE_CHANGING_COMMAND_NAMES,
   type DeviceCommandPolicy,
   type DeviceCommandPolicyCreate,
   type DeviceCommandPolicyUpdate,
@@ -96,6 +101,16 @@ const createSchema = z
         path: ["asset_id"],
       })
     }
+    if (
+      STATE_CHANGING_COMMAND_NAMES.has(data.command_name) &&
+      data.scope !== "asset"
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["scope"],
+        message: "变更类命令只能按单台设备配置",
+      })
+    }
   })
 
 const editSchema = z.object({
@@ -151,6 +166,14 @@ export function DeviceCommandPolicyFormDialog({
   })
 
   const scope = createForm.watch("scope")
+  const commandName = createForm.watch("command_name")
+  const scopeLockedByCommand = isStateChangingCommand(commandName)
+
+  useEffect(() => {
+    if (isStateChangingCommand(commandName)) {
+      createForm.setValue("scope", "asset", { shouldValidate: true })
+    }
+  }, [commandName, createForm])
 
   useEffect(() => {
     if (!open) return
@@ -290,6 +313,15 @@ export function DeviceCommandPolicyFormDialog({
         ) : (
           <form onSubmit={createForm.handleSubmit(handleCreateSubmit)}>
             <FieldGroup>
+              {scopeLockedByCommand && (
+                <Alert variant="destructive">
+                  <Alert02Icon />
+                  <AlertDescription>
+                    该命令会改变设备状态，仅能针对单台设备配置白/黑名单；请谨慎将常用变更类命令设为白名单。
+                  </AlertDescription>
+                </Alert>
+              )}
+
               <Controller
                 control={createForm.control}
                 name="scope"
@@ -299,6 +331,7 @@ export function DeviceCommandPolicyFormDialog({
                     <Select
                       items={SCOPE_ITEMS}
                       value={field.value}
+                      disabled={scopeLockedByCommand}
                       onValueChange={(value) =>
                         field.onChange(value as PolicyScope)
                       }
@@ -306,6 +339,7 @@ export function DeviceCommandPolicyFormDialog({
                       <SelectTrigger
                         id="policy-scope"
                         aria-invalid={fieldState.invalid}
+                        disabled={scopeLockedByCommand}
                       >
                         <SelectValue />
                       </SelectTrigger>
@@ -404,7 +438,14 @@ export function DeviceCommandPolicyFormDialog({
                         <SelectGroup>
                           {COMMAND_ITEMS.map((item) => (
                             <SelectItem key={item.value} value={item.value}>
-                              {item.label}
+                              <span className="flex items-center gap-2">
+                                {item.label}
+                                {isStateChangingCommand(item.value) && (
+                                  <Badge variant="destructive">
+                                    变更类，需精确到设备
+                                  </Badge>
+                                )}
+                              </span>
                             </SelectItem>
                           ))}
                         </SelectGroup>
