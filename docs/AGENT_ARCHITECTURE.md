@@ -10,22 +10,26 @@
 
 ## 目录
 
-- [Part A: 系统设计](#part-a-系统设计)
-  - [1. 需求背景与产品定位](#1-需求背景与产品定位)
-  - [2. 总体架构](#2-总体架构)
-  - [3. 数据模型](#3-数据模型)
-  - [4. Agent 角色目录与工具契约](#4-agent-角色目录与工具契约)
-  - [5. 动态 Spawn 编排](#5-动态-spawn-编排)
-  - [6. HITL 状态机](#6-hitl-状态机)
-  - [7. 确定性管道](#7-确定性管道)
-  - [8. 会话、压缩与前端实时通道](#8-会话压缩与前端实时通道)
-  - [9. 安全基线映射（L0–L6）](#9-安全基线映射l0l6)
-  - [10. 可观测性与预算](#10-可观测性与预算)
-  - [11. 待明确事项与假设](#11-待明确事项与假设)
-- [Part B: 任务分解](#part-b-任务分解)
-  - [12. 新增依赖](#12-新增依赖)
-  - [13. 任务列表（延续 T01–T05 编号）](#13-任务列表延续-t01t05-编号)
-  - [14. 任务依赖图](#14-任务依赖图)
+- [运维 Agent 平台 — 架构设计文档](#运维-agent-平台--架构设计文档)
+  - [目录](#目录)
+  - [Part A: 系统设计](#part-a-系统设计)
+    - [1. 需求背景与产品定位](#1-需求背景与产品定位)
+    - [2. 总体架构](#2-总体架构)
+    - [3. 数据模型](#3-数据模型)
+    - [4. Agent 角色目录与工具契约](#4-agent-角色目录与工具契约)
+      - [4.1 角色目录](#41-角色目录)
+      - [4.2 工具契约](#42-工具契约)
+    - [5. 动态 Spawn 编排](#5-动态-spawn-编排)
+    - [6. HITL 状态机](#6-hitl-状态机)
+    - [7. 确定性管道](#7-确定性管道)
+    - [8. 会话、压缩与前端实时通道](#8-会话压缩与前端实时通道)
+    - [9. 安全基线映射（L0–L6）](#9-安全基线映射l0l6)
+    - [10. 可观测性与预算](#10-可观测性与预算)
+    - [11. 待明确事项与假设](#11-待明确事项与假设)
+  - [Part B: 任务分解](#part-b-任务分解)
+    - [12. 新增依赖](#12-新增依赖)
+    - [13. 任务列表（延续 T01–T05 编号）](#13-任务列表延续-t01t05-编号)
+    - [14. 任务依赖图](#14-任务依赖图)
 
 ---
 
@@ -251,28 +255,28 @@ classDiagram
 
 **设计说明：**
 
-| 决定 | 理由 |
-| :--- | :--- |
-| `KnowledgeDocument` 只存元数据，正文落盘到 `knowledge/{category_code}/{doc_id}_{filename}` | 对齐 [guide.md 4.3](./guide.md#43-知识落盘纪律)；`kb_grep`/`kb_glob`/`kb_read` 直接操作文件系统 |
-| `KnowledgeChunk.embedding` 用 `vector(1024)`（pgvector） | 对应本地 llama.cpp 部署的 Qwen3-Embedding-0.6B 原生输出维度；实测不符可调整列定义 |
-| `CmdbAssetDependency` 只有外键 + `created_at`，无自增 id | 沿用 [ARCHITECTURE.md 8.4](./ARCHITECTURE.md#84-数据库约定) 关联表约定（同 `UserRole`/`RolePermission`） |
+| 决定                                                                                                                                       | 理由                                                                                                                        |
+| :----------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------- |
+| `KnowledgeDocument` 只存元数据，正文落盘到 `knowledge/{category_code}/{doc_id}_{filename}`                                                 | 对齐 [guide.md 4.3](./guide.md#43-知识落盘纪律)；`kb_grep`/`kb_glob`/`kb_read` 直接操作文件系统                             |
+| `KnowledgeChunk.embedding` 用 `vector(1024)`（pgvector）                                                                                   | 对应本地 llama.cpp 部署的 Qwen3-Embedding-0.6B 原生输出维度；实测不符可调整列定义                                           |
+| `CmdbAssetDependency` 只有外键 + `created_at`，无自增 id                                                                                   | 沿用 [ARCHITECTURE.md 8.4](./ARCHITECTURE.md#84-数据库约定) 关联表约定（同 `UserRole`/`RolePermission`）                    |
 | 不单独建"当前状态"可变字段，设备在线状态永远从 `MonitorStatusEvent` 最新一条**派生**（`DISTINCT ON (target_id) ORDER BY checked_at DESC`） | 避免"事件表"和"当前状态表"两份状态互相漂移，对应 [guide.md 3.1](./guide.md#31-确定性核心-vs-模型边缘)"审计字段代码派生"原则 |
-| CMDB 变更记录、知识文档归类结果、CMDB↔监控差异巡检发现，**全部复用现有 `audit_logs` 表**，不新建审计表 | 现有 `utils.audit.log_audit()` 已经是通用工具；新增 `action` 枚举值即可，避免重复造轮子 |
-| `AgentRegistry` 就是 [guide.md 7.4](./guide.md#74-childreceipt每次-spawn-必有回执) 的 `ChildReceipt` 落地为表 | 注册表必须能在压缩/断线后独立查询，不依赖对话正文（guide.md 6.3） |
-| `AgentTraceEvent` 字段直接照抄 [guide.md 8.3](./guide.md#83-日志字段建议) | 保证"卡在哪一步"可回答 |
+| CMDB 变更记录、知识文档归类结果、CMDB↔监控差异巡检发现，**全部复用现有 `audit_logs` 表**，不新建审计表                                     | 现有 `utils.audit.log_audit()` 已经是通用工具；新增 `action` 枚举值即可，避免重复造轮子                                     |
+| `AgentRegistry` 就是 [guide.md 7.4](./guide.md#74-childreceipt每次-spawn-必有回执) 的 `ChildReceipt` 落地为表                              | 注册表必须能在压缩/断线后独立查询，不依赖对话正文（guide.md 6.3）                                                           |
+| `AgentTraceEvent` 字段直接照抄 [guide.md 8.3](./guide.md#83-日志字段建议)                                                                  | 保证"卡在哪一步"可回答                                                                                                      |
 
 ### 4. Agent 角色目录与工具契约
 
 #### 4.1 角色目录
 
-| 角色 | 模型档位 | 沙箱 | 触发场景 |
-| :--- | :--- | :--- | :--- |
-| `root`（主循环，非子 Agent） | 对话模型（登记表可配） | read-only + 可发起 HITL 提案 | 面向用户，常规问答；判断是否需要 spawn |
-| `classifier` | 快/便宜 | read-only，仅 `knowledge/` | 批量文档上传后并行归类 |
-| `kb_explorer` | 快 | read-only，仅 `knowledge/` | 知识检索（Grep/Glob/Read/SemanticSearch） |
-| `ops_explorer` | 快 | read-only，仅 CMDB/监控查询工具 | 单一数据源的结构化取证 |
-| `investigator` | 中等推理 | read-only，跨数据源只读工具全开 | 根因排查中的一个假设分支（可多个并行） |
-| `reviewer` | 高推理 | read-only | 复核 `classifier` 分类冲突 / 复核 `investigator` 结论汇总 |
+| 角色                         | 模型档位               | 沙箱                            | 触发场景                                                  |
+| :--------------------------- | :--------------------- | :------------------------------ | :-------------------------------------------------------- |
+| `root`（主循环，非子 Agent） | 对话模型（登记表可配） | read-only + 可发起 HITL 提案    | 面向用户，常规问答；判断是否需要 spawn                    |
+| `classifier`                 | 快/便宜                | read-only，仅 `knowledge/`      | 批量文档上传后并行归类                                    |
+| `kb_explorer`                | 快                     | read-only，仅 `knowledge/`      | 知识检索（Grep/Glob/Read/SemanticSearch）                 |
+| `ops_explorer`               | 快                     | read-only，仅 CMDB/监控查询工具 | 单一数据源的结构化取证                                    |
+| `investigator`               | 中等推理               | read-only，跨数据源只读工具全开 | 根因排查中的一个假设分支（可多个并行）                    |
+| `reviewer`                   | 高推理                 | read-only                       | 复核 `classifier` 分类冲突 / 复核 `investigator` 结论汇总 |
 
 角色定义遵循 [guide.md 7.6](./guide.md#76-角色目录建议内置--可扩展) 要求：`description` 必须具体到"何时委派"，模糊描述等于不会被委派。
 
@@ -280,30 +284,30 @@ classDiagram
 
 **知识检索类**（对应 [guide.md 4.2](./guide.md#42-推荐工具面)）：
 
-| 工具 | 参数 | 返回 | 副作用分级 |
-| :--- | :--- | :--- | :--- |
-| `kb_glob` | `pattern, category?` | 文件路径列表 | 读 |
-| `kb_grep` | `pattern, category?, mode(files_with_matches\|content), context_lines?` | 匹配片段 + 行号（底层子进程调用 ripgrep，作用域强制限定在 `knowledge/` 目录内，代码层做 realpath 前缀校验防目录穿越） | 读 |
-| `kb_read` | `path, offset?, limit?` | 文件内容（单次返回强制截断，大文件分页） | 读 |
-| `kb_semantic_search` | `query, category?, top_k` | `[{doc_id, chunk, score}]`（query 先经 Qwen3-Embedding 编码，pgvector 做近似检索，可选再经 reranker 精排） | 读 |
+| 工具                 | 参数                                                                    | 返回                                                                                                                  | 副作用分级 |
+| :------------------- | :---------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------- | :--------- |
+| `kb_glob`            | `pattern, category?`                                                    | 文件路径列表                                                                                                          | 读         |
+| `kb_grep`            | `pattern, category?, mode(files_with_matches\|content), context_lines?` | 匹配片段 + 行号（底层子进程调用 ripgrep，作用域强制限定在 `knowledge/` 目录内，代码层做 realpath 前缀校验防目录穿越） | 读         |
+| `kb_read`            | `path, offset?, limit?`                                                 | 文件内容（单次返回强制截断，大文件分页）                                                                              | 读         |
+| `kb_semantic_search` | `query, category?, top_k`                                               | `[{doc_id, chunk, score}]`（query 先经 Qwen3-Embedding 编码，pgvector 做近似检索，可选再经 reranker 精排）            | 读         |
 
 **结构化查询类**：
 
-| 工具 | 参数 | 返回 | 副作用分级 |
-| :--- | :--- | :--- | :--- |
-| `query_monitor_status` | `target_ids? \| ip_cidr?, since?` | 当前状态（派生自最新事件）+ 最近事件列表 | 读 |
-| `query_cmdb` | `asset_ids? \| ip? \| business_system?` | 资产信息（含 owner/位置/所属业务系统） | 读 |
-| `query_cmdb_dependencies` | `asset_id, direction(up\|down), max_depth?` | 依赖图遍历结果（`max_depth` 强制上限，防止图过大拖垮上下文） | 读 |
+| 工具                      | 参数                                        | 返回                                                         | 副作用分级 |
+| :------------------------ | :------------------------------------------ | :----------------------------------------------------------- | :--------- |
+| `query_monitor_status`    | `target_ids? \| ip_cidr?, since?`           | 当前状态（派生自最新事件）+ 最近事件列表                     | 读         |
+| `query_cmdb`              | `asset_ids? \| ip? \| business_system?`     | 资产信息（含 owner/位置/所属业务系统）                       | 读         |
+| `query_cmdb_dependencies` | `asset_id, direction(up\|down), max_depth?` | 依赖图遍历结果（`max_depth` 强制上限，防止图过大拖垮上下文） | 读         |
 
 **写操作/提案类**（经 HITL，见第 6 节）：
 
-| 工具 | 参数 | 返回 | 副作用分级 |
-| :--- | :--- | :--- | :--- |
-| `propose_remediation` | `asset_id, action_type(notify), payload, reason` | 创建 `HitlProposal`（`notify` 可自动批准并执行）；**不直接执行设备命令** | 写（HITL 门控） |
-| `query_device_command` | `asset_id, command_name, reason` | 只读诊断命令：白名单+非动态凭据当场执行返回输出；否则 `PENDING` 待审批 | 读（经 HITL 门控） |
-| `propose_device_control` | `asset_id, command_name, interface_name?, reason` | 变更类命令（`reboot`/`shutdown`/`port_enable`/`port_disable`）：白名单+非动态凭据当场执行；否则 `PENDING` 待审批 | 写（HITL 门控） |
-| `list_device_commands` | `asset_id` | 该资产可用命令名、说明、白/黑名单策略与凭据前提（只读，无审批） | 读 |
-| `get_device_query_result` | `proposal_id` | 按会话回查已提交的设备命令查询提案状态或执行结果（只读，无审批） | 读 |
+| 工具                      | 参数                                              | 返回                                                                                                             | 副作用分级         |
+| :------------------------ | :------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------- | :----------------- |
+| `propose_remediation`     | `asset_id, action_type(notify), payload, reason`  | 创建 `HitlProposal`（`notify` 可自动批准并执行）；**不直接执行设备命令**                                         | 写（HITL 门控）    |
+| `query_device_command`    | `asset_id, command_name, reason`                  | 只读诊断命令：白名单+非动态凭据当场执行返回输出；否则 `PENDING` 待审批                                           | 读（经 HITL 门控） |
+| `propose_device_control`  | `asset_id, command_name, interface_name?, reason` | 变更类命令（`reboot`/`shutdown`/`port_enable`/`port_disable`）：白名单+非动态凭据当场执行；否则 `PENDING` 待审批 | 写（HITL 门控）    |
+| `list_device_commands`    | `asset_id`                                        | 该资产可用命令名、说明、白/黑名单策略与凭据前提（只读，无审批）                                                  | 读                 |
+| `get_device_query_result` | `proposal_id`                                     | 按会话回查已提交的设备命令查询提案状态或执行结果（只读，无审批）                                                 | 读                 |
 
 **Spawn 原语类**（照抄 [guide.md 7.2](./guide.md#72-对照三家产品的工具面)）：
 
@@ -396,9 +400,9 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 
 **执行器分两类**（对应 `action_type`）：
 
-| action_type | 执行器 | 当前状态 |
-| :--- | :--- | :--- |
-| `notify` | 写 `audit_logs` + 站内消息经 WebSocket 推给相关人 | 已实现，无额外基建需求 |
+| action_type      | 执行器                                                                                            | 当前状态                                                                                                                                                                                                                       |
+| :--------------- | :------------------------------------------------------------------------------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `notify`         | 写 `audit_logs` + 站内消息经 WebSocket 推给相关人                                                 | 已实现，无额外基建需求                                                                                                                                                                                                         |
 | `device_control` | Scrapli 执行通道（`send_interactive` / `send_configs`），复用 `device_query` 的命令目录与策略解析 | **已接入**：白名单+静态/无凭据当场执行，动态凭据强制人工审批，命令目录与 `device_query` 共用（见 [docs/superpowers/plans/2026-08-13-device-control-execution.md](./superpowers/plans/2026-08-13-device-control-execution.md)） |
 
 ### 7. 确定性管道
@@ -439,14 +443,14 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 
 对应 [guide.md 5.2](./guide.md#52-分层基线l0l6)：
 
-| 层级 | 本项目的具体落地 |
-| :--- | :--- |
-| L1 能力最小化 | 除 `propose_remediation`、`propose_device_control` 外全部工具只读（`query_device_command` 为只读诊断，经策略门控但不改设备状态）；`kb_grep`/`kb_read` 路径必须落在 `knowledge/` 目录内，代码层做 realpath 前缀校验防目录穿越 |
-| L2 动作审查 | `propose_remediation.payload` 做 JSON Schema 校验，`action_type` 白名单枚举，不接受自由文本命令；`propose_device_control` 的 `command_name` 必须在设备命令目录内且通过参数校验（如 `interface_name` 约束），不接受自由文本 CLI |
-| L3 风险分级 | `notify` 默认可配置自动批准（低风险）；`device_control` 未分类或需动态凭据时强制 HITL；白名单+非动态凭据凭策略可当场执行，豁免人工审批 |
-| L4 执行沙箱 | `device_control` 已接入真实执行通道：白名单+非动态凭据可当场执行；动态凭据强制人工审批；生产启用 `state_changing` 白名单前须在测试网段完成手工验证（见第 11 节 A6） |
-| L5 审计 | `AgentMessage`/`MonitorStatusEvent`/`HitlProposal`/`AuditLog` 全部 append-only |
-| L6 预算 | 见第 5 节 spawn 预算划拨 + 会话级 `max_total_cost_usd` |
+| 层级          | 本项目的具体落地                                                                                                                                                                                                               |
+| :------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L1 能力最小化 | 除 `propose_remediation`、`propose_device_control` 外全部工具只读（`query_device_command` 为只读诊断，经策略门控但不改设备状态）；`kb_grep`/`kb_read` 路径必须落在 `knowledge/` 目录内，代码层做 realpath 前缀校验防目录穿越   |
+| L2 动作审查   | `propose_remediation.payload` 做 JSON Schema 校验，`action_type` 白名单枚举，不接受自由文本命令；`propose_device_control` 的 `command_name` 必须在设备命令目录内且通过参数校验（如 `interface_name` 约束），不接受自由文本 CLI |
+| L3 风险分级   | `notify` 默认可配置自动批准（低风险）；`device_control` 未分类或需动态凭据时强制 HITL；白名单+非动态凭据凭策略可当场执行，豁免人工审批                                                                                         |
+| L4 执行沙箱   | `device_control` 已接入真实执行通道：白名单+非动态凭据可当场执行；动态凭据强制人工审批；生产启用 `state_changing` 白名单前须在测试网段完成手工验证（见第 11 节 A6）                                                            |
+| L5 审计       | `AgentMessage`/`MonitorStatusEvent`/`HitlProposal`/`AuditLog` 全部 append-only                                                                                                                                                 |
+| L6 预算       | 见第 5 节 spawn 预算划拨 + 会话级 `max_total_cost_usd`                                                                                                                                                                         |
 
 ### 10. 可观测性与预算
 
@@ -454,25 +458,25 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 
 预算配置分层（对应 [guide.md 9.1](./guide.md#91-多层限额)）：
 
-| 层 | 配置项 | 默认值（可调） |
-| :--- | :--- | :--- |
-| 单步 | 单次工具输出最大字节数（如 `kb_read` 单次返回上限） | 32KB |
-| 单轮 | `max_steps` | 20 |
-| 会话 | `max_total_cost_usd` / 累计子 Agent 数 | 视模型定价配置 |
-| 并发 | `max_concurrent_children` | 5 |
-| 深度 | 最大嵌套层数 | 2 |
+| 层   | 配置项                                              | 默认值（可调） |
+| :--- | :-------------------------------------------------- | :------------- |
+| 单步 | 单次工具输出最大字节数（如 `kb_read` 单次返回上限） | 32KB           |
+| 单轮 | `max_steps`                                         | 20             |
+| 会话 | `max_total_cost_usd` / 累计子 Agent 数              | 视模型定价配置 |
+| 并发 | `max_concurrent_children`                           | 5              |
+| 深度 | 最大嵌套层数                                        | 2              |
 
 ### 11. 待明确事项与假设
 
-| # | 假设/待明确 | 说明 |
-| :--- | :--- | :--- |
-| A1 | 单组织内部部署，不做多租户 | 现有 RBAC 的 `User`/`Role`/`Permission` 模型没有 org 概念，本设计不新增 |
-| A2 | Embedding 维度按 Qwen3-Embedding-0.6B 的 1024 维定 | 实测不符，调整 `KnowledgeChunk.embedding` 列定义即可，不影响其他设计 |
-| A3 | `ripgrep`（`rg`）作为外部二进制部署到运行环境 | 不是 Python 包依赖，Windows/Linux 都需要单独安装，需写进部署文档 |
-| A4 | 监控探活第一期只做 TCP，ICMP 是后续可选扩展点 | 已在工具契约/数据模型里预留空间（`MonitorTarget.port` 必填即代表 TCP 模式），不阻塞后续加 ICMP |
-| A5 | WebSocket 断线重连策略留到实现阶段细化 | 本设计只定义消息契约，不定义重连协议 |
-| A6 | `device_control` 生产启用前的手工验证 | 已接入 Scrapli 执行通道；**生产启用 `state_changing` 命令白名单前**，须在测试网段真实/虚拟设备上手工验证 `reboot`（`send_interactive` 确认提示命中）、`port_disable`/`port_enable`（`send_configs` 含 Junos `commit`）行为，验证记录归档后方可对生产资产创建白名单策略 |
-| A7 | `HitlProposal.action_payload` 中的 `asset_id` 是松引用（存 int 值，不建数据库外键约束到 `CmdbAsset`） | 使 T08（CMDB）和 T10（HITL）可以并行独立开发；校验 `asset_id` 是否存在留给调用 `propose_remediation` 的工具实现层（届时 T08 应已就绪），不在数据库层强耦合 |
+| #    | 假设/待明确                                                                                           | 说明                                                                                                                                                                                                                                                                   |
+| :--- | :---------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A1   | 单组织内部部署，不做多租户                                                                            | 现有 RBAC 的 `User`/`Role`/`Permission` 模型没有 org 概念，本设计不新增                                                                                                                                                                                                |
+| A2   | Embedding 维度按 Qwen3-Embedding-0.6B 的 1024 维定                                                    | 实测不符，调整 `KnowledgeChunk.embedding` 列定义即可，不影响其他设计                                                                                                                                                                                                   |
+| A3   | `ripgrep`（`rg`）作为外部二进制部署到运行环境                                                         | 不是 Python 包依赖，Windows/Linux 都需要单独安装，需写进部署文档                                                                                                                                                                                                       |
+| A4   | 监控探活第一期只做 TCP，ICMP 是后续可选扩展点                                                         | 已在工具契约/数据模型里预留空间（`MonitorTarget.port` 必填即代表 TCP 模式），不阻塞后续加 ICMP                                                                                                                                                                         |
+| A5   | WebSocket 断线重连策略留到实现阶段细化                                                                | 本设计只定义消息契约，不定义重连协议                                                                                                                                                                                                                                   |
+| A6   | `device_control` 生产启用前的手工验证                                                                 | 已接入 Scrapli 执行通道；**生产启用 `state_changing` 命令白名单前**，须在测试网段真实/虚拟设备上手工验证 `reboot`（`send_interactive` 确认提示命中）、`port_disable`/`port_enable`（`send_configs` 含 Junos `commit`）行为，验证记录归档后方可对生产资产创建白名单策略 |
+| A7   | `HitlProposal.action_payload` 中的 `asset_id` 是松引用（存 int 值，不建数据库外键约束到 `CmdbAsset`） | 使 T08（CMDB）和 T10（HITL）可以并行独立开发；校验 `asset_id` 是否存在留给调用 `propose_remediation` 的工具实现层（届时 T08 应已就绪），不在数据库层强耦合                                                                                                             |
 
 ---
 
@@ -490,9 +494,9 @@ uv add httpx              # 调用本地 llama.cpp OpenAI 兼容接口（现有 
 
 **外部二进制（非 Python 包，需单独安装到运行环境）：**
 
-| 依赖 | 用途 |
-| :--- | :--- |
-| `ripgrep`（`rg`） | `kb_grep` 工具的底层实现 |
+| 依赖                       | 用途                                                                |
+| :------------------------- | :------------------------------------------------------------------ |
+| `ripgrep`（`rg`）          | `kb_grep` 工具的底层实现                                            |
 | PostgreSQL `pgvector` 扩展 | 通过 Alembic migration 执行 `CREATE EXTENSION IF NOT EXISTS vector` |
 
 **前端：** 暂不确定具体包名，实现阶段核实 shadcn AI Elements 相关组件后再定。
@@ -501,14 +505,14 @@ uv add httpx              # 调用本地 llama.cpp OpenAI 兼容接口（现有 
 
 > 沿用 [ARCHITECTURE.md](./ARCHITECTURE.md) 的任务编号习惯，从 T06 开始；每个任务对应 [guide.md 12.1](./guide.md#121-渐进交付) 的分期。
 
-| 任务 | 内容 | 对应 guide.md 分期 | 依赖 |
-| :--- | :--- | :--- | :--- |
-| **T06** | Agent 内核基建：`app/agent/loop.py`、`session.py`、`budget.py`，`app/core/llm.py`（MODELS 登记表），数据模型 `AgentSession`/`AgentMessage`/`AgentRegistry`/`HitlProposal`/`AgentTraceEvent`，对应 Alembic 迁移 | P0–P1 | 无（新地基） |
-| **T07** | 知识库子系统：`KnowledgeCategory`/`Document`/`Chunk` 模型，`kb_glob`/`kb_grep`/`kb_read`/`kb_semantic_search` 工具，上传 API，pgvector 集成，`classifier`/`kb_explorer` 角色 | P2 | T06 |
-| **T08** | CMDB + 监控子系统：`CmdbAsset`/`CmdbAssetDependency`/`MonitorTarget`/`MonitorStatusEvent` 模型，`monitor_sweep`/`cmdb_diff_job` 确定性任务，`query_cmdb`/`query_monitor_status`/`query_cmdb_dependencies` 工具，`ops_explorer` 角色 | 不依赖 spawn，纯确定性管道 + 只读工具 | T06 |
-| **T09** | Spawn 编排 + 角色目录：`app/agent/spawn.py`，`ChildReceipt` 落地，`investigator`/`reviewer` 角色，两个编排范式（批量归类并行、根因排查并行） | P3–P4 | T07 + T08 |
-| **T10** | HITL + 安全闸门：`app/agent/hitl.py` 状态机，`propose_remediation`/`propose_device_control`/`query_device_command` 工具，设备命令经 Scrapli `DeviceQueryExecutor` 执行通道落地，新增权限码（`knowledge:*`/`cmdb:*`/`monitor:*`/`agent:hitl_approve`） | P1 + 安全基线（第 9 节） | T06 |
-| **T11** | 前端 Chat 页面：`OpsAssistantPage`、WebSocket 客户端、消息流组件、`HitlApprovalCard`、`KnowledgeUploadDialog` | 对应前端集成 | T06（至少要有可用的 WS 端点，可用 mock 提前并行开发） |
+| 任务    | 内容                                                                                                                                                                                                                                                  | 对应 guide.md 分期                    | 依赖                                                  |
+| :------ | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------ | :---------------------------------------------------- |
+| **T06** | Agent 内核基建：`app/agent/loop.py`、`session.py`、`budget.py`，`app/core/llm.py`（MODELS 登记表），数据模型 `AgentSession`/`AgentMessage`/`AgentRegistry`/`HitlProposal`/`AgentTraceEvent`，对应 Alembic 迁移                                        | P0–P1                                 | 无（新地基）                                          |
+| **T07** | 知识库子系统：`KnowledgeCategory`/`Document`/`Chunk` 模型，`kb_glob`/`kb_grep`/`kb_read`/`kb_semantic_search` 工具，上传 API，pgvector 集成，`classifier`/`kb_explorer` 角色                                                                          | P2                                    | T06                                                   |
+| **T08** | CMDB + 监控子系统：`CmdbAsset`/`CmdbAssetDependency`/`MonitorTarget`/`MonitorStatusEvent` 模型，`monitor_sweep`/`cmdb_diff_job` 确定性任务，`query_cmdb`/`query_monitor_status`/`query_cmdb_dependencies` 工具，`ops_explorer` 角色                   | 不依赖 spawn，纯确定性管道 + 只读工具 | T06                                                   |
+| **T09** | Spawn 编排 + 角色目录：`app/agent/spawn.py`，`ChildReceipt` 落地，`investigator`/`reviewer` 角色，两个编排范式（批量归类并行、根因排查并行）                                                                                                          | P3–P4                                 | T07 + T08                                             |
+| **T10** | HITL + 安全闸门：`app/agent/hitl.py` 状态机，`propose_remediation`/`propose_device_control`/`query_device_command` 工具，设备命令经 Scrapli `DeviceQueryExecutor` 执行通道落地，新增权限码（`knowledge:*`/`cmdb:*`/`monitor:*`/`agent:hitl_approve`） | P1 + 安全基线（第 9 节）              | T06                                                   |
+| **T11** | 前端 Chat 页面：`OpsAssistantPage`、WebSocket 客户端、消息流组件、`HitlApprovalCard`、`KnowledgeUploadDialog`                                                                                                                                         | 对应前端集成                          | T06（至少要有可用的 WS 端点，可用 mock 提前并行开发） |
 
 ### 14. 任务依赖图
 
