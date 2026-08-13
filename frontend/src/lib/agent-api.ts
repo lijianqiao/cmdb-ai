@@ -3,6 +3,7 @@
 import api from "@/lib/api"
 import type { ApiResponse, PaginatedData, PaginationParams } from "@/types/api"
 import type {
+  ApprovalMode,
   AgentChatTurn,
   AgentMessage,
   AgentMessageCreate,
@@ -67,6 +68,27 @@ export async function listAgentSessions(
 export async function getAgentSession(sessionId: number): Promise<AgentSession> {
   const response = await api.get<ApiResponse<AgentSession>>(
     `/agent/sessions/${sessionId}`,
+  )
+  return response.data.data
+}
+
+/**
+ * 更新会话审批档位。
+ *
+ * Args:
+ *   sessionId: 会话 ID
+ *   body: 目标档位
+ *
+ * Returns:
+ *   更新后的会话
+ */
+export async function patchAgentSession(
+  sessionId: number,
+  body: { approval_mode: ApprovalMode },
+): Promise<AgentSession> {
+  const response = await api.patch<ApiResponse<AgentSession>>(
+    `/agent/sessions/${sessionId}`,
+    body,
   )
   return response.data.data
 }

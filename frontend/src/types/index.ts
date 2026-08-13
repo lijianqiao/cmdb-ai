@@ -45,6 +45,7 @@ export type {
   AgentWsEventType,
   AgentWsServerMessage,
   AgentWsClientAuth,
+  ApprovalMode,
   AgentSession,
   AgentSessionCreate,
   AgentMessage,

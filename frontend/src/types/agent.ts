@@ -23,12 +23,23 @@ export interface AgentWsClientAuth {
   access_token: string
 }
 
+/** 会话审批档位 */
+export type ApprovalMode = "ask" | "assist" | "full"
+
+/** 审批档位中文文案 */
+export const APPROVAL_MODE_LABELS: Record<ApprovalMode, string> = {
+  ask: "请求审批",
+  assist: "帮我审批",
+  full: "完全访问",
+}
+
 /** 会话列表/详情 */
 export interface AgentSession {
   id: number
   user_id: number
   title: string
   status: string
+  approval_mode: ApprovalMode
   created_at: string
   updated_at: string
 }

@@ -18,6 +18,14 @@ import { PageHeader } from "@/components/layout/PageHeader"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
   Empty,
   EmptyDescription,
   EmptyHeader,
@@ -34,10 +42,12 @@ import {
   createAgentSession,
   deleteAgentSession,
   listAgentSessions,
+  patchAgentSession,
 } from "@/lib/agent-api"
 import { PERMISSIONS } from "@/lib/constants"
 import { cn } from "@/lib/utils"
-import type { AgentSession } from "@/types/agent"
+import type { ApprovalMode, AgentSession } from "@/types/agent"
+import { APPROVAL_MODE_LABELS } from "@/types/agent"
 
 function wsStatusLabel(
   reconnecting: boolean,
@@ -61,7 +71,15 @@ export function OpsAssistantPage() {
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<AgentSession | null>(null)
+  const [fullAccessDialogOpen, setFullAccessDialogOpen] = useState(false)
+  const [patchingApprovalMode, setPatchingApprovalMode] = useState(false)
   const canUploadKnowledge = hasPermission(PERMISSIONS.KNOWLEDGE_UPLOAD)
+
+  const selectedSession =
+    selectedSessionId == null
+      ? null
+      : sessions.find((row) => row.id === selectedSessionId) ?? null
+  const approvalMode = selectedSession?.approval_mode ?? null
 
   const {
     messages,
@@ -137,6 +155,41 @@ export function OpsAssistantPage() {
     }
   }
 
+  const updateSessionInList = (updated: AgentSession): void => {
+    setSessions((current) =>
+      current.map((row) => (row.id === updated.id ? updated : row)),
+    )
+  }
+
+  const patchApprovalMode = async (mode: ApprovalMode): Promise<void> => {
+    if (selectedSessionId == null) return
+    setPatchingApprovalMode(true)
+    try {
+      const updated = await patchAgentSession(selectedSessionId, {
+        approval_mode: mode,
+      })
+      updateSessionInList(updated)
+    } catch {
+      toast.error("变更审批模式失败")
+    } finally {
+      setPatchingApprovalMode(false)
+    }
+  }
+
+  const handleApprovalModeSelect = (mode: ApprovalMode): void => {
+    if (selectedSessionId == null || approvalMode == null) return
+    if (mode === "full" && approvalMode !== "full") {
+      setFullAccessDialogOpen(true)
+      return
+    }
+    void patchApprovalMode(mode)
+  }
+
+  const handleFullAccessConfirm = async (): Promise<void> => {
+    setFullAccessDialogOpen(false)
+    await patchApprovalMode("full")
+  }
+
   const connectionLabel = wsStatusLabel(reconnecting, wsStatus)
 
   return (
@@ -185,6 +238,34 @@ export function OpsAssistantPage() {
         }」吗？消息与相关记录将一并永久删除，不可恢复。`}
         onConfirm={handleDeleteConfirm}
       />
+
+      <Dialog open={fullAccessDialogOpen} onOpenChange={setFullAccessDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>确认开启完全访问</DialogTitle>
+            <DialogDescription>
+              未分类的设备命令将不再询问你；黑名单仍然拒绝；动态凭据仍要你输入本次密码。此设置只对当前对话有效。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setFullAccessDialogOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={patchingApprovalMode}
+              onClick={() => void handleFullAccessConfirm()}
+            >
+              {patchingApprovalMode ? <Spinner data-icon="inline-start" /> : null}
+              确认
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 md:flex-row">
         <aside className="flex w-full shrink-0 flex-col gap-2 rounded-xl border bg-card md:w-64">
@@ -244,6 +325,8 @@ export function OpsAssistantPage() {
                         </span>
                         <span className="text-xs font-normal text-muted-foreground">
                           {dayjs(session.updated_at).format("MM-DD HH:mm")}
+                          {" · "}
+                          {APPROVAL_MODE_LABELS[session.approval_mode]}
                         </span>
                       </Button>
                       <Button
@@ -321,6 +404,8 @@ export function OpsAssistantPage() {
                 <ChatInput
                   disabled={inputDisabled}
                   isSending={isSending}
+                  approvalMode={approvalMode}
+                  onApprovalModeSelect={handleApprovalModeSelect}
                   onSend={sendMessage}
                 />
               </div>
