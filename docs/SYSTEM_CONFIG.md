@@ -18,10 +18,10 @@
 | `LLM_EMBEDDING_BASE_URL` | 模型配置 → Embedding | Base URL | 字符串（URL） |
 | `LLM_EMBEDDING_MODEL` | 模型配置 → Embedding | 模型名 | 字符串 |
 | `LLM_EMBEDDING_API_KEY` | 模型配置 → Embedding | API Key | 秘密（Fernet 密文入库） |
-| `HITL_NOTIFY_AUTO_APPROVE` | 运行参数 | notify 自动批准 | 布尔开关 |
 | `MONITOR_PROBE_TIMEOUT_SECONDS` | 运行参数 | 探测超时（秒） | 浮点数 (0, 30] |
 | `MONITOR_SWEEP_INTERVAL_SECONDS` | 运行参数 | 巡检间隔（秒） | 浮点数 [5, 3600] |
 | `CMDB_DIFF_INTERVAL_SECONDS` | 运行参数 | CMDB 差异巡检（秒） | 浮点数 [60, 86400] |
+| `MONITOR_EVENT_RETENTION_DAYS` | 运行参数 | 监控日志保留天数 | 整数 [1, 90] |
 
 **API Key 在 UI 中的三种语义：**
 
@@ -107,10 +107,11 @@ uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_
 
 - 权限 `system_config:manage`（「管理系统配置」）
 - 4 个运行参数种子（若对应键在库中不存在）：
-  - `HITL_NOTIFY_AUTO_APPROVE`
   - `MONITOR_PROBE_TIMEOUT_SECONDS`
   - `MONITOR_SWEEP_INTERVAL_SECONDS`
   - `CMDB_DIFF_INTERVAL_SECONDS`
+  - `MONITOR_EVENT_RETENTION_DAYS`
+- 幂等 **DELETE** 已下线的 `HITL_NOTIFY_AUTO_APPROVE` 行（若存在）
 
 种子初始值取自运行 `init_db.py` 时进程解析到的 `Settings`（即当前 `.env`）。**已存在的行不会被覆盖**，因此 UI 修改后的值在重复执行 `init_db.py` 时保持不变。第二次运行应报告「运行配置种子：已齐全，跳过写入」。
 
@@ -122,7 +123,7 @@ uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_
 | --- | --- | --- |
 | `GET` | `/api/v1/system-config` | 读取脱敏后的有效配置 |
 | `PUT` | `/api/v1/system-config/llm` | 更新 8 项 LLM/Embedding 参数 |
-| `PUT` | `/api/v1/system-config/operations` | 更新 4 项 HITL/监控参数 |
+| `PUT` | `/api/v1/system-config/operations` | 更新 4 项监控/CMDB 运行参数 |
 
 **权限规则：**
 
@@ -139,7 +140,7 @@ uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_
 
 ---
 
-## 7. 四类运行时生效时机
+## 7. 三类运行时生效时机
 
 进程内**不做**配置缓存；每次消费点从数据库读取最新有效值。修改后**无需重启**进程，但也不强行中断正在执行的请求或 sleep。
 
@@ -147,8 +148,7 @@ uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_
 | --- | --- | --- |
 | LLM Chat | 根 Agent、子 Agent、`chat_turn` 流式对话 | **下一次** Chat 模型调用 |
 | LLM Embedding | 知识库文档入库、语义检索工具 | **下一次** Embedding 调用 |
-| HITL 运行参数 | `notify` 提案自动批准逻辑 | **下一次** HITL 提案创建时 |
-| 监控运行参数 | TCP 探活超时、monitor sweep 周期、CMDB diff 周期 | 探测超时：**下一轮** sweep；两个间隔：当前 sleep **结束后**下一轮重新读取 |
+| 监控运行参数 | TCP 探活超时、monitor sweep 周期、CMDB diff 周期、监控事件保留天数 | 探测超时与保留天数：**下一轮** sweep；两个间隔：当前 sleep **结束后**下一轮重新读取 |
 
 ---
 

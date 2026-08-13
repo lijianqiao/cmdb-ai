@@ -303,10 +303,10 @@ classDiagram
 
 | 工具                      | 参数                                              | 返回                                                                                                             | 副作用分级         |
 | :------------------------ | :------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------- | :----------------- |
-| `propose_remediation`     | `asset_id, action_type(notify), payload, reason`  | 创建 `HitlProposal`（`notify` 可自动批准并执行）；**不直接执行设备命令**                                         | 写（HITL 门控）    |
-| `query_device_command`    | `asset_id, command_name, reason`                  | 只读诊断命令：白名单+非动态凭据当场执行返回输出；否则 `PENDING` 待审批                                           | 读（经 HITL 门控） |
-| `propose_device_control`  | `asset_id, command_name, interface_name?, reason` | 变更类命令（`reboot`/`shutdown`/`port_enable`/`port_disable`）：白名单+非动态凭据当场执行；否则 `PENDING` 待审批 | 写（HITL 门控）    |
-| `list_device_commands`    | `asset_id`                                        | 该资产可用命令名、说明、白/黑名单策略与凭据前提（只读，无审批）                                                  | 读                 |
+| `propose_remediation`     | `asset_id, action_type(notify), payload, reason`  | 创建 `HitlProposal`；`assist`/`full` 档 `notify` 可自动批准并执行，默认 `ask` 档弹卡待审批；**不直接执行设备命令** | 写（HITL 门控）    |
+| `query_device_command`    | `asset_id, command_name, reason`                  | 只读诊断命令：按会话 `approval_mode` 判定——`assist`/`full` 且白名单+非动态凭据可当场返回输出；默认 `ask` 及未分类/动态凭据走 `PENDING` | 读（经 HITL 门控） |
+| `propose_device_control`  | `asset_id, command_name, interface_name?, reason` | 变更类命令（`reboot`/`shutdown`/`port_enable`/`port_disable`）：`assist`/`full` 且白名单+非动态凭据可当场执行；默认 `ask` 及未分类/动态凭据 `PENDING` 待审批 | 写（HITL 门控）    |
+| `list_device_commands`    | `asset_id`                                        | 该资产可用命令名、说明、白/黑名单策略与凭据前提（只读，无审批）；策略文案随当前会话 `approval_mode` 变化，避免模型误判自动执行范围 | 读                 |
 | `get_device_query_result` | `proposal_id`                                     | 按会话回查已提交的设备命令查询提案状态或执行结果（只读，无审批）                                                 | 读                 |
 
 **Spawn 原语类**（照抄 [guide.md 7.2](./guide.md#72-对照三家产品的工具面)）：
@@ -403,7 +403,7 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 | action_type      | 执行器                                                                                            | 当前状态                                                                                                                                                                                                                       |
 | :--------------- | :------------------------------------------------------------------------------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `notify`         | 写 `audit_logs` + 站内消息经 WebSocket 推给相关人                                                 | 已实现，无额外基建需求                                                                                                                                                                                                         |
-| `device_control` | Scrapli 执行通道（`send_interactive` / `send_configs`），复用 `device_query` 的命令目录与策略解析 | **已接入**：白名单+静态/无凭据当场执行，动态凭据强制人工审批，命令目录与 `device_query` 共用（见 [docs/superpowers/plans/2026-08-13-device-control-execution.md](./superpowers/plans/2026-08-13-device-control-execution.md)） |
+| `device_control` | Scrapli 执行通道（`send_interactive` / `send_configs`），复用 `device_query` 的命令目录与策略解析 | **已接入**：按会话 `AgentSession.approval_mode` 判定是否当场执行——默认 `ask` 白名单亦需人工审批；`assist`/`full` 可当场执行白名单+非动态凭据；`full` 另放开未分类非动态命令；黑名单不可绕过；动态凭据始终须人工批准并输入本次密码（见 [docs/superpowers/plans/2026-08-13-device-control-execution.md](./superpowers/plans/2026-08-13-device-control-execution.md)） |
 
 ### 7. 确定性管道
 
@@ -435,9 +435,10 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 
 **前端页面**：`OpsAssistantPage.tsx`，组件划分沿用现有 `frontend/src/components/{module}/` 惯例：
 
-- `ChatMessageList` / `ChatInput`：流式渲染（参考 shadcn AI Elements 风格组件）
+- `ChatMessageList` / `ChatInput`：流式渲染（参考 shadcn AI Elements 风格组件）；`ChatInput` 左侧提供审批档位选择器（请求审批 / 帮我审批 / 完全访问），选中会话后可随时改档
 - `HitlApprovalCard`：内嵌在消息流里，`PENDING` 提案渲染成"批准/拒绝"卡片
 - `KnowledgeUploadDialog`：权限门控，仅持有 `knowledge:upload` 的用户可见入口
+- 侧栏会话列表每条展示当前审批档位中文文案（与 `approval_mode` 对应）
 
 ### 9. 安全基线映射（L0–L6）
 
@@ -447,8 +448,8 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 | :------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | L1 能力最小化 | 除 `propose_remediation`、`propose_device_control` 外全部工具只读（`query_device_command` 为只读诊断，经策略门控但不改设备状态）；`kb_grep`/`kb_read` 路径必须落在 `knowledge/` 目录内，代码层做 realpath 前缀校验防目录穿越   |
 | L2 动作审查   | `propose_remediation.payload` 做 JSON Schema 校验，`action_type` 白名单枚举，不接受自由文本命令；`propose_device_control` 的 `command_name` 必须在设备命令目录内且通过参数校验（如 `interface_name` 约束），不接受自由文本 CLI |
-| L3 风险分级   | `notify` 默认可配置自动批准（低风险）；`device_control` 未分类或需动态凭据时强制 HITL；白名单+非动态凭据凭策略可当场执行，豁免人工审批                                                                                         |
-| L4 执行沙箱   | `device_control` 已接入真实执行通道：白名单+非动态凭据可当场执行；动态凭据强制人工审批；生产启用 `state_changing` 白名单前须在测试网段完成手工验证（见第 11 节 A6）                                                            |
+| L3 风险分级   | 审批模式在 `AgentSession.approval_mode`（默认 `ask`）；黑名单不可绕过；动态凭据始终要人输入本次密码；`full` 仅额外放开未分类非动态命令；`assist`/`full` 对白名单+非动态凭据可当场执行，`ask` 默认白名单亦须人工审批                                                                                         |
+| L4 执行沙箱   | `device_control` 已接入真实执行通道：当场执行范围跟会话档位走（见 L3）；动态凭据强制人工审批并输入本次密码；生产启用 `state_changing` 白名单前须在测试网段完成手工验证（见第 11 节 A6）                                                            |
 | L5 审计       | `AgentMessage`/`MonitorStatusEvent`/`HitlProposal`/`AuditLog` 全部 append-only                                                                                                                                                 |
 | L6 预算       | 见第 5 节 spawn 预算划拨 + 会话级 `max_total_cost_usd`                                                                                                                                                                         |
 
