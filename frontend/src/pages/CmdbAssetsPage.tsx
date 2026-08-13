@@ -94,6 +94,14 @@ export function CmdbAssetsPage() {
     setDeleteOpen(true)
   }
 
+  const handleCredentialDialogOpenChange = (open: boolean) => {
+    setCredentialDialogOpen(open)
+    if (!open) {
+      setRevealedPassword("")
+      setCredentialAsset(null)
+    }
+  }
+
   const handleViewCredential = async (asset: CmdbAsset) => {
     try {
       const password = await fetchCmdbAssetCredential(asset.id)
@@ -302,7 +310,7 @@ export function CmdbAssetsPage() {
       />
       <CmdbCredentialRevealDialog
         open={credentialDialogOpen}
-        onOpenChange={setCredentialDialogOpen}
+        onOpenChange={handleCredentialDialogOpenChange}
         password={revealedPassword}
         assetHostname={credentialAsset?.hostname}
       />

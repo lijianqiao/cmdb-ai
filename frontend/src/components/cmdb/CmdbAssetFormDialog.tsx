@@ -241,6 +241,13 @@ export function CmdbAssetFormDialog({
     asset?.credential_password_set &&
     hasPermission(PERMISSIONS.CMDB_CREDENTIAL_READ)
 
+  const handleCredentialDialogOpenChange = (open: boolean) => {
+    setCredentialDialogOpen(open)
+    if (!open) {
+      setRevealedPassword("")
+    }
+  }
+
   const handleViewCredential = async () => {
     if (!asset) return
     setCredentialLoading(true)
@@ -582,7 +589,7 @@ export function CmdbAssetFormDialog({
     </Dialog>
     <CmdbCredentialRevealDialog
       open={credentialDialogOpen}
-      onOpenChange={setCredentialDialogOpen}
+      onOpenChange={handleCredentialDialogOpenChange}
       password={revealedPassword}
       assetHostname={asset?.hostname}
     />

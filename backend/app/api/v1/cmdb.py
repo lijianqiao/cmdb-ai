@@ -35,8 +35,14 @@ from app.utils.audit import log_audit
 
 router = APIRouter()
 
-_CREDENTIAL_KEY_MISSING_DETAIL = (
+_CREDENTIAL_KEY_MISSING_SAVE_DETAIL = (
     "未配置 CMDB_CREDENTIAL_KEY，无法保存静态密码，请联系管理员配置"
+)
+_CREDENTIAL_KEY_MISSING_REVEAL_DETAIL = (
+    "未配置 CMDB_CREDENTIAL_KEY，无法查看静态密码。请在环境变量中配置后再试。"
+)
+_CREDENTIAL_DECRYPT_REVEAL_DETAIL = (
+    "静态密码解密失败，可能是密钥已轮换。请检查 CMDB_CREDENTIAL_KEY。"
 )
 
 
@@ -225,10 +231,15 @@ async def reveal_asset_credential(
 
     try:
         password = decrypt_credential_password(asset.credential_password_encrypted)
-    except (CmdbCredentialKeyMissingError, CmdbCredentialDecryptError) as exc:
+    except CmdbCredentialKeyMissingError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=_CREDENTIAL_KEY_MISSING_DETAIL,
+            detail=_CREDENTIAL_KEY_MISSING_REVEAL_DETAIL,
+        ) from exc
+    except CmdbCredentialDecryptError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_CREDENTIAL_DECRYPT_REVEAL_DETAIL,
         ) from exc
 
     await log_audit(
