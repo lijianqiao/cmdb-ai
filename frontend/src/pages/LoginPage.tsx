@@ -80,13 +80,13 @@ export function LoginPage() {
           <Shield02Icon className="mb-6 size-12" />
           <h1 className="text-3xl font-bold">运维管理系统</h1>
           <p className="mt-4 text-lg text-primary-foreground/80">
-            基于 AI 的运维管理系统
+            用 AI 助手查资产、探设备、审批变更命令
           </p>
           <div className="mt-8 flex flex-col gap-3 text-sm text-primary-foreground/70">
-            <p>• 用户、角色、权限全生命周期管理</p>
-            <p>• API 端点级别细粒度权限控制</p>
-            <p>• JWT 双 Token 安全认证机制</p>
-            <p>• 响应式布局，支持移动端访问</p>
+            <p>• 运维助手：自然语言排查与变更审批</p>
+            <p>• CMDB：统一管理设备资产与登录凭据</p>
+            <p>• 监控探活：按巡检间隔跟踪在线状态与延迟</p>
+            <p>• 设备命令策略：白名单约束高风险操作</p>
           </div>
         </div>
       </div>
@@ -97,7 +97,7 @@ export function LoginPage() {
           <CardHeader>
             <div className="mb-2 flex items-center gap-2 md:hidden">
               <Shield02Icon className="size-6 text-primary" />
-              <span className="text-lg font-semibold">权限管理系统</span>
+              <span className="text-lg font-semibold">运维管理系统</span>
             </div>
             <CardTitle className="text-2xl">登录</CardTitle>
             <CardDescription>请输入您的账号和密码</CardDescription>

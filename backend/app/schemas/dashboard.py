@@ -14,6 +14,11 @@ class DashboardStats(ApiModel):
     role_count: int = Field(default=0, description="角色总数")
     permission_count: int = Field(default=0, description="权限总数")
     active_user_count: int = Field(default=0, description="启用用户数")
+    cmdb_asset_count: int = Field(default=0, description="CMDB 资产数")
+    monitor_target_count: int = Field(default=0, description="监控目标数")
+    monitor_down_count: int = Field(default=0, description="最近探测为离线的目标数")
+    pending_hitl_count: int = Field(default=0, description="待审批 HITL 提案数")
+    device_command_policy_count: int = Field(default=0, description="设备命令策略数")
 
 
 class RecentLoginItem(ApiModel):

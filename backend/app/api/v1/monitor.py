@@ -20,10 +20,12 @@ from app.models.user import User
 from app.schemas.common import PaginatedData, ResponseEnvelope, paginated_response, success_response
 from app.schemas.monitor import (
     MonitorLatestStatus,
+    MonitorRuntimeResponse,
     MonitorTargetCreate,
     MonitorTargetResponse,
     MonitorTargetUpdate,
 )
+from app.services.system_config import get_effective_operations_config
 from app.utils.audit import log_audit
 
 router = APIRouter()
@@ -105,6 +107,20 @@ def _target_label(target: MonitorTarget) -> str:
     """审计详情用的短标签。"""
     name = target.label.strip() or target.ip_address
     return f"{name}:{target.port}"
+
+
+@router.get("/runtime", response_model=ResponseEnvelope[MonitorRuntimeResponse])
+async def get_monitor_runtime(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("monitor:read")),
+) -> ResponseEnvelope[MonitorRuntimeResponse]:
+    """返回当前生效的全局巡检间隔，供管理页轮询状态。"""
+    operations = await get_effective_operations_config(db)
+    return success_response(
+        MonitorRuntimeResponse(
+            sweep_interval_seconds=int(operations.monitor_sweep_interval_seconds)
+        )
+    )
 
 
 @router.get("/targets", response_model=ResponseEnvelope[PaginatedData[MonitorTargetResponse]])

@@ -3,8 +3,8 @@
  * DataTable + 搜索/资产类型筛选 + 新增/编辑/删除/回收站，结构照抄 UsersPage.tsx。
  */
 
-import { useMemo, useState } from "react"
-import { Link } from "react-router"
+import { useEffect, useMemo, useState } from "react"
+import { Link, useSearchParams } from "react-router"
 import type { ColumnDef } from "@tanstack/react-table"
 import dayjs from "dayjs"
 import { toast } from "sonner"
@@ -39,6 +39,7 @@ import type { CmdbAsset, CmdbAssetCreate, CmdbAssetUpdate } from "@/types/cmdb"
 
 export function CmdbAssetsPage() {
   const { hasPermission } = usePermission()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [search, setSearch] = useState("")
 
   const {
@@ -65,6 +66,19 @@ export function CmdbAssetsPage() {
     setEditingAsset(null)
     setFormOpen(true)
   }
+
+  useEffect(() => {
+    if (
+      searchParams.get("create") === "1" &&
+      hasPermission(PERMISSIONS.CMDB_MANAGE)
+    ) {
+      setEditingAsset(null)
+      setFormOpen(true)
+      const next = new URLSearchParams(searchParams)
+      next.delete("create")
+      setSearchParams(next, { replace: true })
+    }
+  }, [searchParams, setSearchParams, hasPermission])
 
   const handleEdit = (asset: CmdbAsset) => {
     setEditingAsset(asset)

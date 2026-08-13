@@ -20,7 +20,7 @@ export const monitorTargetFormSchema = z.object({
     .string()
     .refine(
       (value) => value === "" || /^\d+$/.test(value),
-      "CMDB 资产 ID 必须是正整数",
+      "请选择有效的 CMDB 资产",
     ),
 })
 

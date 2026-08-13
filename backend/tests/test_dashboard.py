@@ -27,6 +27,12 @@ async def test_dashboard_with_audit_permission(
     payload = response.json()["data"]
     assert "stats" in payload
     assert "recent_logs" in payload
+    stats = payload["stats"]
+    assert "cmdb_asset_count" in stats
+    assert "monitor_target_count" in stats
+    assert "monitor_down_count" in stats
+    assert "pending_hitl_count" in stats
+    assert "device_command_policy_count" in stats
 
 
 async def test_dashboard_without_audit_permission_hides_recent_logs(

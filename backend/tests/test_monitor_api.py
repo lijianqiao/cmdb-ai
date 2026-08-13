@@ -166,9 +166,21 @@ async def test_monitor_endpoints_require_permission(
     list_resp = await client.get("/api/v1/monitor/targets", headers=auth_headers)
     assert list_resp.status_code == 403
 
+    runtime_resp = await client.get("/api/v1/monitor/runtime", headers=auth_headers)
+    assert runtime_resp.status_code == 403
+
     create_resp = await client.post(
         "/api/v1/monitor/targets",
         json={"ip_address": "10.0.0.5", "port": 22},
         headers=auth_headers,
     )
     assert create_resp.status_code == 403
+
+
+async def test_monitor_runtime_returns_sweep_interval(
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+) -> None:
+    await _grant_monitor_permissions(db_session, test_user)
+    response = await client.get("/api/v1/monitor/runtime", headers=auth_headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["sweep_interval_seconds"] >= 5

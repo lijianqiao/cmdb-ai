@@ -62,3 +62,9 @@ class MonitorTargetResponse(ApiModel):
     latest_checked_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class MonitorRuntimeResponse(ApiModel):
+    """监控页轮询所需的运行参数。"""
+
+    sweep_interval_seconds: int

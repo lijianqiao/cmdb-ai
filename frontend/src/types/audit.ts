@@ -26,6 +26,11 @@ export interface DashboardStats {
   role_count: number
   permission_count: number
   active_user_count: number
+  cmdb_asset_count: number
+  monitor_target_count: number
+  monitor_down_count: number
+  pending_hitl_count: number
+  device_command_policy_count: number
 }
 
 /** 最近登录记录 */

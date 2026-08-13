@@ -2,6 +2,11 @@
 
 export type MonitorLatestStatus = "up" | "down"
 
+/** 监控页轮询间隔（来自系统配置中的全局巡检间隔） */
+export interface MonitorRuntime {
+  sweep_interval_seconds: number
+}
+
 /** 监控目标（列表/详情响应，附带最近一次探测结果） */
 export interface MonitorTarget {
   id: number

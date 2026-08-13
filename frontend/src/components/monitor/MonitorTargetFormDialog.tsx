@@ -17,11 +17,13 @@ import {
   Field,
   FieldDescription,
   FieldError,
+  FieldGroup,
   FieldLabel,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
+import { CmdbAssetPicker } from "@/components/cmdb/CmdbAssetPicker"
 import type {
   MonitorTarget,
   MonitorTargetCreate,
@@ -103,7 +105,7 @@ export function MonitorTargetFormDialog({
           onSubmit={form.handleSubmit(handleSubmit)}
         >
           <div className="min-h-0 flex-1 overflow-y-auto px-6 py-2">
-            <div className="grid gap-4 sm:grid-cols-2">
+            <FieldGroup>
               <Controller
                 control={form.control}
                 name="ip_address"
@@ -142,7 +144,7 @@ export function MonitorTargetFormDialog({
                 control={form.control}
                 name="label"
                 render={({ field, fieldState }) => (
-                  <Field className="sm:col-span-2" data-invalid={fieldState.invalid}>
+                  <Field data-invalid={fieldState.invalid}>
                     <FieldLabel htmlFor="monitor-label">标签</FieldLabel>
                     <Input
                       id="monitor-label"
@@ -183,17 +185,19 @@ export function MonitorTargetFormDialog({
                 render={({ field, fieldState }) => (
                   <Field data-invalid={fieldState.invalid}>
                     <FieldLabel htmlFor="monitor-cmdb-asset">
-                      关联 CMDB 资产 ID
+                      关联 CMDB 资产
                     </FieldLabel>
-                    <Input
+                    <CmdbAssetPicker
                       id="monitor-cmdb-asset"
-                      inputMode="numeric"
-                      placeholder="可选"
-                      aria-invalid={fieldState.invalid}
-                      {...field}
+                      value={field.value ? Number(field.value) : null}
+                      onChange={(assetId) =>
+                        field.onChange(assetId ? String(assetId) : "")
+                      }
+                      allowClear
+                      invalid={fieldState.invalid}
                     />
                     <FieldDescription>
-                      可留空，用于尚未入库的临时探测地址。
+                      搜索主机名或 IP 后选择；可留空，用于尚未入库的临时探测地址。
                     </FieldDescription>
                     <FieldError errors={[fieldState.error]} />
                   </Field>
@@ -203,7 +207,7 @@ export function MonitorTargetFormDialog({
                 control={form.control}
                 name="is_active"
                 render={({ field }) => (
-                  <Field className="sm:col-span-2">
+                  <Field>
                     <div className="flex items-center justify-between gap-4">
                       <FieldLabel htmlFor="monitor-is-active">启用探测</FieldLabel>
                       <Switch
@@ -219,7 +223,7 @@ export function MonitorTargetFormDialog({
                   </Field>
                 )}
               />
-            </div>
+            </FieldGroup>
           </div>
           <DialogFooter className="shrink-0 border-t px-6 py-4">
             <Button

@@ -10,6 +10,7 @@ import { Controller, useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
 
+import { CmdbAssetPicker } from "@/components/cmdb/CmdbAssetPicker"
 import { Alert02Icon } from "@/lib/icons"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -97,7 +98,7 @@ const createSchema = z
     } else if (!data.asset_id || !/^\d+$/.test(data.asset_id)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "请输入有效的资产 ID",
+        message: "请选择 CMDB 资产",
         path: ["asset_id"],
       })
     }
@@ -232,7 +233,16 @@ export function DeviceCommandPolicyFormDialog({
             <FieldGroup>
               <Field>
                 <FieldLabel>目标</FieldLabel>
-                <Input value={formatPolicyTarget(policy)} disabled />
+                {policy.scope === "asset" && policy.asset_id != null ? (
+                  <CmdbAssetPicker
+                    value={policy.asset_id}
+                    onChange={() => undefined}
+                    allowClear={false}
+                    disabled
+                  />
+                ) : (
+                  <Input value={formatPolicyTarget(policy)} disabled />
+                )}
               </Field>
               <Field>
                 <FieldLabel>命令名</FieldLabel>
@@ -398,17 +408,18 @@ export function DeviceCommandPolicyFormDialog({
                   name="asset_id"
                   render={({ field, fieldState }) => (
                     <Field data-invalid={fieldState.invalid}>
-                      <FieldLabel htmlFor="policy-asset-id">资产 ID</FieldLabel>
-                      <Input
+                      <FieldLabel htmlFor="policy-asset-id">关联资产</FieldLabel>
+                      <CmdbAssetPicker
                         id="policy-asset-id"
-                        type="number"
-                        min={1}
-                        placeholder="输入 CMDB 资产 ID"
-                        aria-invalid={fieldState.invalid}
-                        {...field}
+                        value={field.value ? Number(field.value) : null}
+                        onChange={(assetId) =>
+                          field.onChange(assetId ? String(assetId) : "")
+                        }
+                        allowClear={false}
+                        invalid={fieldState.invalid}
                       />
                       <FieldDescription>
-                        v1 暂不支持资产搜索选择器，请直接输入资产 ID。
+                        搜索主机名或 IP，选择后会显示资产 ID 和设备名称。
                       </FieldDescription>
                       <FieldError errors={[fieldState.error]} />
                     </Field>

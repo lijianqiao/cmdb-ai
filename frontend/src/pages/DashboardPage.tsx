@@ -1,6 +1,6 @@
 /** 仪表盘页
-
- * 统计卡片 + 最近操作日志 + 快捷操作。
+ *
+ * 运维指标卡片优先：资产、监控、离线、待审批；账号权限指标放第二行。
  */
 
 import { useEffect, useState } from "react"
@@ -9,12 +9,17 @@ import dayjs from "dayjs"
 import { toast } from "sonner"
 
 import {
-  UserMultipleIcon,
-  Shield02Icon,
-  Key02Icon,
-  UserCheck02Icon,
+  Alert02Icon,
+  AiChat01Icon,
+  Database02Icon,
+  FileEditIcon,
   PlusSignIcon,
+  Server02Icon,
+  Shield02Icon,
+  UserCheck02Icon,
+  UserMultipleIcon,
 } from "@/lib/icons"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -34,11 +39,56 @@ import {
 } from "@/components/ui/table"
 import { PageHeader } from "@/components/layout/PageHeader"
 import api from "@/lib/api"
-import { ROUTES } from "@/lib/constants"
+import { usePermission } from "@/hooks/use-permission"
+import { PERMISSIONS, ROUTES } from "@/lib/constants"
 import type { DashboardData } from "@/types/audit"
+
+interface StatCardItem {
+  label: string
+  value: number | undefined
+  icon: typeof Database02Icon
+}
+
+function StatCards({
+  items,
+  isLoading,
+  loadError,
+}: {
+  items: StatCardItem[]
+  isLoading: boolean
+  loadError: boolean
+}) {
+  return (
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+      {items.map((stat) => {
+        const Icon = stat.icon
+        return (
+          <Card key={stat.label}>
+            <CardHeader className="flex flex-row items-center gap-4">
+              <div className="flex size-12 items-center justify-center rounded-lg bg-muted text-muted-foreground [&_svg]:size-6">
+                <Icon />
+              </div>
+              <div className="min-w-0">
+                {isLoading ? (
+                  <Skeleton className="h-8 w-16" />
+                ) : loadError ? (
+                  <CardTitle>—</CardTitle>
+                ) : (
+                  <CardTitle>{stat.value ?? 0}</CardTitle>
+                )}
+                <CardDescription>{stat.label}</CardDescription>
+              </div>
+            </CardHeader>
+          </Card>
+        )
+      })}
+    </div>
+  )
+}
 
 export function DashboardPage() {
   const navigate = useNavigate()
+  const { hasPermission } = usePermission()
   const [data, setData] = useState<DashboardData | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
@@ -61,7 +111,35 @@ export function DashboardPage() {
     void fetchData()
   }, [])
 
-  const stats = [
+  const opsStats: StatCardItem[] = [
+    {
+      label: "CMDB 资产",
+      value: data?.stats.cmdb_asset_count,
+      icon: Database02Icon,
+    },
+    {
+      label: "监控目标",
+      value: data?.stats.monitor_target_count,
+      icon: Server02Icon,
+    },
+    {
+      label: "离线目标",
+      value: data?.stats.monitor_down_count,
+      icon: Alert02Icon,
+    },
+    {
+      label: "待审批变更",
+      value: data?.stats.pending_hitl_count,
+      icon: AiChat01Icon,
+    },
+  ]
+
+  const adminStats: StatCardItem[] = [
+    {
+      label: "设备命令策略",
+      value: data?.stats.device_command_policy_count,
+      icon: FileEditIcon,
+    },
     {
       label: "用户总数",
       value: data?.stats.user_count,
@@ -73,11 +151,6 @@ export function DashboardPage() {
       icon: Shield02Icon,
     },
     {
-      label: "权限总数",
-      value: data?.stats.permission_count,
-      icon: Key02Icon,
-    },
-    {
       label: "启用用户",
       value: data?.stats.active_user_count,
       icon: UserCheck02Icon,
@@ -86,37 +159,28 @@ export function DashboardPage() {
 
   return (
     <div>
-      <PageHeader title="仪表盘" description="系统运行概览" />
+      <PageHeader
+        title="仪表盘"
+        description="运维运行概览：资产、监控探活、待审批变更与命令策略"
+      />
 
       {loadError && !isLoading && (
-        <div className="mb-4 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-          仪表盘数据加载失败，请刷新页面重试。
-        </div>
+        <Alert variant="destructive" className="mb-4">
+          <Alert02Icon />
+          <AlertTitle>加载失败</AlertTitle>
+          <AlertDescription>
+            仪表盘数据加载失败，请刷新页面重试。
+          </AlertDescription>
+        </Alert>
       )}
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-        {stats.map((stat) => {
-          const Icon = stat.icon
-          return (
-            <Card key={stat.label}>
-              <CardContent className="flex items-center gap-4">
-                <div className="flex size-12 items-center justify-center rounded-lg bg-muted text-muted-foreground [&_svg]:size-6">
-                  <Icon />
-                </div>
-                <div>
-                  {isLoading ? (
-                    <Skeleton className="h-8 w-16" />
-                  ) : loadError ? (
-                    <p className="text-2xl font-bold text-muted-foreground">—</p>
-                  ) : (
-                    <p className="text-2xl font-bold">{stat.value ?? 0}</p>
-                  )}
-                  <p className="text-sm text-muted-foreground">{stat.label}</p>
-                </div>
-              </CardContent>
-            </Card>
-          )
-        })}
+      <StatCards items={opsStats} isLoading={isLoading} loadError={loadError} />
+      <div className="mt-4">
+        <StatCards
+          items={adminStats}
+          isLoading={isLoading}
+          loadError={loadError}
+        />
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -183,33 +247,48 @@ export function DashboardPage() {
         <Card>
           <CardHeader>
             <CardTitle className="text-lg">快捷操作</CardTitle>
-            <CardDescription>常用管理功能入口</CardDescription>
+            <CardDescription>常用运维入口</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-wrap gap-3">
             <Button
-              onClick={() => navigate(`${ROUTES.USERS}?create=1`)}
+              onClick={() => navigate(ROUTES.OPS_ASSISTANT)}
               variant="outline"
             >
-              <PlusSignIcon data-icon="inline-start" />
-              新增用户
+              <AiChat01Icon data-icon="inline-start" />
+              运维助手
             </Button>
-            <Button
-              onClick={() => navigate(`${ROUTES.ROLES}?create=1`)}
-              variant="outline"
-            >
-              <PlusSignIcon data-icon="inline-start" />
-              新增角色
-            </Button>
-            <Button
-              onClick={() => navigate(`${ROUTES.PERMISSIONS}?create=1`)}
-              variant="outline"
-            >
-              <PlusSignIcon data-icon="inline-start" />
-              新增权限
-            </Button>
-            <Button onClick={() => navigate(ROUTES.AUDIT)} variant="outline">
-              查看日志
-            </Button>
+            {hasPermission(PERMISSIONS.CMDB_MANAGE) && (
+              <Button
+                onClick={() => navigate(`${ROUTES.CMDB}?create=1`)}
+                variant="outline"
+              >
+                <PlusSignIcon data-icon="inline-start" />
+                新增资产
+              </Button>
+            )}
+            {hasPermission(PERMISSIONS.MONITOR_MANAGE) && (
+              <Button
+                onClick={() => navigate(`${ROUTES.MONITOR_TARGETS}?create=1`)}
+                variant="outline"
+              >
+                <PlusSignIcon data-icon="inline-start" />
+                新增监控
+              </Button>
+            )}
+            {hasPermission(PERMISSIONS.DEVICE_COMMAND_POLICY_READ) && (
+              <Button
+                onClick={() => navigate(ROUTES.DEVICE_COMMAND_POLICIES)}
+                variant="outline"
+              >
+                <FileEditIcon data-icon="inline-start" />
+                设备命令策略
+              </Button>
+            )}
+            {hasPermission(PERMISSIONS.AUDIT_READ) && (
+              <Button onClick={() => navigate(ROUTES.AUDIT)} variant="outline">
+                查看日志
+              </Button>
+            )}
           </CardContent>
         </Card>
       </div>
