@@ -1,20 +1,24 @@
 """CRUD operations for HITL (human-in-the-loop) approval proposals.
 
-State machine (docs/guide.md §5.3): PENDING -[approve]-> APPROVED -[resume]->
-EXECUTED (exactly once); PENDING -[reject]-> REJECTED. Only PENDING may be
-decided; only APPROVED may become EXECUTED.
+State machine (docs/guide.md §5.3): PENDING -[approve]-> APPROVED -[claim]->
+EXECUTING -[success]-> EXECUTED; PENDING -[reject]-> REJECTED; APPROVED
+-[policy]-> REJECTED; EXECUTING -[uncertain]-> UNKNOWN; UNKNOWN -[manual]->
+EXECUTED or APPROVED.
 """
 
 import asyncio
 from datetime import UTC, datetime
+from typing import Literal
 from weakref import WeakValueDictionary
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.hitl_proposal import HitlProposal
 
 _DECISION_LOCKS: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
+
+_UNKNOWN_REASON_CODES = frozenset({"dispatch_outcome_unknown"})
 
 
 def _decision_lock(proposal_id: int) -> asyncio.Lock:
@@ -116,18 +120,160 @@ class CRUDHitlProposal:
             await db.flush()
             return proposal
 
-    async def mark_executed(self, db: AsyncSession, proposal_id: int) -> HitlProposal:
-        """Move an APPROVED proposal to EXECUTED exactly once."""
-        proposal = await self.get(db, proposal_id)
-        if proposal is None:
-            raise ValueError(f"HITL proposal {proposal_id} not found")
-        if proposal.status != "APPROVED":
-            raise InvalidHitlTransitionError(proposal.status, "EXECUTED")
-
-        proposal.status = "EXECUTED"
-        proposal.executed_at = datetime.now(UTC)
+    async def claim_execution(self, db: AsyncSession, proposal_id: int) -> HitlProposal:
+        """原子认领 APPROVED 提案，转为 EXECUTING 并记录 execution_started_at。"""
+        now = datetime.now(UTC)
+        stmt = (
+            update(HitlProposal)
+            .where(HitlProposal.id == proposal_id, HitlProposal.status == "APPROVED")
+            .values(
+                status="EXECUTING",
+                execution_started_at=now,
+                status_reason=None,
+            )
+            .returning(HitlProposal)
+        )
+        claimed = (await db.execute(stmt)).scalar_one_or_none()
+        if claimed is None:
+            current = await self.get(db, proposal_id)
+            if current is None:
+                raise ValueError(f"HITL proposal {proposal_id} not found")
+            raise InvalidHitlTransitionError(current.status, "EXECUTING")
         await db.flush()
-        return proposal
+        return claimed
+
+    async def reject_for_policy(self, db: AsyncSession, proposal_id: int) -> HitlProposal:
+        """策略复检拒绝：将 APPROVED 提案转为 REJECTED(policy_blacklisted)。"""
+        stmt = (
+            update(HitlProposal)
+            .where(HitlProposal.id == proposal_id, HitlProposal.status == "APPROVED")
+            .values(
+                status="REJECTED",
+                status_reason="policy_blacklisted",
+            )
+            .returning(HitlProposal)
+        )
+        rejected = (await db.execute(stmt)).scalar_one_or_none()
+        if rejected is None:
+            current = await self.get(db, proposal_id)
+            if current is None:
+                raise ValueError(f"HITL proposal {proposal_id} not found")
+            raise InvalidHitlTransitionError(current.status, "REJECTED")
+        await db.flush()
+        return rejected
+
+    async def mark_unknown(
+        self,
+        db: AsyncSession,
+        proposal_id: int,
+        *,
+        reason: str,
+    ) -> HitlProposal:
+        """将 EXECUTING 提案标记为 UNKNOWN，原因仅允许固定安全代码。"""
+        if reason not in _UNKNOWN_REASON_CODES:
+            raise ValueError(f"unsupported HITL unknown reason code: {reason!r}")
+
+        stmt = (
+            update(HitlProposal)
+            .where(HitlProposal.id == proposal_id, HitlProposal.status == "EXECUTING")
+            .values(
+                status="UNKNOWN",
+                status_reason=reason,
+            )
+            .returning(HitlProposal)
+        )
+        unknown = (await db.execute(stmt)).scalar_one_or_none()
+        if unknown is None:
+            current = await self.get(db, proposal_id)
+            if current is None:
+                raise ValueError(f"HITL proposal {proposal_id} not found")
+            raise InvalidHitlTransitionError(current.status, "UNKNOWN")
+        await db.flush()
+        return unknown
+
+    async def resolve_unknown(
+        self,
+        db: AsyncSession,
+        proposal_id: int,
+        *,
+        resolution: Literal["confirm_executed", "allow_retry"],
+        resolved_by_user_id: int,
+    ) -> HitlProposal:
+        """人工处置 UNKNOWN：确认已执行或允许重试。"""
+        now = datetime.now(UTC)
+        if resolution == "confirm_executed":
+            stmt = (
+                update(HitlProposal)
+                .where(HitlProposal.id == proposal_id, HitlProposal.status == "UNKNOWN")
+                .values(
+                    status="EXECUTED",
+                    status_reason="manual_confirmed",
+                    executed_at=now,
+                    resolved_by_user_id=resolved_by_user_id,
+                    resolved_at=now,
+                )
+                .returning(HitlProposal)
+            )
+            target = "EXECUTED"
+        else:
+            stmt = (
+                update(HitlProposal)
+                .where(HitlProposal.id == proposal_id, HitlProposal.status == "UNKNOWN")
+                .values(
+                    status="APPROVED",
+                    status_reason="retry_authorized",
+                    execution_started_at=None,
+                    resolved_by_user_id=resolved_by_user_id,
+                    resolved_at=now,
+                )
+                .returning(HitlProposal)
+            )
+            target = "APPROVED"
+
+        resolved = (await db.execute(stmt)).scalar_one_or_none()
+        if resolved is None:
+            current = await self.get(db, proposal_id)
+            if current is None:
+                raise ValueError(f"HITL proposal {proposal_id} not found")
+            raise InvalidHitlTransitionError(current.status, target)
+        await db.flush()
+        return resolved
+
+    async def recover_executing(self, db: AsyncSession) -> int:
+        """启动恢复：将所有 EXECUTING 提案转为 UNKNOWN，禁止崩溃后自动重试。"""
+        stmt = (
+            update(HitlProposal)
+            .where(HitlProposal.status == "EXECUTING")
+            .values(
+                status="UNKNOWN",
+                status_reason="dispatch_outcome_unknown",
+            )
+        )
+        result = await db.execute(stmt)
+        await db.flush()
+        return result.rowcount
+
+    async def mark_executed(self, db: AsyncSession, proposal_id: int) -> HitlProposal:
+        """将 EXECUTING 提案转为 EXECUTED，仅允许从 EXECUTING 进入。"""
+        now = datetime.now(UTC)
+        stmt = (
+            update(HitlProposal)
+            .where(HitlProposal.id == proposal_id, HitlProposal.status == "EXECUTING")
+            .values(
+                status="EXECUTED",
+                status_reason="executor_succeeded",
+                executed_at=now,
+            )
+            .returning(HitlProposal)
+        )
+        executed = (await db.execute(stmt)).scalar_one_or_none()
+        if executed is None:
+            current = await self.get(db, proposal_id)
+            if current is None:
+                raise ValueError(f"HITL proposal {proposal_id} not found")
+            raise InvalidHitlTransitionError(current.status, "EXECUTED")
+        await db.flush()
+        return executed
 
 
 hitl_proposal_crud = CRUDHitlProposal()
