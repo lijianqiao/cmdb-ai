@@ -569,6 +569,36 @@ async def test_loop_does_not_execute_tool_calls_after_cost_budget_is_crossed(
     assert dispatched is False
 
 
+async def test_loop_returns_llm_error_without_dispatching_or_final_answer(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    await append_user_message(db_session, session_id, "查一下")
+    await db_session.commit()
+
+    async def fake_chat(model_key: str, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        return ChatResult(
+            content="模型调用失败：HTTP 502",
+            tool_calls=[],
+            finish_reason="error",
+            prompt_tokens=0,
+            completion_tokens=0,
+        )
+
+    outcome = await run_loop(
+        db_session,
+        session_id=session_id,
+        model_key="local-chat",
+        dispatch_tool=_never_called_dispatch,
+        chat_fn=fake_chat,
+    )
+    await db_session.commit()
+
+    assert outcome == LoopOutcome(reason="llm_error", final_answer=None)
+    history = await build_model_history(db_session, session_id)
+    assert [m.role for m in history] == ["user"]
+
+
 async def test_run_loop_injected_chat_fn_does_not_receive_db(
     db_session: AsyncSession, test_user: User
 ) -> None:

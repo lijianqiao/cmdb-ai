@@ -45,7 +45,7 @@ type ChatFn = Callable[..., Awaitable[ChatResult]]
 class LoopOutcome:
     """Why the loop stopped, and its final text if it produced one."""
 
-    reason: Literal["final_answer", "budget_exceeded", "early_exit"]
+    reason: Literal["final_answer", "budget_exceeded", "early_exit", "llm_error"]
     final_answer: str | None
     control: ToolControl | None = None
 
@@ -92,6 +92,9 @@ async def run_loop(
             if chat_fn is chat
             else await chat_fn(model_key, history, tools=tools)
         )
+
+        if result.finish_reason == "error":
+            return LoopOutcome(reason="llm_error", final_answer=None)
 
         cost_exceeded = False
         try:

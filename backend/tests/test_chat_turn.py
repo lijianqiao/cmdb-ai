@@ -276,6 +276,50 @@ async def test_chat_turn_pending_approval_emits_hitl_pending_without_secrets(
     assert turn_done["control"] == "pending_approval"
 
 
+async def test_chat_turn_llm_error_broadcasts_error_then_turn_done(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """run_loop 返回 llm_error 时推送 error 再 turn_done，不抛异常。"""
+    from unittest.mock import AsyncMock, patch
+
+    from app.agent.chat_turn import run_chat_turn
+    from app.agent.loop import LoopOutcome
+
+    session_id = await _make_session(db_session, test_user.id)
+    test_hub = AgentWsHub()
+    ws = FakeWebSocket()
+    await test_hub.connect(session_id, ws)  # type: ignore[arg-type]
+
+    with patch(
+        "app.agent.chat_turn.run_loop",
+        new_callable=AsyncMock,
+        return_value=LoopOutcome(reason="llm_error", final_answer=None),
+    ):
+        outcome = await run_chat_turn(
+            db_session,
+            session_id=session_id,
+            actor_user_id=test_user.id,
+            content="会失败的问题",
+            hub_instance=test_hub,
+        )
+
+    await db_session.commit()
+
+    assert outcome.reason == "llm_error"
+    assert outcome.final_answer is None
+
+    types = _event_types(ws)
+    assert "error" in types
+    assert types[-1] == "turn_done"
+
+    err = next(item for item in ws.sent if item["type"] == "error")
+    assert err["payload"]["message"] == "模型调用失败，请稍后重试"
+
+    turn_done = ws.sent[-1]["payload"]
+    assert turn_done["reason"] == "llm_error"
+
+
 async def test_chat_turn_error_broadcasts_chinese_message_and_keeps_user_message(
     db_session: AsyncSession,
     test_user: User,

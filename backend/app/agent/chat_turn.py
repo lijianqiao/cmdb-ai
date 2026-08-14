@@ -198,6 +198,15 @@ async def run_chat_turn(
         )
         raise
 
+    if outcome.reason == "llm_error":
+        await active_hub.broadcast(
+            session_id,
+            AgentWsServerMessage(
+                type="error",
+                payload={"message": "模型调用失败，请稍后重试"},
+            ),
+        )
+
     await active_hub.broadcast(
         session_id,
         AgentWsServerMessage(
