@@ -7,15 +7,17 @@
 """
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.agent.executors import ExecutionResult
-from app.agent.hitl import HitlResumeError
-from app.agent.hitl_execution import execute_approved_proposal
+from app.agent.hitl import HitlResumeError, ProposalSafeSummary
+from app.agent.hitl_execution import _preflight_and_claim, execute_approved_proposal
 from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
-from app.crud.hitl_proposal import hitl_proposal_crud
+from app.crud.hitl_proposal import InvalidHitlTransitionError, hitl_proposal_crud
+from app.models.audit_log import AuditLog
 from app.models.cmdb_asset import CmdbAsset
 from app.models.hitl_proposal import HitlProposal
 from app.models.user import User
@@ -263,3 +265,111 @@ async def test_executor_timeout_marks_unknown_and_blocks_retry(
             actor_user_id=user_id,
             notify_executor=TimeoutExecutor(),
         )
+
+
+async def test_unknown_execution_writes_audit(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """UNKNOWN 路径应写入审计，风格与成功路径一致。"""
+    proposal = await _approved_notify_proposal(db_session, test_user)
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    proposal_id = proposal.id
+
+    class TimeoutExecutor:
+        async def execute(self, db, *, proposal_id, payload, actor_user_id):
+            raise TimeoutError("simulated device timeout")
+
+    await execute_approved_proposal(
+        session_factory=session_factory,
+        proposal_id=proposal_id,
+        actor_user_id=test_user.id,
+        notify_executor=TimeoutExecutor(),
+    )
+
+    db_session.expire_all()
+    rows = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.target == f"hitl_proposal:{proposal_id}")
+        )
+    ).scalars().all()
+    actions = {row.action for row in rows}
+    assert "hitl_execution_unknown" in actions
+    unknown_row = next(row for row in rows if row.action == "hitl_execution_unknown")
+    assert unknown_row.detail == "动作类型：notify"
+    assert "TimeoutError" not in unknown_row.detail
+    assert "password" not in unknown_row.detail.lower()
+
+
+async def test_claim_loser_refreshes_executed_without_crash(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """并发认领失败时应刷新状态，EXECUTED 直接返回摘要而非崩溃。"""
+    proposal = await _approved_notify_proposal(db_session, test_user)
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    proposal_id = proposal.id
+    original_claim = hitl_proposal_crud.claim_execution
+
+    async def losing_claim(db: AsyncSession, pid: int) -> HitlProposal:
+        async with session_factory() as setup_db:
+            await original_claim(setup_db, pid)
+            await hitl_proposal_crud.mark_executed(setup_db, pid)
+            await setup_db.commit()
+        raise InvalidHitlTransitionError("EXECUTING", "EXECUTING")
+
+    monkeypatch.setattr(hitl_proposal_crud, "claim_execution", losing_claim)
+
+    result = await _preflight_and_claim(
+        session_factory=session_factory,
+        proposal_id=proposal_id,
+        dynamic_password=None,
+        publisher=None,
+    )
+
+    assert isinstance(result, ProposalSafeSummary)
+    assert result.status == "EXECUTED"
+
+
+async def test_claim_loser_polls_executing_until_done(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """认领失败且状态为 EXECUTING 时应轮询等待，不得标记 UNKNOWN。"""
+    import asyncio
+
+    proposal = await _approved_notify_proposal(db_session, test_user)
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    proposal_id = proposal.id
+
+    async with session_factory() as db:
+        await hitl_proposal_crud.claim_execution(db, proposal_id)
+        await db.commit()
+
+    async def finish_execution() -> None:
+        await asyncio.sleep(0.15)
+        async with session_factory() as finish_db:
+            await hitl_proposal_crud.mark_executed(finish_db, proposal_id)
+            await finish_db.commit()
+
+    finish_task = asyncio.create_task(finish_execution())
+
+    result = await _preflight_and_claim(
+        session_factory=session_factory,
+        proposal_id=proposal_id,
+        dynamic_password=None,
+        publisher=None,
+    )
+    await finish_task
+
+    assert isinstance(result, ProposalSafeSummary)
+    assert result.status == "EXECUTED"
+    db_session.expire_all()
+    persisted = await hitl_proposal_crud.get(db_session, proposal_id)
+    assert persisted is not None
+    assert persisted.status == "EXECUTED"
+    assert persisted.status != "UNKNOWN"

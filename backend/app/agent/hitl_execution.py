@@ -39,7 +39,7 @@ from app.agent.hitl import (
 )
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
-from app.crud.hitl_proposal import hitl_proposal_crud
+from app.crud.hitl_proposal import hitl_proposal_crud, InvalidHitlTransitionError
 from app.models.cmdb_asset import CmdbAsset
 from app.models.hitl_proposal import HitlProposal
 from app.utils.audit import log_audit
@@ -95,6 +95,70 @@ def _detach_asset(asset: CmdbAsset) -> CmdbAsset:
     return asset
 
 
+async def _poll_executing_terminal(
+    db: AsyncSession,
+    proposal_id: int,
+) -> HitlProposal | ProposalSafeSummary:
+    """轮询 EXECUTING 直至终态；APPROVED 时返回提案行供重试认领。
+
+    Args:
+        db: 当前短事务会话。
+        proposal_id: 待轮询提案 ID。
+
+    Returns:
+        EXECUTED 时返回安全摘要；APPROVED 时返回提案行；其它终态抛错。
+
+    Raises:
+        HitlResumeError: 提案不存在、UNKNOWN 或等待超时。
+    """
+    for _ in range(200):
+        await asyncio.sleep(0.05)
+        db.expire_all()
+        refreshed = await hitl_proposal_crud.get(db, proposal_id)
+        if refreshed is None:
+            raise HitlResumeError(f"HITL 提案不存在：{proposal_id}")
+        if refreshed.status == "EXECUTED":
+            return _summary(refreshed)
+        if refreshed.status == "APPROVED":
+            return refreshed
+        if refreshed.status == "UNKNOWN":
+            raise HitlResumeError("状态 UNKNOWN 的 HITL 提案不可恢复执行")
+        if refreshed.status != "EXECUTING":
+            raise HitlResumeError(f"状态 {refreshed.status} 的 HITL 提案不可恢复执行")
+    raise HitlResumeError("等待并发执行完成超时")
+
+
+async def _handle_claim_conflict(
+    db: AsyncSession,
+    proposal_id: int,
+) -> HitlProposal | ProposalSafeSummary:
+    """认领 CAS 失败后刷新状态并分流到终态摘要或轮询。
+
+    Args:
+        db: 当前短事务会话。
+        proposal_id: 提案 ID。
+
+    Returns:
+        EXECUTED 时返回安全摘要；EXECUTING 时轮询；APPROVED 时返回提案行。
+
+    Raises:
+        HitlResumeError: UNKNOWN 或其它不可恢复状态。
+    """
+    db.expire_all()
+    refreshed = await hitl_proposal_crud.get(db, proposal_id)
+    if refreshed is None:
+        raise HitlResumeError(f"HITL 提案不存在：{proposal_id}")
+    if refreshed.status == "EXECUTED":
+        return _summary(refreshed)
+    if refreshed.status == "UNKNOWN":
+        raise HitlResumeError("状态 UNKNOWN 的 HITL 提案不可恢复执行")
+    if refreshed.status == "EXECUTING":
+        return await _poll_executing_terminal(db, proposal_id)
+    if refreshed.status == "APPROVED":
+        return refreshed
+    raise HitlResumeError(f"状态 {refreshed.status} 的 HITL 提案不可恢复执行")
+
+
 async def _preflight_and_claim(
     *,
     session_factory: async_sessionmaker[AsyncSession],
@@ -123,23 +187,10 @@ async def _preflight_and_claim(
         if proposal.status == "EXECUTED":
             return _summary(proposal)
         if proposal.status == "EXECUTING":
-            for _ in range(200):
-                await asyncio.sleep(0.05)
-                db.expire_all()
-                refreshed = await hitl_proposal_crud.get(db, proposal_id)
-                if refreshed is None:
-                    raise HitlResumeError(f"HITL 提案不存在：{proposal_id}")
-                if refreshed.status == "EXECUTED":
-                    return _summary(refreshed)
-                if refreshed.status == "APPROVED":
-                    proposal = refreshed
-                    break
-                if refreshed.status == "UNKNOWN":
-                    raise HitlResumeError(f"状态 UNKNOWN 的 HITL 提案不可恢复执行")
-            else:
-                raise HitlResumeError("等待并发执行完成超时")
-            if proposal.status == "EXECUTING":
-                raise HitlResumeError(f"状态 {proposal.status} 的 HITL 提案不可恢复执行")
+            polled = await _poll_executing_terminal(db, proposal_id)
+            if isinstance(polled, ProposalSafeSummary):
+                return polled
+            proposal = polled
         if proposal.status != "APPROVED":
             raise HitlResumeError(f"状态 {proposal.status} 的 HITL 提案不可恢复执行")
 
@@ -201,7 +252,24 @@ async def _preflight_and_claim(
 
             detached_asset = _detach_asset(asset)
 
-        claimed = await hitl_proposal_crud.claim_execution(db, proposal_id)
+        try:
+            claimed = await hitl_proposal_crud.claim_execution(db, proposal_id)
+        except InvalidHitlTransitionError:
+            conflict = await _handle_claim_conflict(db, proposal_id)
+            if isinstance(conflict, ProposalSafeSummary):
+                return conflict
+            proposal = conflict
+            if proposal.status != "APPROVED":
+                raise HitlResumeError(f"状态 {proposal.status} 的 HITL 提案不可恢复执行")
+            try:
+                claimed = await hitl_proposal_crud.claim_execution(db, proposal_id)
+            except InvalidHitlTransitionError:
+                retry_conflict = await _handle_claim_conflict(db, proposal_id)
+                if isinstance(retry_conflict, ProposalSafeSummary):
+                    return retry_conflict
+                raise HitlResumeError(
+                    f"状态 {retry_conflict.status} 的 HITL 提案不可恢复执行"
+                )
         await db.commit()
 
         copied_payload = dict(claimed.action_payload)
@@ -267,6 +335,7 @@ async def _mark_execution_unknown(
     session_factory: async_sessionmaker[AsyncSession],
     proposal_id: int,
     publisher: HitlEventPublisher | None,
+    actor_user_id: int | None = None,
 ) -> ProposalSafeSummary:
     """将 EXECUTING 提案标记为 UNKNOWN 并发布安全事件。
 
@@ -274,6 +343,7 @@ async def _mark_execution_unknown(
         session_factory: 独立短会话工厂。
         proposal_id: 提案 ID。
         publisher: 可选安全事件发布器。
+        actor_user_id: 触发执行的用户 ID，用于审计。
 
     Returns:
         UNKNOWN 状态的安全摘要。
@@ -283,6 +353,13 @@ async def _mark_execution_unknown(
             db,
             proposal_id,
             reason="dispatch_outcome_unknown",
+        )
+        await log_audit(
+            db,
+            actor_user_id,
+            "hitl_execution_unknown",
+            target=f"hitl_proposal:{unknown.id}",
+            detail=f"动作类型：{unknown.action_type}",
         )
         await db.commit()
 
@@ -351,7 +428,9 @@ async def execute_approved_proposal(
             else:
                 await execution_db.rollback()
     except asyncio.CancelledError:
-        await _mark_execution_unknown(session_factory, proposal_id, publisher)
+        await _mark_execution_unknown(
+            session_factory, proposal_id, publisher, actor_user_id=actor_user_id
+        )
         raise
     except Exception as exc:
         logger.warning(
@@ -359,10 +438,14 @@ async def execute_approved_proposal(
             proposal_id,
             type(exc).__name__,
         )
-        return await _mark_execution_unknown(session_factory, proposal_id, publisher)
+        return await _mark_execution_unknown(
+            session_factory, proposal_id, publisher, actor_user_id=actor_user_id
+        )
 
     if result is None or not result.ok:
-        return await _mark_execution_unknown(session_factory, proposal_id, publisher)
+        return await _mark_execution_unknown(
+            session_factory, proposal_id, publisher, actor_user_id=actor_user_id
+        )
 
     async with session_factory() as finish_db:
         finished = await hitl_proposal_crud.mark_executed(finish_db, proposal_id)

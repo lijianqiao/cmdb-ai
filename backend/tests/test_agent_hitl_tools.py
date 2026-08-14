@@ -49,17 +49,6 @@ async def _make_session_and_asset(
     return session.id, asset.id
 
 
-class _FakeGateHook:
-    """测试用门控钩子：仅提供 proposal_id。"""
-
-    def __init__(self, proposal_id: int | None) -> None:
-        self._proposal_id = proposal_id
-
-    @property
-    def current_proposal_id(self) -> int | None:
-        return self._proposal_id
-
-
 def _hitl_session_factory(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(db_engine, expire_on_commit=False, autoflush=False)
 
@@ -130,16 +119,10 @@ async def test_gate_before_notify_returns_pending_without_payload(
     assert captured["action_type"] == "notify"
 
 
-async def test_notify_returns_ok_after_auto_execution(
+async def test_notify_thin_tool_fails_closed_without_executor(
     db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """通知已自动批准并执行时不应错误地要求人工审批。"""
-
-    async def fake_execute(db: AsyncSession, **kwargs: object) -> ExecutionResult:
-        return ExecutionResult(ok=True, message="ok")
-
-    monkeypatch.setattr(hitl_tools._NOTIFY_EXECUTOR, "execute", fake_execute)
+    """薄工具不得直接执行；应失败关闭并说明由门控统一处理。"""
 
     result = await hitl_tools.notify(
         db_session,
@@ -149,12 +132,12 @@ async def test_notify_returns_ok_after_auto_execution(
         asset_id=8,
         payload={"message": "主机离线"},
         reason="发送告警",
-        gate_hook=_FakeGateHook(42),
+        gate_hook=None,
     )
 
-    assert result.control == "ok"
-    assert "已自动批准并执行" in result.content
-    assert "42" in result.content
+    assert result.control == "failed"
+    assert "门控" in result.content
+    assert "执行" in result.content
 
 
 async def test_gate_before_notify_returns_actionable_rejection(
@@ -287,13 +270,11 @@ async def test_gate_before_device_control_returns_pending(
     assert "60" in decision.result.content
 
 
-async def test_device_control_returns_ok_with_output_when_auto_executed(
-    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+async def test_device_control_thin_tool_fails_closed_without_executor(
+    db_session: AsyncSession,
+    test_user: User,
 ) -> None:
-    async def fake_execute(db: AsyncSession, **kwargs: object) -> ExecutionResult:
-        return ExecutionResult(ok=True, message="ok", detail={"output": "fake reboot output"})
-
-    monkeypatch.setattr(hitl_tools._DEVICE_QUERY_EXECUTOR, "execute", fake_execute)
+    """设备管控薄工具不得直接执行外部命令。"""
 
     session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
     result = await hitl_tools.device_control(
@@ -305,10 +286,10 @@ async def test_device_control_returns_ok_with_output_when_auto_executed(
         command_name="reboot",
         interface_name=None,
         reason="故障恢复",
-        gate_hook=_FakeGateHook(61),
+        gate_hook=None,
     )
-    assert result.control == "ok"
-    assert "fake reboot output" in result.content
+    assert result.control == "failed"
+    assert "门控" in result.content
 
 
 def test_root_schema_has_notify_and_device_control_without_propose() -> None:
@@ -517,17 +498,11 @@ async def test_query_device_command_returns_pending_when_not_executed(
     assert "51" in decision.result.content
 
 
-async def test_query_device_command_returns_ok_with_result_when_auto_executed(
+async def test_query_device_command_thin_tool_fails_closed_without_executor(
     db_session: AsyncSession,
     test_user: User,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """白名单自动执行时应直接返回设备输出。"""
-
-    async def fake_execute(db: AsyncSession, **kwargs: object) -> ExecutionResult:
-        return ExecutionResult(ok=True, message="ok", detail={"output": "fake device output"})
-
-    monkeypatch.setattr(hitl_tools._DEVICE_QUERY_EXECUTOR, "execute", fake_execute)
+    """设备查询薄工具不得直接执行外部命令。"""
 
     session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
     result = await hitl_tools.query_device_command(
@@ -538,11 +513,11 @@ async def test_query_device_command_returns_ok_with_result_when_auto_executed(
         asset_id=asset_id,
         command_name="show_version",
         reason="排查交换机",
-        gate_hook=_FakeGateHook(52),
+        gate_hook=None,
     )
 
-    assert result.control == "ok"
-    assert "fake device output" in result.content
+    assert result.control == "failed"
+    assert "门控" in result.content
 
 
 async def test_get_device_query_result_scopes_to_session(
@@ -602,20 +577,11 @@ async def test_get_device_query_result_reports_unknown_state(
     assert "正在执行" not in result.content
 
 
-async def test_query_device_command_reports_auto_execute_failure(
+async def test_query_device_command_thin_tool_never_calls_executor_on_failure_path(
     db_session: AsyncSession,
     test_user: User,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """白名单当场执行失败时，工具结果应明确失败而不是暗示仍在执行。"""
-
-    async def fake_execute(db: AsyncSession, **kwargs: object) -> ExecutionResult:
-        return ExecutionResult(
-            ok=False,
-            message="连接或执行命令失败；如果是重启/关机类命令，设备可能已经生效，请人工核实",
-        )
-
-    monkeypatch.setattr(hitl_tools._DEVICE_QUERY_EXECUTOR, "execute", fake_execute)
+    """薄工具失败路径也不得触发执行器。"""
 
     session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
     result = await hitl_tools.query_device_command(
@@ -626,11 +592,10 @@ async def test_query_device_command_reports_auto_execute_failure(
         asset_id=asset_id,
         command_name="show_version",
         reason="排查交换机",
-        gate_hook=_FakeGateHook(52),
+        gate_hook=None,
     )
     assert result.control == "failed"
-    assert "已批准但上次执行失败" in result.content
-    assert "正在执行" not in result.content
+    assert "门控" in result.content
 
 
 async def test_list_device_commands_rejects_missing_asset(

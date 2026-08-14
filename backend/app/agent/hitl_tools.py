@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.device_commands import command_supports_vendor
 from app.agent.device_commands import list_device_commands as list_catalog_commands
-from app.agent.executors import DeviceQueryExecutor, NotifyExecutor
 from app.agent.hitl import HitlEventPublisher
 from app.agent.hitl_gate import HitlGateHook
 from app.agent.loop import ToolResult
@@ -23,19 +22,14 @@ from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
 
-_NOTIFY_EXECUTOR = NotifyExecutor()
-_DEVICE_QUERY_EXECUTOR = DeviceQueryExecutor()
+_THIN_TOOL_GATE_MESSAGE = (
+    "该工具的执行已由门控统一处理，不得经薄工具路径直接调用外部执行器。"
+)
 
 
-def _execution_failure_text(kind: str, proposal_id: int, last_error: str | None, status: str) -> str:
-    """区分已批准但执行失败与其它未完成状态。"""
-    if status == "APPROVED" and last_error:
-        return (
-            f"{kind} {proposal_id} 已批准但上次执行失败：{last_error}，需人工处理。"
-            "系统不会自动重试，请如实告知用户执行失败，"
-            "由管理员排查设备连通性/凭据后在审批卡片上重试执行。"
-        )
-    return f"{kind} {proposal_id} 当前状态为 {status}，未完成执行。"
+def _thin_tool_gate_failure() -> ToolResult:
+    """薄工具失败关闭：执行仅允许在门控 before 内完成。"""
+    return ToolResult(control="failed", content=_THIN_TOOL_GATE_MESSAGE)
 
 
 async def notify(
@@ -61,35 +55,12 @@ async def notify(
         payload: 须含 message 字段。
         reason: 发起通知的原因。
         publisher: 可选的 HITL 安全事件发布器。
-        gate_hook: 门控钩子，提供当前提案 ID。
+        gate_hook: 门控钩子（薄工具路径不使用）。
 
     Returns:
-        执行成功或失败的安全工具结果。
+        失败关闭的安全工具结果。
     """
-    proposal_id = gate_hook.current_proposal_id if gate_hook is not None else None
-    if proposal_id is None:
-        return ToolResult(control="failed", content="通知执行缺少门控提案上下文")
-
-    execution_payload = {
-        **payload,
-        "asset_id": asset_id,
-        "proposal_reason": reason,
-    }
-    execution_result = await _NOTIFY_EXECUTOR.execute(
-        db,
-        proposal_id=proposal_id,
-        payload=execution_payload,
-        actor_user_id=actor_user_id,
-    )
-    if execution_result.ok:
-        return ToolResult(
-            control="ok",
-            content=f"通知提案 {proposal_id} 已自动批准并执行。",
-        )
-    return ToolResult(
-        control="failed",
-        content=_execution_failure_text("通知提案", proposal_id, execution_result.message, "APPROVED"),
-    )
+    return _thin_tool_gate_failure()
 
 
 async def device_control(
@@ -117,37 +88,12 @@ async def device_control(
         interface_name: port_enable/port_disable 所需的接口名。
         reason: 发起管控的原因。
         publisher: 可选的 HITL 安全事件发布器。
-        gate_hook: 门控钩子，提供当前提案 ID。
+        gate_hook: 门控钩子（薄工具路径不使用）。
 
     Returns:
-        执行成功或失败的安全工具结果。
+        失败关闭的安全工具结果。
     """
-    proposal_id = gate_hook.current_proposal_id if gate_hook is not None else None
-    if proposal_id is None:
-        return ToolResult(control="failed", content="设备管控执行缺少门控提案上下文")
-
-    asset = await cmdb_asset_crud.get(db, asset_id)
-    if asset is None:
-        return ToolResult(control="failed", content=f"CMDB 资产不存在：{asset_id}")
-
-    execution_result = await _DEVICE_QUERY_EXECUTOR.execute(
-        db,
-        asset=asset,
-        command_name=command_name,
-        dynamic_password=None,
-        interface_name=interface_name,
-    )
-    if execution_result.ok:
-        output = execution_result.detail.get("output")
-        excerpt = output if isinstance(output, str) else "（无输出）"
-        return ToolResult(
-            control="ok",
-            content=f"设备管控命令 {proposal_id} 已自动批准并执行：\n{excerpt}",
-        )
-    return ToolResult(
-        control="failed",
-        content=_execution_failure_text("设备管控请求", proposal_id, execution_result.message, "APPROVED"),
-    )
+    return _thin_tool_gate_failure()
 
 
 async def query_device_command(
@@ -173,36 +119,12 @@ async def query_device_command(
         command_name: 白名单内的只读诊断命令名。
         reason: 发起查询的原因。
         publisher: 可选的 HITL 安全事件发布器。
-        gate_hook: 门控钩子，提供当前提案 ID。
+        gate_hook: 门控钩子（薄工具路径不使用）。
 
     Returns:
-        执行成功或失败的安全工具结果。
+        失败关闭的安全工具结果。
     """
-    proposal_id = gate_hook.current_proposal_id if gate_hook is not None else None
-    if proposal_id is None:
-        return ToolResult(control="failed", content="设备命令查询缺少门控提案上下文")
-
-    asset = await cmdb_asset_crud.get(db, asset_id)
-    if asset is None:
-        return ToolResult(control="failed", content=f"CMDB 资产不存在：{asset_id}")
-
-    execution_result = await _DEVICE_QUERY_EXECUTOR.execute(
-        db,
-        asset=asset,
-        command_name=command_name,
-        dynamic_password=None,
-    )
-    if execution_result.ok:
-        output = execution_result.detail.get("output")
-        excerpt = output if isinstance(output, str) else "（无输出）"
-        return ToolResult(
-            control="ok",
-            content=f"设备命令 {proposal_id} 已自动批准并执行：\n{excerpt}",
-        )
-    return ToolResult(
-        control="failed",
-        content=_execution_failure_text("设备命令查询", proposal_id, execution_result.message, "APPROVED"),
-    )
+    return _thin_tool_gate_failure()
 
 
 async def get_device_query_result(
