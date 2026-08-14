@@ -16,7 +16,7 @@ from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.agent import hitl, hitl_tools
+from app.agent import hitl
 from app.agent.executors import ExecutionResult
 from app.agent.hitl import (
     HitlProposalRejectedError,
@@ -28,7 +28,6 @@ from app.agent.hitl import (
     resume_proposal,
 )
 from app.agent.hitl_gate import HitlGateHook, dispatch_through_hitl_gate
-from app.agent.loop import ToolResult
 from app.agent.tool_dispatch import build_root_tool_dispatcher
 from app.core.cmdb_credential import encrypt_credential_password
 from app.core.config import settings
@@ -36,7 +35,6 @@ from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
-from app.models.audit_log import AuditLog
 from app.models.hitl_proposal import HitlProposal
 from app.models.user import User
 

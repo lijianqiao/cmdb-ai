@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react"
-import { Controller, useForm } from "react-hook-form"
+import { Controller, useForm, useWatch } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { toast } from "sonner"
 
@@ -44,11 +44,10 @@ import {
 } from "@/components/ui/select"
 import { Spinner } from "@/components/ui/spinner"
 import { Textarea } from "@/components/ui/textarea"
-import api from "@/lib/api"
+import { fetchCmdbAssetCredential } from "@/lib/cmdb-credential-api"
 import { PERMISSIONS } from "@/lib/constants"
 import { ViewIcon, ViewOffSlashIcon } from "@/lib/icons"
 import { usePermission } from "@/hooks/use-permission"
-import type { ApiResponse } from "@/types/api"
 import type {
   CmdbAsset,
   CmdbAssetCreate,
@@ -87,14 +86,6 @@ const CREDENTIAL_TYPE_ITEMS: { label: string; value: CredentialType }[] = [
   { label: "静态密码", value: "static" },
   { label: "动态密码（仅记账号）", value: "dynamic" },
 ]
-
-/** 拉取已保存的静态凭据明文（不写回编辑表单） */
-export async function fetchCmdbAssetCredential(assetId: number): Promise<string> {
-  const response = await api.get<ApiResponse<{ password: string }>>(
-    `/cmdb/assets/${assetId}/credential`
-  )
-  return response.data.data.password
-}
 
 interface CmdbCredentialRevealDialogProps {
   open: boolean
@@ -233,7 +224,10 @@ export function CmdbAssetFormDialog({
     }
   }, [open, asset, form])
 
-  const credentialType = form.watch("credential_type")
+  const credentialType = useWatch({
+    control: form.control,
+    name: "credential_type",
+  })
 
   const canViewCredential =
     isEdit &&

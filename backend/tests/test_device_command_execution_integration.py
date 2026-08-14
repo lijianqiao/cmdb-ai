@@ -205,7 +205,7 @@ async def test_whitelisted_static_credential_query_executes_in_one_call(
 
     fake_connection = _fake_scrapli_connection("fake device output line")
     with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
-        tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
+        tool_result = await _dispatch_gated(db_session, session_id, test_user.id,
             "query_device_command",
             {
                 "asset_id": asset_id,
@@ -242,7 +242,7 @@ async def test_blacklisted_command_is_rejected_without_creating_proposal(
     )
     await db_session.commit()
 
-    tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
+    tool_result = await _dispatch_gated(db_session, session_id, test_user.id,
         "query_device_command",
         {
             "asset_id": asset_id,
@@ -272,7 +272,7 @@ async def test_unclassified_command_creates_pending_proposal_visible_via_hitl_ap
     )
     await db_session.commit()
 
-    tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
+    tool_result = await _dispatch_gated(db_session, session_id, test_user.id,
         "query_device_command",
         {
             "asset_id": asset_id,
@@ -332,7 +332,7 @@ async def test_dynamic_credential_requires_password_even_when_whitelisted(
     )
     await db_session.commit()
 
-    tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
+    tool_result = await _dispatch_gated(db_session, session_id, test_user.id,
         "query_device_command",
         {
             "asset_id": asset_id,
@@ -412,7 +412,7 @@ async def test_response_bodies_never_contain_plaintext_or_ciphertext_password(
 
     fake_connection = _fake_scrapli_connection("password-safe output")
     with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
-        unclassified = await _dispatch_gated(db_session, session_id, test_user.id, 
+        unclassified = await _dispatch_gated(db_session, session_id, test_user.id,
             "query_device_command",
             {
                 "asset_id": static_asset_id,
@@ -445,7 +445,7 @@ async def test_response_bodies_never_contain_plaintext_or_ciphertext_password(
         )
     http_bodies.append(decide_static.text)
 
-    dynamic_result = await _dispatch_gated(db_session, session_id, test_user.id, 
+    dynamic_result = await _dispatch_gated(db_session, session_id, test_user.id,
         "query_device_command",
         {
             "asset_id": dynamic_asset_id,
@@ -521,7 +521,7 @@ async def test_whitelisted_reboot_executes_with_interactive_confirmation(
 
     fake_connection = _fake_scrapli_reboot_connection("rebooting now")
     with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
-        tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
+        tool_result = await _dispatch_gated(db_session, session_id, test_user.id,
             "device_control",
             {
                 "asset_id": asset_id,
@@ -560,7 +560,7 @@ async def test_blacklisted_port_disable_is_rejected_without_creating_proposal(
     )
     await db_session.commit()
 
-    tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
+    tool_result = await _dispatch_gated(db_session, session_id, test_user.id,
         "device_control",
         {
             "asset_id": asset_id,
@@ -592,7 +592,7 @@ async def test_unclassified_port_enable_creates_pending_and_requires_interface_n
     )
     await db_session.commit()
 
-    missing_iface = await _dispatch_gated(db_session, session_id, test_user.id, 
+    missing_iface = await _dispatch_gated(db_session, session_id, test_user.id,
         "device_control",
         {
             "asset_id": asset_id,
@@ -605,7 +605,7 @@ async def test_unclassified_port_enable_creates_pending_and_requires_interface_n
     proposals_before = await hitl_proposal_crud.list_for_session(db_session, session_id)
     assert proposals_before == []
 
-    tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
+    tool_result = await _dispatch_gated(db_session, session_id, test_user.id,
         "device_control",
         {
             "asset_id": asset_id,
@@ -680,7 +680,7 @@ async def test_dynamic_credential_reboot_still_forces_manual_approval_even_when_
     )
     await db_session.commit()
 
-    tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
+    tool_result = await _dispatch_gated(db_session, session_id, test_user.id,
         "device_control",
         {
             "asset_id": asset_id,

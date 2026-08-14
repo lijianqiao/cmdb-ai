@@ -32,6 +32,7 @@ from app.crud.agent_message import agent_message_crud
 from app.crud.agent_registry import agent_registry_crud
 from app.crud.agent_session import agent_session_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
+from app.models.agent_message import AgentMessage
 from app.models.agent_registry import AgentRegistry
 from app.models.agent_session import AgentSession
 from app.models.hitl_proposal import HitlProposal
@@ -117,7 +118,7 @@ def _safe_child_response(child: AgentRegistry) -> ChildAgentSnapshotResponse:
 
 
 def _snapshot_response(
-    messages: list,
+    messages: list[AgentMessage],
     proposals: list[HitlProposal],
     children: list[AgentRegistry],
     has_more: bool,
@@ -211,11 +212,17 @@ async def patch_session_approval_mode(
     session = await _owned_session_or_404(db, session_id, current_user.id)
     old_mode = session.approval_mode
     if old_mode != body.approval_mode:
-        session = await agent_session_crud.update(
+        updated = await agent_session_crud.update(
             db,
             session_id,
             {"approval_mode": body.approval_mode},
         )
+        if updated is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Agent 会话不存在",
+            )
+        session = updated
         await log_audit(
             db,
             user_id=current_user.id,

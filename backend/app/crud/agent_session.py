@@ -1,8 +1,10 @@
 """CRUD operations for agent chat sessions."""
 
 from datetime import UTC, datetime
+from typing import cast
 
 from sqlalchemy import func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crud.base import CRUDBase
@@ -68,7 +70,9 @@ class CRUDAgentSession(CRUDBase[AgentSession]):
         Returns:
             抢占成功返回 True，会话已有活跃 turn 时返回 False
         """
-        result = await db.execute(
+        result = cast(
+            CursorResult[tuple[()]],
+            await db.execute(
             update(AgentSession)
             .where(
                 AgentSession.id == session_id,
@@ -78,8 +82,9 @@ class CRUDAgentSession(CRUDBase[AgentSession]):
                 active_turn_token=token,
                 active_turn_started_at=datetime.now(UTC),
             )
+            ),
         )
-        return result.rowcount == 1
+        return (result.rowcount or 0) == 1
 
     async def release_turn(self, db: AsyncSession, session_id: int, token: str) -> bool:
         """
@@ -93,7 +98,9 @@ class CRUDAgentSession(CRUDBase[AgentSession]):
         Returns:
             释放成功返回 True，令牌不匹配或已无租约时返回 False
         """
-        result = await db.execute(
+        result = cast(
+            CursorResult[tuple[()]],
+            await db.execute(
             update(AgentSession)
             .where(
                 AgentSession.id == session_id,
@@ -103,8 +110,9 @@ class CRUDAgentSession(CRUDBase[AgentSession]):
                 active_turn_token=None,
                 active_turn_started_at=None,
             )
+            ),
         )
-        return result.rowcount == 1
+        return (result.rowcount or 0) == 1
 
     async def recover_active_turns(self, db: AsyncSession) -> int:
         """
@@ -116,15 +124,18 @@ class CRUDAgentSession(CRUDBase[AgentSession]):
         Returns:
             被清理的会话数量
         """
-        result = await db.execute(
+        result = cast(
+            CursorResult[tuple[()]],
+            await db.execute(
             update(AgentSession)
             .where(AgentSession.active_turn_token.is_not(None))
             .values(
                 active_turn_token=None,
                 active_turn_started_at=None,
             )
+            ),
         )
-        return result.rowcount
+        return result.rowcount or 0
 
 
 agent_session_crud = CRUDAgentSession()

@@ -3,7 +3,7 @@
  * 列出软删除用户，支持恢复与永久删除。
  */
 
-import { useMemo, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import { Link } from "react-router"
 import type { ColumnDef } from "@tanstack/react-table"
 import dayjs from "dayjs"
@@ -42,7 +42,7 @@ export function UsersTrashPage() {
     errorMessage: "获取用户回收站失败",
   })
 
-  const handleRestore = async (user: UserWithRoles) => {
+  const handleRestore = useCallback(async (user: UserWithRoles) => {
     try {
       await api.post(`/users/${user.id}/restore`)
       toast.success("已恢复用户")
@@ -51,7 +51,7 @@ export function UsersTrashPage() {
       const error = err as { response?: { data?: { message?: string } } }
       toast.error(error.response?.data?.message || "恢复失败")
     }
-  }
+  }, [refetch])
 
   const handlePurgeConfirm = async (): Promise<boolean> => {
     if (!target) return false
@@ -132,7 +132,7 @@ export function UsersTrashPage() {
         ),
       },
     ],
-    []
+    [handleRestore]
   )
 
   return (

@@ -35,8 +35,8 @@ from app.agent.hitl_execution import reconcile_executing_proposals
 from app.agent.spawn import ChildReceipt, ChildRunResult, SpawnManager, SpawnRejectedError
 from app.crud.agent_registry import agent_registry_crud
 from app.crud.agent_session import agent_session_crud
-from app.crud.hitl_proposal import hitl_proposal_crud
 from app.crud.agent_trace_event import agent_trace_event_crud
+from app.crud.hitl_proposal import hitl_proposal_crud
 from app.models import Base
 from app.models.agent_session import AgentSession
 from app.models.user import User

@@ -258,7 +258,7 @@ async def resolve_unknown_proposal(
 
     publisher = BufferedWsHitlEventPublisher()
     try:
-        proposal = await hitl_proposal_crud.resolve_unknown(
+        await hitl_proposal_crud.resolve_unknown(
             db,
             proposal_id,
             resolution=body.resolution,
@@ -289,23 +289,23 @@ async def resolve_unknown_proposal(
     )
     await db.commit()
 
-    proposal = await hitl_proposal_crud.get(db, proposal_id)
-    if proposal is None:
+    refreshed = await hitl_proposal_crud.get(db, proposal_id)
+    if refreshed is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
 
-    payload_dict = proposal.action_payload if isinstance(proposal.action_payload, dict) else {}
+    payload_dict = refreshed.action_payload if isinstance(refreshed.action_payload, dict) else {}
     await publisher.publish(
-        session_id=proposal.session_id,
+        session_id=refreshed.session_id,
         event_type="hitl_resolved",
         payload={
-            "proposal_id": proposal.id,
-            "action_type": proposal.action_type,
-            "status": proposal.status,
-            "status_reason": proposal.status_reason,
+            "proposal_id": refreshed.id,
+            "action_type": refreshed.action_type,
+            "status": refreshed.status,
+            "status_reason": refreshed.status_reason,
             "reason": str(payload_dict.get("proposal_reason", "")),
             "asset_id": payload_dict.get("asset_id"),
-            "resolved_at": proposal.resolved_at,
+            "resolved_at": refreshed.resolved_at,
         },
     )
     await publisher.flush()
-    return success_response(await _to_response(db, proposal))
+    return success_response(await _to_response(db, refreshed))

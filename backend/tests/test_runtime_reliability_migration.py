@@ -25,7 +25,7 @@ MIGRATION_PATH = (
 class _FakeBatchOp:
     """模拟 batch_alter_table 上下文中的 batch_op。"""
 
-    def __init__(self, parent: "_FakeOp", table_name: str) -> None:
+    def __init__(self, parent: _FakeOp, table_name: str) -> None:
         self._parent = parent
         self._table_name = table_name
 
@@ -67,7 +67,7 @@ class _FakeBatchOp:
 class _FakeBatchContext:
     """模拟 op.batch_alter_table 上下文管理器。"""
 
-    def __init__(self, parent: "_FakeOp", table_name: str) -> None:
+    def __init__(self, parent: _FakeOp, table_name: str) -> None:
         self._batch_op = _FakeBatchOp(parent, table_name)
 
     def __enter__(self) -> _FakeBatchOp:

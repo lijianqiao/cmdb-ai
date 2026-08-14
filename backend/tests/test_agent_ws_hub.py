@@ -43,9 +43,9 @@ _SAFE_SUMMARY_KEYS = frozenset(
 _SENSITIVE_KEYS = frozenset({"message", "command", "command_name", "password"})
 
 
-async def wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> None:
+async def wait_until(predicate: Callable[[], bool], max_wait_seconds: float = 1.0) -> None:
     """轮询直到谓词为真或超时。"""
-    deadline = asyncio.get_running_loop().time() + timeout
+    deadline = asyncio.get_running_loop().time() + max_wait_seconds
     while asyncio.get_running_loop().time() < deadline:
         if predicate():
             return

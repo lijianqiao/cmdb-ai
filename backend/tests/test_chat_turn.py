@@ -6,10 +6,9 @@
 @Docs: 验证 Chat turn 编排：run_loop 复用、WS 事件顺序与 HITL 安全推送。
 """
 
+import json
 from typing import Any
 from unittest.mock import AsyncMock, patch
-
-import json
 
 import pytest
 import pytest_asyncio

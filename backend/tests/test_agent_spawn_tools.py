@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import pytest_asyncio
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -23,20 +22,17 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.agent.budget import Budget
-from app.agent.loop import ToolResult
 from app.agent.spawn import (
     ChildBudgetSnapshot,
-    ChildNotFoundError,
     ChildReceipt,
     ChildRunResult,
-    ChildWaitTimeoutError,
     SpawnManager,
     SpawnRejectedError,
 )
 from app.agent.spawn_tools import (
+    SPAWN_TOOL_NAMES,
     build_spawn_tool_dispatcher,
     spawn_tool_schemas,
-    SPAWN_TOOL_NAMES,
 )
 from app.agent.tool_dispatch import root_tool_schemas, tool_schemas_for
 from app.models import Base

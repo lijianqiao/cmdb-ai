@@ -405,13 +405,6 @@ def build_root_tool_dispatcher(
         可调用只读与执行类工具的调度函数。
     """
     read_dispatch = build_tool_dispatcher(db, _ROOT_READ_ONLY_TOOLS)
-    common_kwargs = {
-        "session_id": session_id,
-        "actor_user_id": actor_user_id,
-        "proposed_by_agent_id": proposed_by_agent_id,
-        "publisher": publisher,
-        "gate_hook": gate_hook,
-    }
 
     async def dispatch(name: str, arguments: dict[str, Any]) -> ToolResult:
         if name in _ROOT_EXECUTION_TOOLS:
@@ -423,7 +416,11 @@ def build_root_tool_dispatcher(
                         asset_id=notify_args.asset_id,
                         payload=notify_args.payload.model_dump(),
                         reason=notify_args.reason,
-                        **common_kwargs,
+                        session_id=session_id,
+                        actor_user_id=actor_user_id,
+                        proposed_by_agent_id=proposed_by_agent_id,
+                        publisher=publisher,
+                        gate_hook=gate_hook,
                     )
                 if name == "device_control":
                     control_args = DeviceControlArgs.model_validate(arguments)
@@ -433,7 +430,11 @@ def build_root_tool_dispatcher(
                         command_name=control_args.command_name,
                         interface_name=control_args.interface_name,
                         reason=control_args.reason,
-                        **common_kwargs,
+                        session_id=session_id,
+                        actor_user_id=actor_user_id,
+                        proposed_by_agent_id=proposed_by_agent_id,
+                        publisher=publisher,
+                        gate_hook=gate_hook,
                     )
                 query_args = QueryDeviceCommandArgs.model_validate(arguments)
                 return await query_device_command(
@@ -441,7 +442,11 @@ def build_root_tool_dispatcher(
                     asset_id=query_args.asset_id,
                     command_name=query_args.command_name,
                     reason=query_args.reason,
-                    **common_kwargs,
+                    session_id=session_id,
+                    actor_user_id=actor_user_id,
+                    proposed_by_agent_id=proposed_by_agent_id,
+                    publisher=publisher,
+                    gate_hook=gate_hook,
                 )
             except ValidationError as exc:
                 return ToolResult(

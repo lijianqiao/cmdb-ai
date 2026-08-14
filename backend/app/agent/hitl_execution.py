@@ -17,7 +17,7 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import make_transient
@@ -39,7 +39,7 @@ from app.agent.hitl import (
 )
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
-from app.crud.hitl_proposal import hitl_proposal_crud, InvalidHitlTransitionError
+from app.crud.hitl_proposal import InvalidHitlTransitionError, hitl_proposal_crud
 from app.models.cmdb_asset import CmdbAsset
 from app.models.hitl_proposal import HitlProposal
 from app.utils.audit import log_audit
@@ -260,7 +260,9 @@ async def _preflight_and_claim(
                 return conflict
             proposal = conflict
             if proposal.status != "APPROVED":
-                raise HitlResumeError(f"状态 {proposal.status} 的 HITL 提案不可恢复执行")
+                raise HitlResumeError(
+                    f"状态 {proposal.status} 的 HITL 提案不可恢复执行"
+                ) from None
             try:
                 claimed = await hitl_proposal_crud.claim_execution(db, proposal_id)
             except InvalidHitlTransitionError:
@@ -269,17 +271,19 @@ async def _preflight_and_claim(
                     return retry_conflict
                 raise HitlResumeError(
                     f"状态 {retry_conflict.status} 的 HITL 提案不可恢复执行"
-                )
+                ) from None
         await db.commit()
 
         copied_payload = dict(claimed.action_payload)
         if action_type not in ("notify", "device_control", "device_query"):
             raise HitlResumeError(f"不支持的 HITL 动作类型：{action_type}")
 
+        validated_action_type = cast(ActionType, action_type)
+
         return PreparedExecution(
             proposal_id=claimed.id,
             session_id=claimed.session_id,
-            action_type=action_type,
+            action_type=validated_action_type,
             payload=copied_payload,
             asset=detached_asset,
         )

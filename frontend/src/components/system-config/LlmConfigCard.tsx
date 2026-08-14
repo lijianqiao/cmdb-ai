@@ -1,7 +1,7 @@
 /** LLM 与 Embedding 模型配置卡片 */
 
 import { useEffect } from "react"
-import { Controller, useForm } from "react-hook-form"
+import { Controller, useForm, useWatch } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { isAxiosError } from "axios"
 import { toast } from "sonner"
@@ -188,8 +188,14 @@ export function LlmConfigCard({ value, onSaved }: LlmConfigCardProps) {
     form.reset(toFormValues(value))
   }, [value, form])
 
-  const clearChatApiKey = form.watch("clear_chat_api_key")
-  const clearEmbeddingApiKey = form.watch("clear_embedding_api_key")
+  const clearChatApiKey = useWatch({
+    control: form.control,
+    name: "clear_chat_api_key",
+  })
+  const clearEmbeddingApiKey = useWatch({
+    control: form.control,
+    name: "clear_embedding_api_key",
+  })
 
   const handleSubmit = async (data: LlmConfigFormValues) => {
     try {

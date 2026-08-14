@@ -12,9 +12,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.agent import hitl_tools, tool_dispatch
-from app.agent.executors import ExecutionResult
-from app.agent.hitl import HitlProposalRejectedError, ProposalSafeSummary, gate_action
-from app.agent.hitl_gate import HitlGateHook, dispatch_through_hitl_gate
+from app.agent.hitl import HitlProposalRejectedError, ProposalSafeSummary
+from app.agent.hitl_gate import HitlGateHook
 from app.agent.loop import ToolResult
 from app.agent.tool_dispatch import (
     build_root_tool_dispatcher,

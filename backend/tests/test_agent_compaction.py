@@ -15,7 +15,6 @@ from app.agent.compaction import (
     _messages_to_summarize,
     ensure_root_compaction,
 )
-from app.models.agent_message import AgentMessage
 from app.agent.session import (
     append_assistant_message,
     append_tool_result,
@@ -25,6 +24,7 @@ from app.agent.session import (
 from app.core.llm import ChatResult, ToolCall
 from app.crud.agent_message import agent_message_crud
 from app.crud.agent_session import agent_session_crud
+from app.models.agent_message import AgentMessage
 from app.models.agent_session import AgentSession
 from app.models.user import User
 

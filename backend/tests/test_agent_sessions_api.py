@@ -216,6 +216,7 @@ async def test_patch_approval_mode_owner_and_audit(
     assert patched.json()["data"]["approval_mode"] == "assist"
 
     from sqlalchemy import func, select
+
     from app.models.audit_log import AuditLog
 
     count = await db_session.scalar(
@@ -563,7 +564,7 @@ async def test_snapshot_returns_only_non_terminal_proposals(
     await db_session.flush()
     session_id = session.id
 
-    pending = await hitl_proposal_crud.create(
+    await hitl_proposal_crud.create(
         db_session,
         session_id=session_id,
         proposed_by_agent_id=None,

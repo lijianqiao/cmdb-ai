@@ -3,7 +3,7 @@
  * 列出软删除角色，支持恢复与永久删除。
  */
 
-import { useMemo, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import { Link } from "react-router"
 import type { ColumnDef } from "@tanstack/react-table"
 import dayjs from "dayjs"
@@ -41,7 +41,7 @@ export function RolesTrashPage() {
     errorMessage: "获取角色回收站失败",
   })
 
-  const handleRestore = async (role: Role) => {
+  const handleRestore = useCallback(async (role: Role) => {
     try {
       await api.post(`/roles/${role.id}/restore`)
       toast.success("已恢复角色")
@@ -50,7 +50,7 @@ export function RolesTrashPage() {
       const error = err as { response?: { data?: { message?: string } } }
       toast.error(error.response?.data?.message || "恢复失败")
     }
-  }
+  }, [refetch])
 
   const handlePurgeConfirm = async (): Promise<boolean> => {
     if (!target) return false
@@ -114,7 +114,7 @@ export function RolesTrashPage() {
         ),
       },
     ],
-    []
+    [handleRestore]
   )
 
   return (

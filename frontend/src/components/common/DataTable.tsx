@@ -41,6 +41,7 @@ export function DataTable<TData, TValue>({
   isLoading,
   emptyMessage = "暂无数据",
 }: DataTableProps<TData, TValue>) {
+  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Table 的 useReactTable 返回的函数无法被 React Compiler 安全记忆化
   const table = useReactTable({
     data,
     columns,

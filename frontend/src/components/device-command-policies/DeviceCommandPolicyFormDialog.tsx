@@ -6,7 +6,7 @@
  */
 
 import { useEffect } from "react"
-import { Controller, useForm } from "react-hook-form"
+import { Controller, useForm, useWatch } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
 
@@ -166,8 +166,14 @@ export function DeviceCommandPolicyFormDialog({
     defaultValues: { decision: "whitelist", note: "" },
   })
 
-  const scope = createForm.watch("scope")
-  const commandName = createForm.watch("command_name")
+  const scope = useWatch({
+    control: createForm.control,
+    name: "scope",
+  })
+  const commandName = useWatch({
+    control: createForm.control,
+    name: "command_name",
+  })
   const scopeLockedByCommand = isStateChangingCommand(commandName)
 
   useEffect(() => {

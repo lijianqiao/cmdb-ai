@@ -17,8 +17,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from app.agent.spawn import run_receipt_gc_loop, spawn_manager
 from app.agent.hitl_execution import reconcile_executing_proposals
+from app.agent.spawn import run_receipt_gc_loop, spawn_manager
 from app.agent.ws_hub import WsSpawnEventPublisher, hub
 from app.api.router import api_router
 from app.core.config import settings

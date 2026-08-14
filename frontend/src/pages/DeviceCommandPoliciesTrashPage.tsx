@@ -3,7 +3,7 @@
  * 结构照抄 CmdbAssetsTrashPage.tsx：软删除策略的列表 + 恢复 + 永久删除。
  */
 
-import { useMemo, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import { Link } from "react-router"
 import type { ColumnDef } from "@tanstack/react-table"
 import dayjs from "dayjs"
@@ -60,7 +60,7 @@ export function DeviceCommandPoliciesTrashPage() {
     errorMessage: "获取回收站列表失败",
   })
 
-  const handleRestore = async (policy: DeviceCommandPolicy) => {
+  const handleRestore = useCallback(async (policy: DeviceCommandPolicy) => {
     try {
       await api.post(`/device-command-policies/policies/${policy.id}/restore`)
       toast.success("恢复成功")
@@ -69,7 +69,7 @@ export function DeviceCommandPoliciesTrashPage() {
       const error = err as { response?: { data?: { message?: string } } }
       toast.error(error.response?.data?.message || "恢复失败")
     }
-  }
+  }, [fetchDeleted])
 
   const handlePurgeClick = (policy: DeviceCommandPolicy) => {
     setPurgePolicy(policy)
@@ -153,7 +153,7 @@ export function DeviceCommandPoliciesTrashPage() {
         ),
       },
     ],
-    []
+    [handleRestore]
   )
 
   return (

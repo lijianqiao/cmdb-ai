@@ -8,10 +8,11 @@ EXECUTED or APPROVED.
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, cast
 from weakref import WeakValueDictionary
 
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.hitl_proposal import HitlProposal
@@ -249,9 +250,12 @@ class CRUDHitlProposal:
                 status_reason="dispatch_outcome_unknown",
             )
         )
-        result = await db.execute(stmt)
+        result = cast(
+            CursorResult[tuple[()]],
+            await db.execute(stmt),
+        )
         await db.flush()
-        return result.rowcount
+        return result.rowcount or 0
 
     async def mark_executed(self, db: AsyncSession, proposal_id: int) -> HitlProposal:
         """将 EXECUTING 提案转为 EXECUTED，仅允许从 EXECUTING 进入。"""

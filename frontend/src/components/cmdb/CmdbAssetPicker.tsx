@@ -19,15 +19,10 @@ import api from "@/lib/api"
 import type { ApiResponse, PaginatedData } from "@/types/api"
 import type { CmdbAsset } from "@/types/cmdb"
 
-export interface CmdbAssetOption {
-  id: number
-  hostname: string
-  ip_address: string
-}
-
-export function formatCmdbAssetOption(asset: CmdbAssetOption): string {
-  return `#${asset.id} ${asset.hostname}（${asset.ip_address}）`
-}
+import {
+  type CmdbAssetOption,
+  formatCmdbAssetOption,
+} from "./cmdbAssetPickerUtils"
 
 interface CmdbAssetPickerProps {
   id?: string

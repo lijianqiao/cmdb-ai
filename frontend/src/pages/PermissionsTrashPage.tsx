@@ -3,7 +3,7 @@
  * 列出软删除权限，支持恢复与永久删除。
  */
 
-import { useMemo, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import { Link } from "react-router"
 import type { ColumnDef } from "@tanstack/react-table"
 import dayjs from "dayjs"
@@ -41,7 +41,7 @@ export function PermissionsTrashPage() {
     errorMessage: "获取权限回收站失败",
   })
 
-  const handleRestore = async (permission: Permission) => {
+  const handleRestore = useCallback(async (permission: Permission) => {
     try {
       await api.post(`/permissions/${permission.id}/restore`)
       toast.success("已恢复权限")
@@ -50,7 +50,7 @@ export function PermissionsTrashPage() {
       const error = err as { response?: { data?: { message?: string } } }
       toast.error(error.response?.data?.message || "恢复失败")
     }
-  }
+  }, [refetch])
 
   const handlePurgeConfirm = async (): Promise<boolean> => {
     if (!target) return false
@@ -123,7 +123,7 @@ export function PermissionsTrashPage() {
         ),
       },
     ],
-    []
+    [handleRestore]
   )
 
   return (

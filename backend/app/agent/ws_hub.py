@@ -270,7 +270,7 @@ class WsSpawnEventPublisher:
         """
         safe_payload = _child_safe_payload(receipt)
         message = AgentWsServerMessage(
-            type=cast(AgentWsEventType, "child_status"),
+            type="child_status",
             payload=safe_payload,
         )
         await self._resolve_hub().broadcast(receipt.session_id, message)

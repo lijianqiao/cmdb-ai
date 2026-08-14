@@ -12,13 +12,13 @@
 4. 非门控工具 before 立即放行；after 不再回写执行结果。
 """
 
-from collections.abc import Awaitable, Callable
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.hitl import (
+    ActionType,
     HitlEventPublisher,
     HitlProposalRejectedError,
     ProposalSafeSummary,
@@ -133,7 +133,7 @@ class HitlGateHook:
             validation_reason_for_tool,
         )
 
-        gate_models: dict[str, type] = {
+        gate_models: dict[str, type[BaseModel]] = {
             "notify": NotifyArgs,
             "device_control": DeviceControlArgs,
             "query_device_command": QueryDeviceCommandArgs,
@@ -157,7 +157,7 @@ class HitlGateHook:
                 ),
             )
 
-        action_type: str
+        action_type: ActionType
         asset_id: int
         payload: dict[str, object]
         reason: str

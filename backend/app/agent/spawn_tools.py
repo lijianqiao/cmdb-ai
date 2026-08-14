@@ -209,11 +209,11 @@ def build_spawn_tool_dispatcher(
                 )
                 return ToolResult(control="ok", content=_safe_receipt_text(receipt))
             if name == "wait_agent":
-                parsed = WaitAgentArgs.model_validate(arguments)
-                await _require_session_child(manager, session_id, parsed.child_id)
+                wait_args = WaitAgentArgs.model_validate(arguments)
+                await _require_session_child(manager, session_id, wait_args.child_id)
                 receipt = await manager.wait_agent(
-                    parsed.child_id,
-                    timeout_ms=parsed.timeout_ms,
+                    wait_args.child_id,
+                    timeout_ms=wait_args.timeout_ms,
                 )
                 return ToolResult(control="ok", content=_safe_receipt_text(receipt))
             if name == "list_agents":
@@ -224,9 +224,9 @@ def build_spawn_tool_dispatcher(
                     content="\n".join(_safe_receipt_text(item) for item in receipts)
                     or "当前会话没有子 Agent",
                 )
-            parsed = CloseAgentArgs.model_validate(arguments)
-            await _require_session_child(manager, session_id, parsed.child_id)
-            receipt = await manager.close_agent(parsed.child_id)
+            close_args = CloseAgentArgs.model_validate(arguments)
+            await _require_session_child(manager, session_id, close_args.child_id)
+            receipt = await manager.close_agent(close_args.child_id)
             return ToolResult(control="ok", content=_safe_receipt_text(receipt))
         except ValidationError as exc:
             return ToolResult(
@@ -235,12 +235,12 @@ def build_spawn_tool_dispatcher(
             )
         except SpawnRejectedError as exc:
             return ToolResult(control="rejected", content=_spawn_rejected_message(exc))
-        except ChildNotFoundError as exc:
+        except ChildNotFoundError:
             return ToolResult(
                 control="failed",
                 content=f"工具 {name!r} 执行失败: ChildNotFoundError",
             )
-        except ChildWaitTimeoutError as exc:
+        except ChildWaitTimeoutError:
             return ToolResult(
                 control="failed",
                 content=f"工具 {name!r} 执行失败: ChildWaitTimeoutError",

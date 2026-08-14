@@ -3,7 +3,7 @@
  * 结构照抄 UsersTrashPage.tsx：软删除资产的列表 + 恢复 + 永久删除。
  */
 
-import { useMemo, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import { Link } from "react-router"
 import type { ColumnDef } from "@tanstack/react-table"
 import dayjs from "dayjs"
@@ -41,7 +41,7 @@ export function CmdbAssetsTrashPage() {
     errorMessage: "获取回收站列表失败",
   })
 
-  const handleRestore = async (asset: CmdbAsset) => {
+  const handleRestore = useCallback(async (asset: CmdbAsset) => {
     try {
       await api.post(`/cmdb/assets/${asset.id}/restore`)
       toast.success("恢复成功")
@@ -50,7 +50,7 @@ export function CmdbAssetsTrashPage() {
       const error = err as { response?: { data?: { message?: string } } }
       toast.error(error.response?.data?.message || "恢复失败")
     }
-  }
+  }, [fetchDeleted])
 
   const handlePurgeClick = (asset: CmdbAsset) => {
     setPurgeAsset(asset)
@@ -112,7 +112,7 @@ export function CmdbAssetsTrashPage() {
         ),
       },
     ],
-    []
+    [handleRestore]
   )
 
   return (
