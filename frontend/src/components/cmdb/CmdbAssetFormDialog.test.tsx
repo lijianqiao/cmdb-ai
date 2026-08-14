@@ -1,11 +1,18 @@
-/** 凭据三态切换的字段可见性/必填校验单测，不跑完整 Dialog 渲染栈 */
+/** 凭据三态切换的字段校验，以及编辑表单提交边界测试 */
 
-import { describe, expect, it } from "vitest"
+// @vitest-environment jsdom
+
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import "@testing-library/jest-dom/vitest"
+import { describe, expect, it, vi } from "vitest"
+
+import type { CmdbAsset } from "@/types/cmdb"
 
 import {
   clearedCredentialFields,
   createFormSchema,
 } from "./cmdbAssetFormSchema"
+import { CmdbAssetFormDialog } from "./CmdbAssetFormDialog"
 import { isVendorName, VENDOR_ITEMS } from "./cmdbVendors"
 
 const baseAssetFields = {
@@ -20,6 +27,43 @@ const baseAssetFields = {
 }
 
 describe("CmdbAssetFormDialog 凭据校验规则", () => {
+  it("编辑 Small Business 静态凭据资产时保留厂商且不提交空密码", async () => {
+    const asset: CmdbAsset = {
+      id: 1,
+      asset_type: "switch",
+      vendor: "cisco_small_business",
+      hostname: "lab-switch",
+      ip_address: "192.0.2.10",
+      location: "测试机房",
+      owner_user_id: null,
+      business_system: "",
+      subnet_cidr: "",
+      notes: "",
+      credential_type: "static",
+      credential_username: "test-admin",
+      credential_password_set: true,
+      created_at: "2026-08-14T00:00:00Z",
+      updated_at: "2026-08-14T00:00:00Z",
+    }
+    const onSubmit = vi.fn().mockResolvedValue(true)
+
+    render(
+      <CmdbAssetFormDialog
+        open
+        onOpenChange={vi.fn()}
+        asset={asset}
+        onSubmit={onSubmit}
+      />
+    )
+
+    fireEvent.click(screen.getByRole("button", { name: "确定" }))
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce())
+    const payload = onSubmit.mock.calls[0]?.[0]
+    expect(payload).toHaveProperty("vendor", "cisco_small_business")
+    expect(payload).not.toHaveProperty("credential_password")
+  })
+
   it("仅将已登记的厂商值识别为 VendorName", () => {
     expect(isVendorName("cisco_small_business")).toBe(true)
     expect(isVendorName("unknown_vendor")).toBe(false)

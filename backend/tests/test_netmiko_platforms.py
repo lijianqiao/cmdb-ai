@@ -2,6 +2,9 @@
 
 from unittest.mock import MagicMock, patch
 
+from netmiko import ConnectHandler
+from netmiko.cisco.cisco_s300 import CiscoS300SSH
+
 from app.agent.executors import (
     _netmiko_device_type_for_vendor,
     _open_netmiko_connection,
@@ -11,6 +14,18 @@ from app.agent.executors import (
 def test_cisco_platforms_use_distinct_netmiko_drivers() -> None:
     assert _netmiko_device_type_for_vendor("cisco_iosxe") == "cisco_xe"
     assert _netmiko_device_type_for_vendor("cisco_small_business") == "cisco_s300"
+
+
+def test_netmiko_dispatches_cisco_s300_to_official_ssh_class() -> None:
+    connection = ConnectHandler(
+        device_type="cisco_s300",
+        host="192.0.2.1",
+        username="test-user",
+        password="test-only",
+        auto_connect=False,
+    )
+
+    assert type(connection) is CiscoS300SSH
 
 
 def test_open_small_business_connection_uses_cisco_s300_driver() -> None:
