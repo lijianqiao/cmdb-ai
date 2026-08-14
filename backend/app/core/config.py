@@ -70,7 +70,12 @@ class Settings(BaseSettings):
     MONITOR_SWEEP_INTERVAL_SECONDS: float = Field(default=30.0, ge=5, le=3600)
     CMDB_DIFF_INTERVAL_SECONDS: float = Field(default=3600.0, ge=60, le=86_400)
     MONITOR_EVENT_RETENTION_DAYS: int = Field(default=7, ge=1, le=90)
-    DEVICE_COMMAND_TIMEOUT_SECONDS: float = Field(default=15.0, gt=0, le=120)
+    # Netmiko 的两个超时量纲不同，分开配：
+    # - CONN：建立 TCP 连接、认证、读 banner 的上限（Netmiko 默认 10）
+    # - READ：单条命令等待提示符出现的上限（Netmiko 默认 10）；show running-config
+    #   这类大输出靠它兜底，所以放宽到 60
+    DEVICE_COMMAND_CONN_TIMEOUT_SECONDS: float = Field(default=15.0, gt=0, le=120)
+    DEVICE_COMMAND_READ_TIMEOUT_SECONDS: float = Field(default=60.0, gt=0, le=600)
 
     # 子 Agent Spawn 配额与回执回收
     AGENT_MAX_CONCURRENT_CHILDREN: int = Field(default=5, ge=1)

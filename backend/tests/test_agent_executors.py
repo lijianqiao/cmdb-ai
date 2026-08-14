@@ -6,7 +6,7 @@
 @Docs: T10 HITL 执行器单元测试（notify + DeviceQueryExecutor 管控分支）。
 """
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import SecretStr
@@ -54,10 +54,10 @@ def _generate_fernet_key() -> str:
     return Fernet.generate_key().decode()
 
 
-async def test_device_query_executor_reboot_sends_interactive_confirmation(
+async def test_device_query_executor_reboot_sends_timing_confirmation(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """reboot 命令要用 send_interactive 而不是 send_command。"""
+    """reboot 的确认提示不是标准提示符，必须走 send_command_timing。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     ciphertext = encrypt_credential_password("whatever")
     asset = await _make_asset(
@@ -66,16 +66,15 @@ async def test_device_query_executor_reboot_sends_interactive_confirmation(
         vendor="cisco_iosxe",
     )
     executor = DeviceQueryExecutor()
-    fake_connection = AsyncMock()
-    fake_connection.send_interactive = AsyncMock(
-        return_value=type("Resp", (), {"result": "System will reboot", "failed": False})()
-    )
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = MagicMock()
+    fake_connection.send_command_timing = MagicMock(return_value="Proceed with reload? [confirm]")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         result = await executor.execute(
             db_session, asset=asset, command_name="reboot", dynamic_password=None
         )
     assert result.ok is True
-    fake_connection.send_interactive.assert_awaited_once()
+    # 第一次发命令拿到确认提示，第二次发应答内容。
+    assert fake_connection.send_command_timing.call_count == 2
     fake_connection.send_command.assert_not_called()
 
 
@@ -91,20 +90,21 @@ async def test_device_query_executor_connection_drop_during_reboot_is_conservati
         vendor="cisco_iosxe",
     )
     executor = DeviceQueryExecutor()
-    fake_connection = AsyncMock()
-    fake_connection.send_interactive = AsyncMock(side_effect=ConnectionError("closed"))
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = MagicMock()
+    fake_connection.send_command_timing = MagicMock(side_effect=ConnectionError("closed"))
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         result = await executor.execute(
             db_session, asset=asset, command_name="reboot", dynamic_password=None
         )
     assert result.ok is False
     assert "人工核实" in result.message
+    assert result.dispatched is True
 
 
-async def test_device_query_executor_port_disable_uses_send_configs_with_interface(
+async def test_device_query_executor_port_disable_uses_send_config_set_with_interface(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """port_disable 走 send_configs，接口名要正确代入模板。"""
+    """port_disable 走 send_config_set，接口名要正确代入模板。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     ciphertext = encrypt_credential_password("whatever")
     asset = await _make_asset(
@@ -113,10 +113,9 @@ async def test_device_query_executor_port_disable_uses_send_configs_with_interfa
         vendor="cisco_iosxe",
     )
     executor = DeviceQueryExecutor()
-    fake_connection = AsyncMock()
-    fake_response_item = type("R", (), {"result": "ok", "failed": False})()
-    fake_connection.send_configs = AsyncMock(return_value=[fake_response_item, fake_response_item])
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = MagicMock()
+    fake_connection.send_config_set = MagicMock(return_value="ok")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         result = await executor.execute(
             db_session,
             asset=asset,
@@ -125,7 +124,7 @@ async def test_device_query_executor_port_disable_uses_send_configs_with_interfa
             interface_name="GigabitEthernet0/1",
         )
     assert result.ok is True
-    sent_lines = fake_connection.send_configs.call_args.args[0]
+    sent_lines = fake_connection.send_config_set.call_args.args[0]
     assert sent_lines == ["interface GigabitEthernet0/1", "shutdown"]
 
 
@@ -141,7 +140,7 @@ async def test_device_query_executor_rejects_invalid_interface_name_before_conne
         vendor="cisco_iosxe",
     )
     executor = DeviceQueryExecutor()
-    with patch("app.agent.executors._open_scrapli_connection") as mock_connect:
+    with patch("app.agent.executors._open_netmiko_connection") as mock_connect:
         result = await executor.execute(
             db_session,
             asset=asset,
@@ -166,7 +165,7 @@ async def test_device_query_executor_rejects_unsupported_vendor_before_connectin
     )
     asset.vendor = "hp_comware"
     executor = DeviceQueryExecutor()
-    with patch("app.agent.executors._open_scrapli_connection") as mock_connect:
+    with patch("app.agent.executors._open_netmiko_connection") as mock_connect:
         result = await executor.execute(
             db_session,
             asset=asset,

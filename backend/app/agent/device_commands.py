@@ -53,7 +53,7 @@ def validate_interface_name(value: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class CommandConfirmation:
-    """交互式确认提示的匹配正则与应答内容（配 Scrapli send_interactive 使用）。"""
+    """交互式确认提示的匹配正则与应答内容（配 Netmiko send_command_timing 两段式使用）。"""
 
     prompt_pattern: str
     response: str

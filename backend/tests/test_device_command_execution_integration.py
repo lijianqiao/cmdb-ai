@@ -6,14 +6,14 @@
 @Docs: 设备命令执行端到端验收：查询与变更类命令的白名单自动执行、黑名单拒绝、动态凭据强制人工、密码零泄露。
 
 实现流程：
-1. 通过根调度器调用 query_device_command / device_control，串联策略判定、HITL 提案与 Scrapli 执行。
+1. 通过根调度器调用 query_device_command / device_control，串联策略判定、HITL 提案与 Netmiko 执行。
 2. 白名单 + 静态凭据当场执行；黑名单直接拒绝且不建提案；未分类走人工审批 HTTP 链路。
 3. 变更类 port_enable/port_disable 缺 interface_name 时在 propose 阶段拒绝；动态凭据即使白名单也强制 PENDING。
 4. asset_type 范围创建 reboot 策略被 API 拒绝；全程 HTTP 响应体不得出现已知明文密码或密文。
 """
 
 import re
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from cryptography.fernet import Fernet
@@ -124,29 +124,30 @@ async def _make_session_and_switch_asset(
     return session.id, asset.id
 
 
-def _fake_scrapli_connection(output: str = "Cisco IOS XE Software") -> AsyncMock:
-    """构造 Scrapli 连接 mock，send_command 返回指定输出。"""
-    fake_connection = AsyncMock()
-    fake_connection.send_command = AsyncMock(
-        return_value=type("Resp", (), {"result": output, "failed": False})()
+def _fake_netmiko_connection(output: str = "Cisco IOS XE Software") -> MagicMock:
+    """构造 Netmiko 连接 mock，send_command 直接返回字符串输出。"""
+    fake_connection = MagicMock()
+    fake_connection.send_command = MagicMock(return_value=output)
+    return fake_connection
+
+
+def _fake_netmiko_reboot_connection(output: str = "System will reboot") -> MagicMock:
+    """构造 Netmiko 连接 mock，模拟 reboot 的两段式交互。
+
+    第一次 send_command_timing 返回设备的确认提示（思科是 [confirm]），执行器匹配到
+    提示后才会第二次调用把应答发出去，第二次才返回真正的执行输出。
+    """
+    fake_connection = MagicMock()
+    fake_connection.send_command_timing = MagicMock(
+        side_effect=["Proceed with reload? [confirm]", output]
     )
     return fake_connection
 
 
-def _fake_scrapli_reboot_connection(output: str = "System will reboot") -> AsyncMock:
-    """构造 Scrapli 连接 mock，reboot 走 send_interactive。"""
-    fake_connection = AsyncMock()
-    fake_connection.send_interactive = AsyncMock(
-        return_value=type("Resp", (), {"result": output, "failed": False})()
-    )
-    return fake_connection
-
-
-def _fake_scrapli_configs_connection(output: str = "ok") -> AsyncMock:
-    """构造 Scrapli 连接 mock，port_enable/port_disable 走 send_configs。"""
-    fake_connection = AsyncMock()
-    fake_response_item = type("R", (), {"result": output, "failed": False})()
-    fake_connection.send_configs = AsyncMock(return_value=[fake_response_item, fake_response_item])
+def _fake_netmiko_configs_connection(output: str = "ok") -> MagicMock:
+    """构造 Netmiko 连接 mock，port_enable/port_disable 走 send_config_set。"""
+    fake_connection = MagicMock()
+    fake_connection.send_config_set = MagicMock(return_value=output)
     return fake_connection
 
 
@@ -203,8 +204,8 @@ async def test_whitelisted_static_credential_query_executes_in_one_call(
     session.approval_mode = "assist"
     await db_session.flush()
 
-    fake_connection = _fake_scrapli_connection("fake device output line")
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = _fake_netmiko_connection("fake device output line")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         tool_result = await _dispatch_gated(db_session, session_id, test_user.id,
             "query_device_command",
             {
@@ -294,8 +295,8 @@ async def test_unclassified_command_creates_pending_proposal_visible_via_hitl_ap
     items = list_response.json()["data"]
     assert any(item["id"] == proposal_id and item["status"] == "PENDING" for item in items)
 
-    fake_connection = _fake_scrapli_connection("approved device output")
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = _fake_netmiko_connection("approved device output")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         decide_response = await client.post(
             f"/api/v1/hitl/proposals/{proposal_id}/decide",
             json={"approve": True},
@@ -352,8 +353,8 @@ async def test_dynamic_credential_requires_password_even_when_whitelisted(
     )
     assert missing_password.status_code == 422, missing_password.text
 
-    fake_connection = _fake_scrapli_connection("dynamic otp output")
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = _fake_netmiko_connection("dynamic otp output")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         with_password = await client.post(
             f"/api/v1/hitl/proposals/{proposal_id}/decide",
             json={"approve": True, "dynamic_credential_password": "one-time-pass"},
@@ -410,8 +411,8 @@ async def test_response_bodies_never_contain_plaintext_or_ciphertext_password(
     await _grant_hitl_approve(db_session, test_user)
 
 
-    fake_connection = _fake_scrapli_connection("password-safe output")
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = _fake_netmiko_connection("password-safe output")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         unclassified = await _dispatch_gated(db_session, session_id, test_user.id,
             "query_device_command",
             {
@@ -437,7 +438,7 @@ async def test_response_bodies_never_contain_plaintext_or_ciphertext_password(
     )
     http_bodies.append(detail_resp.text)
 
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         decide_static = await client.post(
             f"/api/v1/hitl/proposals/{unclassified_id}/decide",
             json={"approve": True},
@@ -457,7 +458,7 @@ async def test_response_bodies_never_contain_plaintext_or_ciphertext_password(
     dynamic_id = _extract_proposal_id(dynamic_result.content)
     await db_session.commit()
 
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         decide_dynamic = await client.post(
             f"/api/v1/hitl/proposals/{dynamic_id}/decide",
             json={"approve": True, "dynamic_credential_password": known_password},
@@ -519,8 +520,8 @@ async def test_whitelisted_reboot_executes_with_interactive_confirmation(
     session.approval_mode = "assist"
     await db_session.flush()
 
-    fake_connection = _fake_scrapli_reboot_connection("rebooting now")
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = _fake_netmiko_reboot_connection("rebooting now")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         tool_result = await _dispatch_gated(db_session, session_id, test_user.id,
             "device_control",
             {
@@ -533,7 +534,8 @@ async def test_whitelisted_reboot_executes_with_interactive_confirmation(
     assert tool_result.control == "ok", tool_result.content
     assert "rebooting now" in tool_result.content
     assert "reboot-static-pass" not in tool_result.content
-    fake_connection.send_interactive.assert_awaited_once()
+    # 第一次拿确认提示，第二次发应答。
+    assert fake_connection.send_command_timing.call_count == 2
     fake_connection.send_command.assert_not_called()
 
 
@@ -619,8 +621,8 @@ async def test_unclassified_port_enable_creates_pending_and_requires_interface_n
     await db_session.commit()
 
     await _grant_hitl_approve(db_session, test_user)
-    fake_connection = _fake_scrapli_configs_connection("port enabled")
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = _fake_netmiko_configs_connection("port enabled")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         decide_response = await client.post(
             f"/api/v1/hitl/proposals/{proposal_id}/decide",
             json={"approve": True},
@@ -629,7 +631,7 @@ async def test_unclassified_port_enable_creates_pending_and_requires_interface_n
     assert decide_response.status_code == 200, decide_response.text
     assert decide_response.json()["data"]["status"] == "EXECUTED"
     assert "port enabled" in decide_response.text or "EXECUTED" in decide_response.text
-    fake_connection.send_configs.assert_awaited_once()
+    fake_connection.send_config_set.assert_called_once()
     assert "static-pass" not in decide_response.text
 
 
@@ -700,8 +702,8 @@ async def test_dynamic_credential_reboot_still_forces_manual_approval_even_when_
     )
     assert missing_password.status_code == 422, missing_password.text
 
-    fake_connection = _fake_scrapli_reboot_connection("dynamic reboot output")
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = _fake_netmiko_reboot_connection("dynamic reboot output")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         with_password = await client.post(
             f"/api/v1/hitl/proposals/{proposal_id}/decide",
             json={"approve": True, "dynamic_credential_password": "one-time-pass"},

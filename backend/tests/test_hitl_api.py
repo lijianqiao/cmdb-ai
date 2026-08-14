@@ -6,7 +6,7 @@
 @Docs: 验证 HITL 提案查询与审批 HTTP API 的权限门控与状态机行为。
 """
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -262,7 +262,7 @@ async def test_approve_device_control_stays_approved_second_decide_conflicts(
     proposal_id = summary.proposal_id
 
     with patch(
-        "app.agent.executors._open_scrapli_connection",
+        "app.agent.executors._open_netmiko_connection",
         side_effect=ConnectionError("unreachable"),
     ):
         first = await client.post(
@@ -355,11 +355,9 @@ async def test_decide_device_query_with_password_executes(
         user_id=test_user.id,
     )
 
-    fake_connection = AsyncMock()
-    fake_connection.send_command = AsyncMock(
-        return_value=type("Resp", (), {"result": "device output", "failed": False})()
-    )
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = MagicMock()
+    fake_connection.send_command = MagicMock(return_value="device output")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         response = await client.post(
             f"/api/v1/hitl/proposals/{proposal_id}/decide",
             json={"approve": True, "dynamic_credential_password": "one-time-pass"},
@@ -413,10 +411,10 @@ async def test_retry_approved_device_control_executes(
     proposal_id = summary.proposal_id
 
     # 连接已建立但下发途中断开：结果不确定，走 UNKNOWN 人工核实流程。
-    broken_connection = AsyncMock()
-    broken_connection.send_command = AsyncMock(side_effect=ConnectionError("dropped mid-command"))
+    broken_connection = MagicMock()
+    broken_connection.send_command = MagicMock(side_effect=ConnectionError("dropped mid-command"))
     with patch(
-        "app.agent.executors._open_scrapli_connection",
+        "app.agent.executors._open_netmiko_connection",
         return_value=broken_connection,
     ):
         failed = await client.post(
@@ -436,11 +434,9 @@ async def test_retry_approved_device_control_executes(
     assert authorized.status_code == 200, authorized.text
     assert authorized.json()["data"]["status"] == "APPROVED"
 
-    fake_connection = AsyncMock()
-    fake_connection.send_command = AsyncMock(
-        return_value=type("Resp", (), {"result": "Linux host info", "failed": False})()
-    )
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = MagicMock()
+    fake_connection.send_command = MagicMock(return_value="Linux host info")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         retried = await client.post(
             f"/api/v1/hitl/proposals/{proposal_id}/retry",
             json={},

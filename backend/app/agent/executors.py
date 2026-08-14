@@ -3,28 +3,38 @@
 @Email: lijianqiao2906@live.com
 @FileName: executors.py
 @DateTime: 2026-08-12
-@Docs: HITL 动作执行器：notify 写审计日志，device_query/device_control 走 Scrapli。
+@Docs: HITL 动作执行器：notify 写审计日志，device_query/device_control 走 Netmiko。
 
 实现流程：
 1. ExecutionResult 是 hitl.resume 与各类执行器之间的统一返回契约（ok/message/detail）。
 2. NotifyExecutor 从 payload 读取 message，校验非空后调用 log_audit(action=hitl_notify_executed)。
 3. DeviceQueryExecutor 同时服务只读诊断与变更管控：按目录分派 send_command、
-   send_interactive（reboot/shutdown 确认）或 send_configs（接口启停）。
+   send_command_timing（reboot/shutdown 的确认提示）或 send_config_set（接口启停）。
 4. ExecutionResult.dispatched 回答"这次失败有没有可能已经把命令发到设备上"：
    连接建立之前的任何失败都是 False（确定没下发，上层可安全回退重试），连接一旦
    建立就置 True（之后失败无法确定命令是否已生效，上层必须走 UNKNOWN 人工核实）。
 5. 失败时把真实异常堆栈写进服务端日志（logger.exception），只把异常类名放进
    detail["error_class"] 供上层展示——既能定位问题，又不把原始异常文本泄漏给模型。
+
+为什么用 Netmiko 而不是 Scrapli：本项目要同时管思科/华三/华为/锐捷等多厂商设备，
+而"关闭分页"这一步各厂商命令完全不同（华为 screen-length 0 temporary、华三
+screen-length disable、锐捷 terminal width 256 + terminal length 0）。Netmiko 按
+device_type 自动发对应命令，Scrapli 的社区驱动覆盖面则要窄得多——曾经因为分页没
+关掉，show running-config 输出第一屏后卡在 --More--，表现为读超时。
+
+Netmiko 是同步库，所有阻塞调用统一用 asyncio.to_thread 丢进工作线程，避免卡住事件
+循环。代价是这些线程不可取消：turn 被取消时线程仍会把命令跑完，所以上层必须按
+UNKNOWN（可能已下发）处理，这与既有的 HITL 状态机语义一致。
 """
 
+import asyncio
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from scrapli.driver.core import AsyncIOSXEDriver, AsyncJunosDriver
-from scrapli.driver.generic import AsyncGenericDriver
-from scrapli_community.huawei.vrp.async_driver import AsyncHuaweiVRPDriver
+from netmiko import ConnectHandler
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.device_commands import (
@@ -111,42 +121,143 @@ def _truncate_output(text: str, *, limit: int = _OUTPUT_TRUNCATE_LIMIT) -> tuple
     return text[:limit] + "…(截断)", True
 
 
-def _scrapli_driver_class_for_vendor(vendor: str) -> type[Any]:
-    """按 CMDB 厂商字段选择 Scrapli 异步驱动类。"""
-    if vendor == "cisco_iosxe":
-        return AsyncIOSXEDriver
-    if vendor == "juniper_junos":
-        return AsyncJunosDriver
-    if vendor == "huawei_vrp":
-        return AsyncHuaweiVRPDriver
-    return AsyncGenericDriver
+# CMDB 厂商字段 → Netmiko device_type。device_type 决定 Netmiko 登录后发哪条
+# "关闭分页"命令，标错厂商会导致大输出命令卡在分页提示符上读超时。
+_NETMIKO_DEVICE_TYPES: Mapping[str, str] = {
+    "cisco_iosxe": "cisco_xe",
+    "huawei_vrp": "huawei_vrp",
+    "hp_comware": "hp_comware",
+    "juniper_junos": "juniper_junos",
+    "linux": "linux",
+    "generic": "generic",
+}
 
 
-async def _open_scrapli_connection(
-    *, host: str, vendor: str, username: str, password: str, timeout_seconds: float
+def _netmiko_device_type_for_vendor(vendor: str) -> str:
+    """按 CMDB 厂商字段选择 Netmiko device_type，未登记的厂商退回 generic。"""
+    return _NETMIKO_DEVICE_TYPES.get(vendor, "generic")
+
+
+def _open_netmiko_connection(
+    *,
+    host: str,
+    vendor: str,
+    username: str,
+    password: str,
+    conn_timeout: float,
 ) -> Any:
-    """建立一个已认证的 Scrapli 异步连接；抽成独立函数方便测试打桩。
+    """建立一个已认证的 Netmiko 连接；同步阻塞，抽成独立函数方便测试打桩。
 
-    必须显式指定 transport="asyncssh"：Scrapli 默认的 system transport 要调用
-    本机 /bin/ssh，在 Windows 上会在**构造驱动时**就抛 ScrapliUnsupportedPlatform，
-    连 TCP 都不会建立。asyncssh 是纯 Python 实现，各平台行为一致，开发与生产同路径。
+    ConnectHandler 构造过程里就完成了 TCP 连接、认证和 session_preparation
+    （含按 device_type 关闭分页），所以它一返回就意味着"已经跟设备说过话了"。
     """
-    driver_class = _scrapli_driver_class_for_vendor(vendor)
-    connection = driver_class(
+    return ConnectHandler(
+        device_type=_netmiko_device_type_for_vendor(vendor),
         host=host,
-        auth_username=username,
-        auth_password=password,
-        auth_strict_key=False,
-        transport="asyncssh",
-        timeout_socket=timeout_seconds,
-        timeout_transport=timeout_seconds,
+        username=username,
+        password=password,
+        conn_timeout=conn_timeout,
+        auth_timeout=conn_timeout,
+        banner_timeout=conn_timeout,
     )
-    await connection.open()
-    return connection
+
+
+def _run_device_command(
+    *,
+    host: str,
+    vendor: VendorName,
+    username: str,
+    password: str,
+    command_name: str,
+    definition: Any,
+    interface_name: str | None,
+    conn_timeout: float,
+    read_timeout: float,
+) -> ExecutionResult:
+    """在工作线程里跑完整条 Netmiko 会话：连接 → 按类型分派 → 截断输出 → 断开。
+
+    全程同步阻塞，由 DeviceQueryExecutor.execute 用 asyncio.to_thread 调用。
+    连接建立后置 dispatched=True，之后任何异常都无法确定命令是否已生效。
+    """
+    connection = None
+    dispatched = False
+    try:
+        connection = _open_netmiko_connection(
+            host=host,
+            vendor=vendor,
+            username=username,
+            password=password,
+            conn_timeout=conn_timeout,
+        )
+        # 连接已建立：从这里开始，任何异常都无法确定命令是否已经下发到设备。
+        dispatched = True
+
+        if definition.config_templates is not None and vendor in definition.config_templates:
+            rendered = [
+                line.format(interface=interface_name)
+                for line in definition.config_templates[vendor]
+            ]
+            if any("<" in line or ">" in line for line in rendered):
+                return ExecutionResult(ok=False, message="命令模板含未解析占位符")
+            output = connection.send_config_set(rendered, read_timeout=read_timeout)
+        elif definition.confirmation is not None and vendor in definition.confirmation:
+            confirm = definition.confirmation[vendor]
+            template = definition.templates[vendor]
+            # 确认提示不是标准提示符，send_command 会一直等不到而超时；
+            # send_command_timing 按「读到安静为止」返回，才能拿到提示并应答。
+            output = connection.send_command_timing(
+                template, read_timeout=read_timeout, strip_prompt=False, strip_command=False
+            )
+            if re.search(confirm.prompt_pattern, output):
+                output += connection.send_command_timing(
+                    confirm.response,
+                    read_timeout=read_timeout,
+                    strip_prompt=False,
+                    strip_command=False,
+                )
+        else:
+            template = get_command_template(command_name, vendor)
+            if "<" in template or ">" in template:
+                return ExecutionResult(ok=False, message="命令模板含未解析占位符")
+            output = connection.send_command(template, read_timeout=read_timeout)
+    except Exception as exc:
+        # 真实堆栈只进服务端日志：既能定位平台/认证/分页类故障，又不外泄异常文本。
+        logger.exception(
+            "设备命令执行失败 host=%s vendor=%s command=%s dispatched=%s",
+            host,
+            vendor,
+            command_name,
+            dispatched,
+        )
+        message = (
+            "连接或执行命令失败；如果是重启/关机类命令，设备可能已经生效，请人工核实"
+            if dispatched
+            else "无法建立设备连接，命令未下发"
+        )
+        return ExecutionResult(
+            ok=False,
+            message=message,
+            detail={"error_class": type(exc).__name__},
+            dispatched=dispatched,
+        )
+    finally:
+        if connection is not None:
+            try:
+                connection.disconnect()
+            except Exception:
+                pass
+
+    rendered_output, truncated = _truncate_output(str(output))
+    return ExecutionResult(
+        ok=True,
+        message="命令执行完成",
+        detail={"output": rendered_output, "truncated": truncated},
+        dispatched=True,
+    )
 
 
 class DeviceQueryExecutor:
-    """设备诊断/管控命令执行器：解析凭据、按厂商选真实命令、跑 Scrapli、截断输出。"""
+    """设备诊断/管控命令执行器：解析凭据、按厂商选真实命令、跑 Netmiko、截断输出。"""
 
     async def execute(
         self,
@@ -197,78 +308,17 @@ class DeviceQueryExecutor:
             return ExecutionResult(ok=False, message="该设备厂商不支持这个命令")
 
         vendor = cast(VendorName, asset.vendor)
-        connection = None
-        dispatched = False
-        try:
-            connection = await _open_scrapli_connection(
-                host=asset.ip_address,
-                vendor=asset.vendor,
-                username=asset.credential_username,
-                password=password,
-                timeout_seconds=settings.DEVICE_COMMAND_TIMEOUT_SECONDS,
-            )
-            # 连接已建立：从这里开始，任何异常都无法确定命令是否已经下发到设备。
-            dispatched = True
-
-            if definition.config_templates is not None and vendor in definition.config_templates:
-                rendered = [
-                    line.format(interface=interface_name)
-                    for line in definition.config_templates[vendor]
-                ]
-                if any("<" in line or ">" in line for line in rendered):
-                    return ExecutionResult(ok=False, message="命令模板含未解析占位符")
-                responses = await connection.send_configs(rendered)
-                failed = any(getattr(item, "failed", False) for item in responses)
-                output = "\n".join(str(getattr(item, "result", "")) for item in responses)
-            elif definition.confirmation is not None and vendor in definition.confirmation:
-                confirm = definition.confirmation[vendor]
-                template = definition.templates[vendor]
-                response = await connection.send_interactive(
-                    [(template, confirm.prompt_pattern, False), (confirm.response, r".*", True)]
-                )
-                failed = getattr(response, "failed", False)
-                output = str(getattr(response, "result", ""))
-            else:
-                template = get_command_template(command_name, asset.vendor)
-                if "<" in template or ">" in template:
-                    return ExecutionResult(ok=False, message="命令模板含未解析占位符")
-                response = await connection.send_command(template)
-                failed = getattr(response, "failed", False)
-                output = str(getattr(response, "result", ""))
-        except Exception as exc:
-            # 真实堆栈只进服务端日志：既能定位平台/驱动/认证类故障，又不外泄异常文本。
-            logger.exception(
-                "设备命令执行失败 host=%s vendor=%s command=%s dispatched=%s",
-                asset.ip_address,
-                asset.vendor,
-                command_name,
-                dispatched,
-            )
-            message = (
-                "连接或执行命令失败；如果是重启/关机类命令，设备可能已经生效，请人工核实"
-                if dispatched
-                else "无法建立设备连接，命令未下发"
-            )
-            return ExecutionResult(
-                ok=False,
-                message=message,
-                detail={"error_class": type(exc).__name__},
-                dispatched=dispatched,
-            )
-        finally:
-            if connection is not None:
-                try:
-                    await connection.close()
-                except Exception:
-                    pass
-
-        if failed:
-            # 命令确实发到设备了，只是设备侧回了失败，属于"已下发"。
-            return ExecutionResult(ok=False, message="设备返回命令执行失败", dispatched=True)
-
-        rendered_output, truncated = _truncate_output(output)
-        return ExecutionResult(
-            ok=True,
-            message="命令执行完成",
-            detail={"output": rendered_output, "truncated": truncated},
+        # Netmiko 全同步，丢到工作线程避免阻塞事件循环。注意线程不可取消：
+        # 调用方取消时命令仍会跑完，因此失败一律按 dispatched 语义交给上层判定。
+        return await asyncio.to_thread(
+            _run_device_command,
+            host=asset.ip_address,
+            vendor=vendor,
+            username=asset.credential_username,
+            password=password,
+            command_name=command_name,
+            definition=definition,
+            interface_name=interface_name,
+            conn_timeout=settings.DEVICE_COMMAND_CONN_TIMEOUT_SECONDS,
+            read_timeout=settings.DEVICE_COMMAND_READ_TIMEOUT_SECONDS,
         )

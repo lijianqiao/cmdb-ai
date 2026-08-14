@@ -1,6 +1,6 @@
 """DeviceQueryExecutor：凭据解析分支 + 输出截断 + 失败分类，不接真实设备。"""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import SecretStr
@@ -64,11 +64,9 @@ async def test_static_credential_decrypts_and_connects(
     asset = await cmdb_asset_crud.get(db_session, asset_id)
     assert asset is not None
 
-    fake_connection = AsyncMock()
-    fake_connection.send_command = AsyncMock(
-        return_value=type("Resp", (), {"result": "Cisco IOS XE Software", "failed": False})()
-    )
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = MagicMock()
+    fake_connection.send_command = MagicMock(return_value="Cisco IOS XE Software")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         executor = DeviceQueryExecutor()
         result = await executor.execute(
             db_session, asset=asset, command_name="show_version", dynamic_password=None
@@ -93,7 +91,7 @@ async def test_connection_failure_does_not_leak_raw_exception_text(
     assert asset is not None
 
     with patch(
-        "app.agent.executors._open_scrapli_connection",
+        "app.agent.executors._open_netmiko_connection",
         side_effect=RuntimeError("internal topology detail: 10.9.9.9 refused"),
     ):
         executor = DeviceQueryExecutor()
@@ -120,11 +118,9 @@ async def test_long_output_is_truncated(
     assert asset is not None
 
     long_output = "x" * 10_000
-    fake_connection = AsyncMock()
-    fake_connection.send_command = AsyncMock(
-        return_value=type("Resp", (), {"result": long_output, "failed": False})()
-    )
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = MagicMock()
+    fake_connection.send_command = MagicMock(return_value=long_output)
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         executor = DeviceQueryExecutor()
         result = await executor.execute(
             db_session, asset=asset, command_name="show_version", dynamic_password=None
@@ -199,7 +195,7 @@ async def test_connect_failure_reports_not_dispatched(
 
     executor = DeviceQueryExecutor()
     with patch(
-        "app.agent.executors._open_scrapli_connection",
+        "app.agent.executors._open_netmiko_connection",
         side_effect=ConnectionError("unreachable"),
     ):
         result = await executor.execute(
@@ -226,10 +222,10 @@ async def test_send_failure_after_connect_reports_dispatched(
     asset = await cmdb_asset_crud.get(db_session, asset_id)
     assert asset is not None
 
-    broken = AsyncMock()
-    broken.send_command = AsyncMock(side_effect=ConnectionError("dropped mid-command"))
+    broken = MagicMock()
+    broken.send_command = MagicMock(side_effect=ConnectionError("dropped mid-command"))
     executor = DeviceQueryExecutor()
-    with patch("app.agent.executors._open_scrapli_connection", return_value=broken):
+    with patch("app.agent.executors._open_netmiko_connection", return_value=broken):
         result = await executor.execute(
             db_session, asset=asset, command_name="show_version", dynamic_password=None
         )
@@ -237,6 +233,45 @@ async def test_send_failure_after_connect_reports_dispatched(
     assert result.ok is False
     assert result.dispatched is True
     assert result.detail["error_class"] == "ConnectionError"
+
+
+async def test_conn_and_read_timeouts_are_passed_separately(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """建连超时与读超时量纲不同，必须各传各的值，不能共用一个配置项。
+
+    conn_timeout 管建连/认证，read_timeout 管单条命令等提示符——show running-config
+    这类大输出全靠后者兜底，混用会让其中一个被另一个的量纲压死。
+    """
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    monkeypatch.setattr(settings, "DEVICE_COMMAND_CONN_TIMEOUT_SECONDS", 11.0)
+    monkeypatch.setattr(settings, "DEVICE_COMMAND_READ_TIMEOUT_SECONDS", 33.0)
+    ciphertext = encrypt_credential_password("pw")
+    asset_id = await _make_asset(
+        db_session,
+        credential_type="static",
+        credential_username="admin",
+        credential_password_encrypted=ciphertext,
+    )
+    asset = await cmdb_asset_crud.get(db_session, asset_id)
+    assert asset is not None
+
+    captured: dict[str, object] = {}
+    conn = MagicMock()
+    conn.send_command = MagicMock(return_value="ok")
+
+    def fake_open(**kwargs: object) -> MagicMock:
+        captured.update(kwargs)
+        return conn
+
+    with patch("app.agent.executors._open_netmiko_connection", side_effect=fake_open):
+        result = await DeviceQueryExecutor().execute(
+            db_session, asset=asset, command_name="show_version", dynamic_password=None
+        )
+
+    assert result.ok is True
+    assert captured["conn_timeout"] == 11.0
+    assert conn.send_command.call_args.kwargs["read_timeout"] == 33.0
 
 
 def _generate_fernet_key() -> str:

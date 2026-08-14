@@ -794,7 +794,7 @@ async def test_device_control_connection_failure_reverts_to_approved(
 
     from unittest.mock import patch
 
-    with patch("app.agent.executors._open_scrapli_connection", side_effect=ConnectionError("unreachable")):
+    with patch("app.agent.executors._open_netmiko_connection", side_effect=ConnectionError("unreachable")):
         summary = await resume_proposal(
             db_session,
             proposal_id=proposal.proposal_id,
@@ -844,12 +844,12 @@ async def test_resume_retry_after_unknown_requires_allow_retry(
     proposal_id = proposal.proposal_id
     user_id = test_user.id
 
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import MagicMock, patch
 
     # 连接已建立、命令下发途中断开：无法确定命令是否已生效，必须走 UNKNOWN 人工核实。
-    broken_connection = AsyncMock()
-    broken_connection.send_command = AsyncMock(side_effect=ConnectionError("dropped mid-command"))
-    with patch("app.agent.executors._open_scrapli_connection", return_value=broken_connection):
+    broken_connection = MagicMock()
+    broken_connection.send_command = MagicMock(side_effect=ConnectionError("dropped mid-command"))
+    with patch("app.agent.executors._open_netmiko_connection", return_value=broken_connection):
         failed = await resume_proposal(db_session, proposal_id=proposal_id, actor_user_id=user_id)
     assert failed.status == "UNKNOWN"
 
@@ -864,11 +864,9 @@ async def test_resume_retry_after_unknown_requires_allow_retry(
     )
     await db_session.commit()
 
-    fake_connection = AsyncMock()
-    fake_connection.send_command = AsyncMock(
-        return_value=type("Resp", (), {"result": "Linux host info", "failed": False})()
-    )
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = MagicMock()
+    fake_connection.send_command = MagicMock(return_value="Linux host info")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         retried = await resume_proposal(db_session, proposal_id=proposal_id, actor_user_id=user_id)
 
     stored = await hitl_proposal_crud.get(db_session, proposal_id)
@@ -928,13 +926,11 @@ async def test_whitelisted_device_control_auto_executes_with_static_credential(
     await db_session.commit()
     await _set_session_approval_mode(db_session, session_id, "assist")
 
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import MagicMock, patch
 
-    fake_connection = AsyncMock()
-    fake_connection.send_interactive = AsyncMock(
-        return_value=type("Resp", (), {"result": "rebooting", "failed": False})()
-    )
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = MagicMock()
+    fake_connection.send_command_timing = MagicMock(return_value="rebooting")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         gate = _make_hitl_gate(db_engine, session_id=session_id, actor_user_id=test_user.id)
         dispatch = build_root_tool_dispatcher(
             db_session,
@@ -1289,13 +1285,11 @@ async def test_device_query_whitelist_auto_executes_for_static_credential(
     await db_session.commit()
     await _set_session_approval_mode(db_session, session_id, "assist")
 
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import MagicMock, patch
 
-    fake_connection = AsyncMock()
-    fake_connection.send_command = AsyncMock(
-        return_value=type("Resp", (), {"result": "fake output", "failed": False})()
-    )
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = MagicMock()
+    fake_connection.send_command = MagicMock(return_value="fake output")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         gate = _make_hitl_gate(db_engine, session_id=session_id, actor_user_id=test_user.id)
         dispatch = build_root_tool_dispatcher(
             db_session,
@@ -1385,13 +1379,11 @@ async def test_device_query_unclassified_auto_executes_in_full_mode(
     asset_id = await _make_query_asset(db_session, credential_password_encrypted=ciphertext)
     await _set_session_approval_mode(db_session, session_id, "full")
 
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import MagicMock, patch
 
-    fake_connection = AsyncMock()
-    fake_connection.send_command = AsyncMock(
-        return_value=type("Resp", (), {"result": "full mode output", "failed": False})()
-    )
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = MagicMock()
+    fake_connection.send_command = MagicMock(return_value="full mode output")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         gate = _make_hitl_gate(db_engine, session_id=session_id, actor_user_id=test_user.id)
         dispatch = build_root_tool_dispatcher(
             db_session,
@@ -1466,11 +1458,11 @@ async def test_resume_proposal_passes_dynamic_password_to_executor(db_session: A
     )
     await db_session.commit()
 
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import MagicMock, patch
 
-    fake_connection = AsyncMock()
-    fake_connection.send_command = AsyncMock(return_value=type("Resp", (), {"result": "otp output", "failed": False})())
-    with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
+    fake_connection = MagicMock()
+    fake_connection.send_command = MagicMock(return_value="otp output")
+    with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         resumed = await resume_proposal(
             db_session,
             proposal_id=summary.proposal_id,

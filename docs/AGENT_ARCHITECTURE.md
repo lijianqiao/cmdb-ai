@@ -409,7 +409,7 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 
 - 只有 `PENDING` 可审批决定；`REJECTED` / `EXECUTED` 为终态
 - **策略在每次认领执行前复检**：`execute_approved_proposal` 经 `_preflight_and_claim` 在同一短事务内复检命令策略与凭据，通过后才认领 `EXECUTING`；命令不存在或动态凭据缺失时不认领，提案保持 `APPROVED`；当前策略已黑名单时原子转 `REJECTED` 并写 `status_reason=policy_blacklisted`
-- **`EXECUTING` 先提交**：认领 `EXECUTING` 的事务提交后，外部执行器（Scrapli / notify）才启动；执行器内可观测已提交的 `EXECUTING` 状态
+- **`EXECUTING` 先提交**：认领 `EXECUTING` 的事务提交后，外部执行器（Netmiko / notify）才启动；执行器内可观测已提交的 `EXECUTING` 状态
 - **`UNKNOWN` 不自动重试**：执行失败、进程崩溃或启动恢复（`reconcile_executing_proposals` 将遗留 `EXECUTING` 批量转 `UNKNOWN`）后，系统不会自动再次执行；须管理员人工处置（见 [guide.md §5.3.1](./guide.md#531-管理员处置-unknown-提案本项目)）
 - **`UNKNOWN` 只留给真正不确定的失败**：执行器用 `ExecutionResult.dispatched` 区分两类失败——连接尚未建立就失败（平台/驱动不支持、认证失败、主机不可达）说明命令确定没下发、设备状态未被改动，原子转回 `APPROVED` 并写 `status_reason=dispatch_failed_before_send`，管理员修好前置条件即可直接重试；连接建立之后的任何失败都无法确定命令是否已生效，仍走 `UNKNOWN` 人工核实
 - **失败原因可追**：分类原因（含异常类名）写入 `action_payload.last_error`，经安全摘要透出到审批卡片与 Agent 上下文；完整异常堆栈只进服务端日志，不外泄。审计日志 `detail` 刻意不含异常文本
@@ -429,7 +429,7 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 | action_type      | 执行器                                                                                            | 当前状态                                                                                                                                                                                                                       |
 | :--------------- | :------------------------------------------------------------------------------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `notify`         | 写 `audit_logs` + 站内消息经 WebSocket 推给相关人                                                 | 已实现，无额外基建需求                                                                                                                                                                                                         |
-| `device_control` | Scrapli 执行通道（`send_interactive` / `send_configs`），复用 `device_query` 的命令目录与策略解析 | **已接入**：按会话 `AgentSession.approval_mode` 判定是否当场执行——默认 `ask` 白名单亦需人工审批；`assist`/`full` 可当场执行白名单+非动态凭据；`full` 另放开未分类非动态命令；黑名单不可绕过；动态凭据始终须人工批准并输入本次密码（见 [docs/superpowers/plans/2026-08-13-device-control-execution.md](./superpowers/plans/2026-08-13-device-control-execution.md)） |
+| `device_control` | Netmiko 执行通道（`send_command_timing` 两段式确认 / `send_config_set`），复用 `device_query` 的命令目录与策略解析 | **已接入**：按会话 `AgentSession.approval_mode` 判定是否当场执行——默认 `ask` 白名单亦需人工审批；`assist`/`full` 可当场执行白名单+非动态凭据；`full` 另放开未分类非动态命令；黑名单不可绕过；动态凭据始终须人工批准并输入本次密码（见 [docs/superpowers/plans/2026-08-13-device-control-execution.md](./superpowers/plans/2026-08-13-device-control-execution.md)） |
 
 ### 7. 确定性管道
 
@@ -513,7 +513,8 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 | A3   | `ripgrep`（`rg`）作为外部二进制部署到运行环境                                                         | 不是 Python 包依赖，Windows/Linux 都需要单独安装，需写进部署文档                                                                                                                                                                                                       |
 | A4   | 监控探活第一期只做 TCP，ICMP 是后续可选扩展点                                                         | 已在工具契约/数据模型里预留空间（`MonitorTarget.port` 必填即代表 TCP 模式），不阻塞后续加 ICMP                                                                                                                                                                         |
 | A5   | WebSocket 断线重连策略留到实现阶段细化                                                                | 本设计只定义消息契约，不定义重连协议                                                                                                                                                                                                                                   |
-| A6   | `device_control` 生产启用前的手工验证                                                                 | 已接入 Scrapli 执行通道；**生产启用 `state_changing` 命令白名单前**，须在测试网段真实/虚拟设备上手工验证 `reboot`（`send_interactive` 确认提示命中）、`port_disable`/`port_enable`（`send_configs` 含 Junos `commit`）行为，验证记录归档后方可对生产资产创建白名单策略 |
+| A6   | `device_control` 生产启用前的手工验证                                                                 | 已接入 Netmiko 执行通道；**生产启用 `state_changing` 命令白名单前**，须在测试网段真实/虚拟设备上手工验证 `reboot`（`send_command_timing` 确认提示命中）、`port_disable`/`port_enable`（`send_config_set` 含 Junos `commit`）行为，验证记录归档后方可对生产资产创建白名单策略 |
+| A8   | CMDB `vendor` 字段必须与设备实际厂商一致                                                              | Netmiko 按 `device_type` 决定登录后发哪条"关闭分页"命令（华为 `screen-length 0 temporary`、华三 `screen-length disable`、锐捷 `terminal width 256` + `terminal length 0`）。厂商标错会导致分页没关掉，大输出命令（如 `show_running_config`）在第一屏后卡在 `--More--`，表现为读超时——这是换用 Netmiko 前的实际故障原因 |
 | A7   | `HitlProposal.action_payload` 中的 `asset_id` 是松引用（存 int 值，不建数据库外键约束到 `CmdbAsset`） | 使 T08（CMDB）和 T10（HITL）可以并行独立开发；校验 `asset_id` 是否存在留给 `gate_action` / 门控工具实现层（届时 T08 应已就绪），不在数据库层强耦合                                                                                                             |
 
 ---
@@ -549,7 +550,7 @@ uv add httpx              # 调用本地 llama.cpp OpenAI 兼容接口（现有 
 | **T07** | 知识库子系统：`KnowledgeCategory`/`Document`/`Chunk` 模型，`kb_glob`/`kb_grep`/`kb_read`/`kb_semantic_search` 工具，上传 API，pgvector 集成，`classifier`/`kb_explorer` 角色                                                                          | P2                                    | T06                                                   |
 | **T08** | CMDB + 监控子系统：`CmdbAsset`/`CmdbAssetDependency`/`MonitorTarget`/`MonitorStatusEvent` 模型，`monitor_sweep`/`cmdb_diff_job` 确定性任务，`query_cmdb`/`query_monitor_status`/`query_cmdb_dependencies` 工具，`ops_explorer` 角色                   | 不依赖 spawn，纯确定性管道 + 只读工具 | T06                                                   |
 | **T09** | Spawn 编排 + 角色目录：`app/agent/spawn.py`，`ChildReceipt` 落地，`investigator`/`reviewer` 角色，两个编排范式（批量归类并行、根因排查并行）                                                                                                          | P3–P4                                 | T07 + T08                                             |
-| **T10** | HITL + 安全闸门：`app/agent/hitl.py` 状态机，`notify`/`device_control`/`query_device_command` 工具（经 `HitlGateHook` 门控），设备命令经 Scrapli `DeviceQueryExecutor` 执行通道落地，新增权限码（`knowledge:*`/`cmdb:*`/`monitor:*`/`agent:hitl_approve`） | P1 + 安全基线（第 9 节）              | T06                                                   |
+| **T10** | HITL + 安全闸门：`app/agent/hitl.py` 状态机，`notify`/`device_control`/`query_device_command` 工具（经 `HitlGateHook` 门控），设备命令经 Netmiko `DeviceQueryExecutor` 执行通道落地，新增权限码（`knowledge:*`/`cmdb:*`/`monitor:*`/`agent:hitl_approve`） | P1 + 安全基线（第 9 节）              | T06                                                   |
 | **T11** | 前端 Chat 页面：`OpsAssistantPage`、WebSocket 客户端、消息流组件、`HitlApprovalCard`、`KnowledgeUploadDialog`                                                                                                                                         | 对应前端集成                          | T06（至少要有可用的 WS 端点，可用 mock 提前并行开发） |
 
 ### 14. 任务依赖图

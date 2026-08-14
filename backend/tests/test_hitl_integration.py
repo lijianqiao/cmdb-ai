@@ -229,7 +229,7 @@ async def test_scenario_b_unclassified_device_control_forced_hitl_and_unreachabl
 
     await _grant_hitl_approve(db_session, test_user)
     with patch(
-        "app.agent.executors._open_scrapli_connection",
+        "app.agent.executors._open_netmiko_connection",
         side_effect=ConnectionError("unreachable"),
     ):
         first = await client.post(

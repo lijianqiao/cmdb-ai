@@ -128,7 +128,7 @@ def test_port_commands_require_interface_argument() -> None:
 
 
 def test_port_commands_config_templates_exclude_generic_driver_vendors() -> None:
-    """hp_comware/linux/generic 没有 Scrapli 配置模式驱动，不登记端口命令。"""
+    """hp_comware/linux/generic 未登记配置模式模板，不提供端口启停命令。"""
     port_disable = get_device_command("port_disable")
     assert port_disable.config_templates is not None
     assert set(port_disable.config_templates) == {"cisco_iosxe", "huawei_vrp", "juniper_junos"}
