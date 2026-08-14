@@ -30,6 +30,8 @@ export interface UseAgentWsOptions {
   enabled?: boolean
   /** 解析成功后的服务端消息回调 */
   onMessage?: (message: AgentWsServerMessage) => void
+  /** 连接状态变化回调（供快照恢复等逻辑使用） */
+  onStatusChange?: (status: AgentWsStatus) => void
 }
 
 export interface UseAgentWsResult {
@@ -53,18 +55,29 @@ export function useAgentWs({
   sessionId,
   enabled = true,
   onMessage,
+  onStatusChange,
 }: UseAgentWsOptions): UseAgentWsResult {
   const [status, setStatus] = useState<AgentWsStatus>("idle")
   const token = useAuthStore((state) => state.token)
   const onMessageRef = useRef(onMessage)
+  const onStatusChangeRef = useRef(onStatusChange)
 
   useEffect(() => {
     onMessageRef.current = onMessage
   }, [onMessage])
 
   useEffect(() => {
+    onStatusChangeRef.current = onStatusChange
+  }, [onStatusChange])
+
+  const updateStatus = (next: AgentWsStatus): void => {
+    setStatus(next)
+    onStatusChangeRef.current?.(next)
+  }
+
+  useEffect(() => {
     if (!enabled || sessionId == null) {
-      setStatus("idle")
+      updateStatus("idle")
       return
     }
 
@@ -87,18 +100,18 @@ export function useAgentWs({
       // 与 axios 拦截器同源，不复制 token 状态
       const accessToken = getAccessToken() ?? token
       if (!accessToken) {
-        setStatus("closed")
+        updateStatus("closed")
         return
       }
 
-      setStatus(attempt > 0 ? "reconnecting" : "connecting")
+      updateStatus(attempt > 0 ? "reconnecting" : "connecting")
       const url = buildAgentWsUrl(sessionId, accessToken)
       socket = new WebSocket(url)
 
       socket.onopen = () => {
         if (disposed) return
         attempt = 0
-        setStatus("open")
+        updateStatus("open")
       }
 
       socket.onmessage = (event: MessageEvent) => {
@@ -119,11 +132,11 @@ export function useAgentWs({
         socket = null
         if (disposed || intentionalClose) {
           if (!disposed) {
-            setStatus("closed")
+            updateStatus("closed")
           }
           return
         }
-        setStatus("reconnecting")
+        updateStatus("reconnecting")
         const delay = nextReconnectDelay(attempt)
         attempt += 1
         clearReconnectTimer()

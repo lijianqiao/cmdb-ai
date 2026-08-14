@@ -9,7 +9,59 @@ import {
   shouldSynthesizeSendError,
   type OpsChatState,
 } from "./use-ops-chat"
-import type { AgentMessage } from "@/types/agent"
+import type {
+  AgentMessage,
+  AgentSessionSnapshot,
+  HitlProposalSafeSummary,
+} from "@/types/agent"
+
+function buildSnapshot(
+  overrides: Partial<AgentSessionSnapshot> = {},
+): AgentSessionSnapshot {
+  return Object.assign(
+    {
+      messages: [],
+      proposals: [],
+      children: [],
+      has_more_messages: false,
+      next_before_message_id: null,
+    },
+    overrides,
+  )
+}
+
+function message(
+  overrides: Partial<AgentMessage> &
+    Pick<AgentMessage, "id" | "role" | "content">,
+): AgentMessage {
+  return Object.assign(
+    {
+      session_id: 1,
+      tool_call_id: null,
+      tool_calls: null,
+      created_at: "2026-08-14T00:00:00Z",
+    },
+    overrides,
+  )
+}
+
+function proposal(
+  overrides: Partial<HitlProposalSafeSummary> &
+    Pick<HitlProposalSafeSummary, "proposal_id" | "status">,
+): HitlProposalSafeSummary {
+  return Object.assign(
+    {
+      action_type: "notify",
+      status_reason: null,
+      reason: "test",
+      asset_id: null,
+      created_at: "2026-08-14T00:00:00Z",
+      execution_started_at: null,
+      resolved_at: null,
+    },
+    overrides,
+  )
+}
 
 const empty: OpsChatState = { items: [] }
 
@@ -170,5 +222,115 @@ describe("shouldSynthesizeSendError", () => {
   it("WS 已推 error 时不再合成 HTTP catch 错误行", () => {
     expect(shouldSynthesizeSendError(false)).toBe(true)
     expect(shouldSynthesizeSendError(true)).toBe(false)
+  })
+})
+
+describe("reduceOpsChat snapshot_loaded", () => {
+  it("hydrates messages and pending proposals with stable ids", () => {
+    const state = reduceOpsChat(
+      { items: [] },
+      {
+        type: "snapshot_loaded",
+        replace: true,
+        snapshot: buildSnapshot({
+          messages: [message({ id: 10, role: "assistant", content: "done" })],
+          proposals: [proposal({ proposal_id: 7, status: "PENDING" })],
+        }),
+      },
+    )
+    expect(state.items.map((item) => item.id)).toEqual(["message:10", "hitl:7"])
+  })
+
+  it("同一 snapshot 重放不重复条目", () => {
+    const action = {
+      type: "snapshot_loaded" as const,
+      replace: true,
+      snapshot: buildSnapshot({
+        messages: [message({ id: 10, role: "assistant", content: "done" })],
+        proposals: [proposal({ proposal_id: 7, status: "PENDING" })],
+      }),
+    }
+    let state = reduceOpsChat({ items: [] }, action)
+    state = reduceOpsChat(state, action)
+    expect(state.items).toHaveLength(2)
+    expect(state.items.map((item) => item.id)).toEqual(["message:10", "hitl:7"])
+  })
+
+  it("older page 前插更早消息", () => {
+    const base = reduceOpsChat(
+      { items: [] },
+      {
+        type: "snapshot_loaded",
+        replace: true,
+        snapshot: buildSnapshot({
+          messages: [message({ id: 20, role: "user", content: "newer" })],
+        }),
+      },
+    )
+    const state = reduceOpsChat(base, {
+      type: "snapshot_loaded",
+      replace: false,
+      snapshot: buildSnapshot({
+        messages: [message({ id: 10, role: "user", content: "older" })],
+      }),
+    })
+    expect(state.items.map((item) => item.id)).toEqual([
+      "message:10",
+      "message:20",
+    ])
+  })
+
+  it("replace 保留 pending optimistic user", () => {
+    const withOptimistic = reduceOpsChat(empty, {
+      type: "user_sent",
+      clientId: "local-user-1",
+      content: "发送中",
+    })
+    const state = reduceOpsChat(withOptimistic, {
+      type: "snapshot_loaded",
+      replace: true,
+      snapshot: buildSnapshot({
+        messages: [message({ id: 5, role: "assistant", content: "reply" })],
+      }),
+    })
+    expect(state.items.map((item) => item.id)).toEqual([
+      "message:5",
+      "local-user-1",
+    ])
+    expect(state.items[1]).toMatchObject({
+      kind: "user",
+      content: "发送中",
+    })
+  })
+
+  it("服务端最终 assistant 替换 streaming 临时项", () => {
+    let state = reduceOpsChat(empty, {
+      type: "ws",
+      message: {
+        type: "assistant_delta",
+        payload: { text: "半截", done: false },
+      },
+    })
+    expect(state.items[0]).toMatchObject({
+      kind: "assistant",
+      streaming: true,
+      content: "半截",
+    })
+    state = reduceOpsChat(state, {
+      type: "snapshot_loaded",
+      replace: true,
+      snapshot: buildSnapshot({
+        messages: [
+          message({ id: 99, role: "assistant", content: "完整回答" }),
+        ],
+      }),
+    })
+    expect(state.items).toHaveLength(1)
+    expect(state.items[0]).toMatchObject({
+      kind: "assistant",
+      id: "message:99",
+      content: "完整回答",
+      streaming: false,
+    })
   })
 })

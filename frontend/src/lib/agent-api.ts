@@ -9,6 +9,7 @@ import type {
   AgentMessageCreate,
   AgentSession,
   AgentSessionCreate,
+  AgentSessionSnapshot,
 } from "@/types/agent"
 
 /**
@@ -117,6 +118,29 @@ export async function listAgentMessages(
 ): Promise<AgentMessage[]> {
   const response = await api.get<ApiResponse<AgentMessage[]>>(
     `/agent/sessions/${sessionId}/messages`,
+  )
+  return response.data.data
+}
+
+/**
+ * 获取会话恢复快照（消息分页 + 可恢复提案 + 子 Agent 摘要）。
+ *
+ * Args:
+ *   sessionId: 会话 ID
+ *   params: cursor 分页参数
+ *   signal: 可选 AbortSignal，用于取消过期请求
+ *
+ * Returns:
+ *   会话快照
+ */
+export async function getAgentSessionSnapshot(
+  sessionId: number,
+  params: { before_message_id?: number; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<AgentSessionSnapshot> {
+  const response = await api.get<ApiResponse<AgentSessionSnapshot>>(
+    `/agent/sessions/${sessionId}/snapshot`,
+    { params, signal },
   )
   return response.data.data
 }

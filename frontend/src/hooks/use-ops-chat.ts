@@ -1,25 +1,33 @@
 /** 运维助手会话状态 hook
 
- * 加载 REST 历史 →（历史 settle 后）开 WS → 本地消息列表 → POST 发送 → 合并实时事件。
+ * 加载 REST 快照 →（快照 settle 后）开 WS → 本地消息列表 → POST 发送 → 合并实时事件。
  * 消息合并抽为纯 reducer；isSending 仅由 POST finally 解除（turn_done 不解锁）。
  */
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react"
 import { toast } from "sonner"
 
-import { listAgentMessages, postAgentMessage } from "@/lib/agent-api"
+import {
+  getAgentSessionSnapshot,
+  postAgentMessage,
+} from "@/lib/agent-api"
 import { useAgentWs, type AgentWsStatus } from "@/hooks/use-agent-ws"
-import type { AgentMessage, AgentWsServerMessage } from "@/types/agent"
+import type {
+  AgentMessage,
+  AgentSessionSnapshot,
+  AgentWsServerMessage,
+  HitlProposalSafeSummary,
+} from "@/types/agent"
 
 /**
  * 是否允许连接 Agent WS。
- * 仅在「当前 session 的历史已 settle」后为 true，避免 GET 与实时事件竞态。
+ * 仅在「当前 session 的快照已 settle」后为 true，避免 GET 与实时事件竞态。
  */
 export function shouldEnableAgentWs(
   sessionId: number | null | undefined,
-  historyReadySessionId: number | null,
+  snapshotReadySessionId: number | null,
 ): boolean {
-  return sessionId != null && historyReadySessionId === sessionId
+  return sessionId != null && snapshotReadySessionId === sessionId
 }
 
 /**
@@ -77,6 +85,11 @@ export interface OpsChatState {
 export type OpsChatAction =
   | { type: "reset" }
   | { type: "history_loaded"; messages: AgentMessage[] }
+  | {
+      type: "snapshot_loaded"
+      snapshot: AgentSessionSnapshot
+      replace: boolean
+    }
   | { type: "user_sent"; clientId: string; content: string }
   | { type: "ws"; message: AgentWsServerMessage }
 
@@ -88,6 +101,14 @@ let ephemeralSeq = 0
 function nextEphemeralId(prefix: string): string {
   ephemeralSeq += 1
   return `${prefix}-${ephemeralSeq}`
+}
+
+function messageItemId(messageId: number): string {
+  return `message:${messageId}`
+}
+
+function hitlItemId(proposalId: number): string {
+  return `hitl:${proposalId}`
 }
 
 /**
@@ -105,7 +126,7 @@ export function mapHistoryToItems(messages: AgentMessage[]): OpsChatItem[] {
     if (row.role === "user") {
       items.push({
         kind: "user",
-        id: `msg-${row.id}`,
+        id: messageItemId(row.id),
         serverId: row.id,
         content: row.content,
         createdAt: row.created_at,
@@ -120,7 +141,7 @@ export function mapHistoryToItems(messages: AgentMessage[]): OpsChatItem[] {
           const name = typeof tc.name === "string" ? tc.name : "tool"
           items.push({
             kind: "tool_call",
-            id: `toolcall-${row.id}-${toolCallId || nextEphemeralId("tc")}`,
+            id: `toolcall:${row.id}:${toolCallId || nextEphemeralId("tc")}`,
             toolCallId,
             name,
           })
@@ -129,7 +150,7 @@ export function mapHistoryToItems(messages: AgentMessage[]): OpsChatItem[] {
       if (row.content) {
         items.push({
           kind: "assistant",
-          id: `msg-${row.id}`,
+          id: messageItemId(row.id),
           serverId: row.id,
           content: row.content,
           streaming: false,
@@ -139,6 +160,50 @@ export function mapHistoryToItems(messages: AgentMessage[]): OpsChatItem[] {
     }
   }
   return items
+}
+
+function mapProposalToItem(
+  proposal: HitlProposalSafeSummary,
+): OpsChatItem {
+  return {
+    kind: "hitl",
+    id: hitlItemId(proposal.proposal_id),
+    proposalId: proposal.proposal_id,
+    actionType: proposal.action_type,
+    status: proposal.status,
+    reason: proposal.reason,
+    assetId: proposal.asset_id,
+    resultExcerpt: null,
+  }
+}
+
+function mapSnapshotToItems(snapshot: AgentSessionSnapshot): OpsChatItem[] {
+  const items = mapHistoryToItems(snapshot.messages)
+  for (const row of snapshot.proposals) {
+    items.push(mapProposalToItem(row))
+  }
+  return items
+}
+
+function mergeReplaceSnapshot(
+  existing: OpsChatItem[],
+  incoming: OpsChatItem[],
+): OpsChatItem[] {
+  const pendingUsers = existing.filter(
+    (item) => item.kind === "user" && item.serverId == null,
+  )
+  const incomingIds = new Set(incoming.map((item) => item.id))
+  const keptPending = pendingUsers.filter((item) => !incomingIds.has(item.id))
+  return [...incoming, ...keptPending]
+}
+
+function mergePrependSnapshot(
+  existing: OpsChatItem[],
+  incoming: OpsChatItem[],
+): OpsChatItem[] {
+  const existingIds = new Set(existing.map((item) => item.id))
+  const toPrepend = incoming.filter((item) => !existingIds.has(item.id))
+  return [...toPrepend, ...existing]
 }
 
 function readString(payload: Record<string, unknown>, key: string): string {
@@ -177,7 +242,7 @@ function readResultExcerpt(payload: Record<string, unknown>): string | null {
  *
  * Args:
  *   state: 当前时间线
- *   action: 历史加载 / 用户发送 / WS envelope
+ *   action: 历史加载 / 快照 / 用户发送 / WS envelope
  *
  * Returns:
  *   新状态
@@ -189,6 +254,14 @@ export function reduceOpsChat(state: OpsChatState, action: OpsChatAction): OpsCh
 
     case "history_loaded":
       return { items: mapHistoryToItems(action.messages) }
+
+    case "snapshot_loaded": {
+      const incoming = mapSnapshotToItems(action.snapshot)
+      if (action.replace) {
+        return { items: mergeReplaceSnapshot(state.items, incoming) }
+      }
+      return { items: mergePrependSnapshot(state.items, incoming) }
+    }
 
     case "user_sent":
       return {
@@ -266,12 +339,14 @@ function applyWsMessage(
     case "hitl_pending": {
       const proposalId = readProposalId(message.payload)
       if (proposalId == null) return state
+      const id = hitlItemId(proposalId)
+      if (state.items.some((item) => item.id === id)) return state
       return {
         items: [
           ...state.items,
           {
             kind: "hitl",
-            id: `hitl-${proposalId}`,
+            id,
             proposalId,
             actionType: readString(message.payload, "action_type"),
             status: readString(message.payload, "status") || "pending",
@@ -313,7 +388,7 @@ function applyWsMessage(
       if (!exists) {
         items.push({
           kind: "hitl",
-          id: `hitl-${proposalId}`,
+          id: hitlItemId(proposalId),
           proposalId,
           actionType: readString(message.payload, "action_type"),
           status,
@@ -373,11 +448,14 @@ export interface UseOpsChatResult {
   monitorAlert: Record<string, unknown> | null
   clearMonitorAlert: () => void
   sendMessage: (content: string) => Promise<void>
-  reloadHistory: () => Promise<void>
+  reloadSnapshot: () => Promise<void>
+  loadOlder: () => Promise<void>
+  hasMore: boolean
+  isLoadingOlder: boolean
 }
 
 /**
- * 运维助手单会话聊天状态：历史、发送、WS 合并。
+ * 运维助手单会话聊天状态：快照、发送、WS 合并。
  *
  * Args:
  *   options.sessionId: 当前会话；切换时重新加载并重连 WS
@@ -392,44 +470,129 @@ export function useOpsChat({
   const [isLoadingHistory, setIsLoadingHistory] = useState(
     () => sessionId != null,
   )
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
+  const [nextBeforeMessageId, setNextBeforeMessageId] = useState<number | null>(
+    null,
+  )
   const [isSending, setIsSending] = useState(false)
   const [monitorAlert, setMonitorAlert] = useState<Record<string, unknown> | null>(
     null,
   )
-  /** 历史已 settle 的 sessionId；与当前 sessionId 相等时才开 WS */
-  const [historyReadySessionId, setHistoryReadySessionId] = useState<number | null>(
-    null,
-  )
+  /** 快照已 settle 的 sessionId；与当前 sessionId 相等时才开 WS */
+  const [snapshotReadySessionId, setSnapshotReadySessionId] = useState<
+    number | null
+  >(null)
   /** 本轮发送期间是否已收到 WS error（避免 HTTP catch 再插一行） */
   const wsErrorForTurnRef = useRef(false)
+  const requestGenerationRef = useRef(0)
+  const snapshotAbortRef = useRef<AbortController | null>(null)
+  const activeSessionIdRef = useRef(sessionId)
+  const prevWsStatusRef = useRef<AgentWsStatus>("idle")
 
-  const reloadHistory = useCallback(async (): Promise<void> => {
-    if (sessionId == null) {
-      dispatch({ type: "reset" })
-      setMonitorAlert(null)
-      setHistoryReadySessionId(null)
-      setIsLoadingHistory(false)
-      return
-    }
-    // 加载期间关闭 WS，避免 history_loaded 整表替换冲掉已到的实时事件
-    setHistoryReadySessionId(null)
-    setIsLoadingHistory(true)
-    try {
-      const rows = await listAgentMessages(sessionId)
-      dispatch({ type: "history_loaded", messages: rows })
-      setHistoryReadySessionId(sessionId)
-    } catch {
-      toast.error("加载会话历史失败")
-      // 失败也放行 WS，便于用户继续发消息；时间线可能仍为空
-      setHistoryReadySessionId(sessionId)
-    } finally {
-      setIsLoadingHistory(false)
-    }
+  useEffect(() => {
+    activeSessionIdRef.current = sessionId
   }, [sessionId])
 
   useEffect(() => {
-    void reloadHistory()
-  }, [reloadHistory])
+    return () => {
+      snapshotAbortRef.current?.abort()
+    }
+  }, [])
+
+  const reloadSnapshot = useCallback(async (): Promise<void> => {
+    if (sessionId == null) {
+      dispatch({ type: "reset" })
+      setMonitorAlert(null)
+      setSnapshotReadySessionId(null)
+      setHasMore(false)
+      setNextBeforeMessageId(null)
+      setIsLoadingHistory(false)
+      return
+    }
+
+    setSnapshotReadySessionId(null)
+    setIsLoadingHistory(true)
+    const generation = ++requestGenerationRef.current
+    const controller = new AbortController()
+    snapshotAbortRef.current?.abort()
+    snapshotAbortRef.current = controller
+
+    try {
+      const snapshot = await getAgentSessionSnapshot(
+        sessionId,
+        {},
+        controller.signal,
+      )
+      if (
+        controller.signal.aborted ||
+        generation !== requestGenerationRef.current ||
+        sessionId !== activeSessionIdRef.current
+      ) {
+        return
+      }
+      setHasMore(snapshot.has_more_messages)
+      setNextBeforeMessageId(snapshot.next_before_message_id)
+      dispatch({ type: "snapshot_loaded", snapshot, replace: true })
+      setSnapshotReadySessionId(sessionId)
+    } catch {
+      if (!controller.signal.aborted) {
+        toast.error("加载会话快照失败")
+        setSnapshotReadySessionId(sessionId)
+      }
+    } finally {
+      if (!controller.signal.aborted) {
+        setIsLoadingHistory(false)
+      }
+    }
+  }, [sessionId])
+
+  const loadOlder = useCallback(async (): Promise<void> => {
+    if (
+      sessionId == null ||
+      !hasMore ||
+      isLoadingOlder ||
+      nextBeforeMessageId == null
+    ) {
+      return
+    }
+
+    setIsLoadingOlder(true)
+    const generation = ++requestGenerationRef.current
+    const controller = new AbortController()
+    snapshotAbortRef.current?.abort()
+    snapshotAbortRef.current = controller
+
+    try {
+      const snapshot = await getAgentSessionSnapshot(
+        sessionId,
+        { before_message_id: nextBeforeMessageId },
+        controller.signal,
+      )
+      if (
+        controller.signal.aborted ||
+        generation !== requestGenerationRef.current ||
+        sessionId !== activeSessionIdRef.current
+      ) {
+        return
+      }
+      setHasMore(snapshot.has_more_messages)
+      setNextBeforeMessageId(snapshot.next_before_message_id)
+      dispatch({ type: "snapshot_loaded", snapshot, replace: false })
+    } catch {
+      if (!controller.signal.aborted) {
+        toast.error("加载更早消息失败")
+      }
+    } finally {
+      if (!controller.signal.aborted) {
+        setIsLoadingOlder(false)
+      }
+    }
+  }, [sessionId, hasMore, isLoadingOlder, nextBeforeMessageId])
+
+  useEffect(() => {
+    void reloadSnapshot()
+  }, [reloadSnapshot])
 
   const handleWsMessage = useCallback((message: AgentWsServerMessage) => {
     if (message.type === "monitor_alert") {
@@ -439,17 +602,28 @@ export function useOpsChat({
     if (message.type === "error") {
       wsErrorForTurnRef.current = true
     }
-    // turn_done 只收尾时间线（streaming→false）；isSending 仅由 POST finally 解除
     dispatch({ type: "ws", message })
   }, [])
 
-  const historyReady = shouldEnableAgentWs(sessionId, historyReadySessionId)
+  const snapshotReady = shouldEnableAgentWs(sessionId, snapshotReadySessionId)
 
   const { status: wsStatus, reconnecting } = useAgentWs({
     sessionId,
-    enabled: historyReady,
+    enabled: snapshotReady,
     onMessage: handleWsMessage,
   })
+
+  useEffect(() => {
+    const prev = prevWsStatusRef.current
+    prevWsStatusRef.current = wsStatus
+    if (
+      sessionId != null &&
+      wsStatus === "open" &&
+      (prev === "reconnecting" || prev === "closed")
+    ) {
+      void reloadSnapshot()
+    }
+  }, [wsStatus, sessionId, reloadSnapshot])
 
   const sendMessage = useCallback(
     async (content: string): Promise<void> => {
@@ -475,9 +649,10 @@ export function useOpsChat({
         }
       } finally {
         setIsSending(false)
+        await reloadSnapshot()
       }
     },
-    [sessionId, isSending],
+    [sessionId, isSending, reloadSnapshot],
   )
 
   const clearMonitorAlert = useCallback(() => {
@@ -494,6 +669,9 @@ export function useOpsChat({
     monitorAlert,
     clearMonitorAlert,
     sendMessage,
-    reloadHistory,
+    reloadSnapshot,
+    loadOlder,
+    hasMore,
+    isLoadingOlder,
   }
 }

@@ -71,3 +71,36 @@ export interface AgentChatTurn {
   final_answer: string | null
   control: string | null
 }
+
+/** 快照中暴露的 HITL 提案安全摘要（不含 action_payload 与凭据） */
+export interface HitlProposalSafeSummary {
+  proposal_id: number
+  action_type: string
+  status: string
+  status_reason: string | null
+  reason: string
+  asset_id: number | null
+  created_at: string
+  execution_started_at: string | null
+  resolved_at: string | null
+}
+
+/** 快照中暴露的子 Agent 安全摘要 */
+export interface ChildAgentSnapshot {
+  child_id: string
+  role: string
+  task_brief: string
+  status: string
+  result_summary: string | null
+  created_at: string
+  status_changed_at: string
+}
+
+/** 会话恢复快照：根消息分页 + 可恢复提案 + 子 Agent 摘要 */
+export interface AgentSessionSnapshot {
+  messages: AgentMessage[]
+  proposals: HitlProposalSafeSummary[]
+  children: ChildAgentSnapshot[]
+  has_more_messages: boolean
+  next_before_message_id: number | null
+}

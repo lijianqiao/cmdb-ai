@@ -91,6 +91,9 @@ export function OpsAssistantPage() {
     monitorAlert,
     clearMonitorAlert,
     sendMessage,
+    loadOlder,
+    hasMore,
+    isLoadingOlder,
   } = useOpsChat({ sessionId: selectedSessionId })
 
   const loadSessions = useCallback(async (preferSessionId?: number | null) => {
@@ -394,6 +397,9 @@ export function OpsAssistantPage() {
               <ChatMessageList
                 messages={messages}
                 isLoading={isLoadingHistory}
+                hasMore={hasMore}
+                isLoadingOlder={isLoadingOlder}
+                onLoadOlder={loadOlder}
                 className="min-h-0 flex-1"
               />
               <div className="flex flex-col gap-2 border-t p-3">
