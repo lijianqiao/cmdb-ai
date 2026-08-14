@@ -451,25 +451,40 @@ async def execute_approved_proposal(
             session_factory, proposal_id, publisher, actor_user_id=actor_user_id
         )
 
-    async with session_factory() as finish_db:
-        finished = await hitl_proposal_crud.mark_executed(finish_db, proposal_id)
-        if finished.action_type in ("device_query", "device_control"):
-            output = result.detail.get("output")
-            if isinstance(output, str):
-                updated_payload = dict(finished.action_payload)
-                updated_payload["last_result_excerpt"] = output
-                updated_payload.pop("last_error", None)
-                if updated_payload != finished.action_payload:
-                    finished.action_payload = updated_payload
-                    await finish_db.flush()
-        await log_audit(
-            finish_db,
-            actor_user_id,
-            "hitl_executed",
-            target=f"hitl_proposal:{finished.id}",
-            detail=f"动作类型：{finished.action_type}",
+    try:
+        async with session_factory() as finish_db:
+            finished = await hitl_proposal_crud.mark_executed(finish_db, proposal_id)
+            if finished.action_type in ("device_query", "device_control"):
+                output = result.detail.get("output")
+                if isinstance(output, str):
+                    updated_payload = dict(finished.action_payload)
+                    updated_payload["last_result_excerpt"] = output
+                    updated_payload.pop("last_error", None)
+                    if updated_payload != finished.action_payload:
+                        finished.action_payload = updated_payload
+                        await finish_db.flush()
+            await log_audit(
+                finish_db,
+                actor_user_id,
+                "hitl_executed",
+                target=f"hitl_proposal:{finished.id}",
+                detail=f"动作类型：{finished.action_type}",
+            )
+            await finish_db.commit()
+    except asyncio.CancelledError:
+        await _mark_execution_unknown(
+            session_factory, proposal_id, publisher, actor_user_id=actor_user_id
         )
-        await finish_db.commit()
+        raise
+    except Exception as exc:
+        logger.warning(
+            "HITL 执行收尾异常 proposal_id=%s exc_type=%s",
+            proposal_id,
+            type(exc).__name__,
+        )
+        return await _mark_execution_unknown(
+            session_factory, proposal_id, publisher, actor_user_id=actor_user_id
+        )
 
     await _publish_execution_summary(publisher, finished)
     return _summary(finished)

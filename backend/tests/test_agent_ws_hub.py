@@ -59,10 +59,15 @@ class FakeWebSocket:
     def __init__(self) -> None:
         """初始化空发送记录。"""
         self.sent: list[dict[str, Any]] = []
+        self.closed: list[tuple[int, str | None]] = []
 
     async def send_json(self, data: dict[str, Any]) -> None:
         """保存一份快照，避免后续对象变化影响断言。"""
         self.sent.append(dict(data))
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        """记录服务端主动关闭，模拟 Starlette WebSocket 契约。"""
+        self.closed.append((code, reason))
 
 
 class BlockingWebSocket:
@@ -72,11 +77,16 @@ class BlockingWebSocket:
         """初始化阻塞门闩与空发送记录。"""
         self._gate = asyncio.Event()
         self.sent: list[dict[str, Any]] = []
+        self.closed: list[tuple[int, str | None]] = []
 
     async def send_json(self, data: dict[str, Any]) -> None:
         """等待门闩（默认永不打开），模拟网络发送卡住。"""
         await self._gate.wait()
         self.sent.append(dict(data))
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        """记录服务端主动关闭，模拟 Starlette WebSocket 契约。"""
+        self.closed.append((code, reason))
 
 
 async def test_broadcast_only_reaches_same_session() -> None:
@@ -348,6 +358,24 @@ async def test_slow_peer_does_not_block_fast_peer() -> None:
     assert fast.sent[0]["payload"]["text"] == "x"
 
 
+async def test_send_timeout_closes_slow_peer() -> None:
+    """writer 发送超时后必须主动关闭连接，让 API 接收任务能够退出。"""
+    hub = AgentWsHub(queue_size=1, send_timeout_seconds=0.01)
+    slow = BlockingWebSocket()
+    await hub.connect(1, slow)  # type: ignore[arg-type]
+
+    await hub.broadcast(
+        1,
+        AgentWsServerMessage(
+            type="assistant_delta",
+            payload={"text": "a", "done": False},
+        ),
+    )
+
+    await wait_until(lambda: slow not in hub._connections.get(1, {}))
+    assert slow.closed == [(1000, None)]
+
+
 async def test_full_queue_disconnects_slow_peer_and_disconnect_is_idempotent() -> None:
     """队列满时移除慢连接，快连接继续收消息；重复 disconnect 不抛异常。"""
     hub = AgentWsHub(queue_size=1, send_timeout_seconds=10.0)
@@ -368,6 +396,7 @@ async def test_full_queue_disconnects_slow_peer_and_disconnect_is_idempotent() -
     await wait_until(lambda: slow not in hub._connections.get(1, {}))
     await wait_until(lambda: len(fast.sent) == 3)
     await wait_until(lambda: slow_peer.writer_task.done())
+    assert slow.closed == [(1000, None)]
 
     await hub.disconnect(1, slow)  # type: ignore[arg-type]
     await hub.disconnect(1, slow)  # type: ignore[arg-type]

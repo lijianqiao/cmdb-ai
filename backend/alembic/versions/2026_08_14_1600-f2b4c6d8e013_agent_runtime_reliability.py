@@ -4,9 +4,8 @@
 @FileName: 2026_08_14_1600-f2b4c6d8e013_agent_runtime_reliability.py
 @DateTime: 2026-08-14
 @Docs: Agent 运行时可靠性 HITL 执行字段与会话 turn 租约迁移。
-"""
 
-"""Add HITL execution recovery and session turn-lease columns.
+Add HITL execution recovery and session turn-lease columns.
 
 Revision ID: f2b4c6d8e013
 Revises: c1a8e4b7d902

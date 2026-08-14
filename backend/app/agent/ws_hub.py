@@ -139,6 +139,8 @@ class AgentWsHub:
             peer.writer_task.cancel()
             with suppress(asyncio.CancelledError):
                 await peer.writer_task
+        with suppress(Exception):
+            await websocket.close()
 
     async def broadcast(self, session_id: int, message: AgentWsServerMessage) -> None:
         """

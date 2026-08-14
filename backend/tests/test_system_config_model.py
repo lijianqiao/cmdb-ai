@@ -7,8 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.system_config import SystemConfig
 
-pytestmark = pytest.mark.asyncio
-
 
 def test_key_column_is_non_null_and_unique() -> None:
     """配置键必须非空且在表内唯一。"""
@@ -36,6 +34,7 @@ def test_updated_by_user_id_is_nullable_and_references_users() -> None:
     assert foreign_keys[0].ondelete == "SET NULL"
 
 
+@pytest.mark.asyncio
 async def test_duplicate_key_rejected(db_session: AsyncSession) -> None:
     """重复配置键在数据库层被拒绝。"""
     db_session.add(SystemConfig(key="DUP_KEY", value="a"))

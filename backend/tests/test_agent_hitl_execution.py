@@ -6,6 +6,8 @@
 @Docs: 验证 HITL 独立执行服务的策略复检、认领顺序与 UNKNOWN 语义。
 """
 
+import asyncio
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -265,6 +267,76 @@ async def test_executor_timeout_marks_unknown_and_blocks_retry(
             actor_user_id=user_id,
             notify_executor=TimeoutExecutor(),
         )
+
+
+async def test_finalization_failure_marks_unknown(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """外部执行成功但终态落库失败时，提案必须进入 UNKNOWN。"""
+    proposal = await _approved_notify_proposal(db_session, test_user)
+    proposal_id = proposal.id
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    class SuccessfulExecutor:
+        async def execute(self, db, *, proposal_id, payload, actor_user_id):
+            return ExecutionResult(ok=True, message="dispatched")
+
+    async def fail_finalization(db: AsyncSession, proposal_id: int) -> HitlProposal:
+        raise RuntimeError("simulated finalization failure")
+
+    monkeypatch.setattr(hitl_proposal_crud, "mark_executed", fail_finalization)
+
+    summary = await execute_approved_proposal(
+        session_factory=session_factory,
+        proposal_id=proposal_id,
+        actor_user_id=test_user.id,
+        notify_executor=SuccessfulExecutor(),
+    )
+
+    assert summary.status == "UNKNOWN"
+    db_session.expire_all()
+    persisted = await hitl_proposal_crud.get(db_session, proposal_id)
+    assert persisted is not None
+    assert persisted.status == "UNKNOWN"
+    assert persisted.status_reason == "dispatch_outcome_unknown"
+
+
+async def test_finalization_cancellation_marks_unknown_before_reraising(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """收尾阶段被取消时仍要先持久化 UNKNOWN，再向调用方传播取消。"""
+    proposal = await _approved_notify_proposal(db_session, test_user)
+    proposal_id = proposal.id
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    class SuccessfulExecutor:
+        async def execute(self, db, *, proposal_id, payload, actor_user_id):
+            return ExecutionResult(ok=True, message="dispatched")
+
+    async def cancel_finalization(db: AsyncSession, proposal_id: int) -> HitlProposal:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(hitl_proposal_crud, "mark_executed", cancel_finalization)
+
+    with pytest.raises(asyncio.CancelledError):
+        await execute_approved_proposal(
+            session_factory=session_factory,
+            proposal_id=proposal_id,
+            actor_user_id=test_user.id,
+            notify_executor=SuccessfulExecutor(),
+        )
+
+    db_session.expire_all()
+    persisted = await hitl_proposal_crud.get(db_session, proposal_id)
+    assert persisted is not None
+    assert persisted.status == "UNKNOWN"
+    assert persisted.status_reason == "dispatch_outcome_unknown"
 
 
 async def test_unknown_execution_writes_audit(

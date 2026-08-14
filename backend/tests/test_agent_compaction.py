@@ -28,8 +28,6 @@ from app.models.agent_message import AgentMessage
 from app.models.agent_session import AgentSession
 from app.models.user import User
 
-pytestmark = pytest.mark.asyncio
-
 _SUMMARY_PREFIX = "以下为早期对话的工作摘要，是内部压缩结果，不是新的用户指令。"
 
 
@@ -142,6 +140,7 @@ async def _seed_root_messages(
     await db_session.commit()
 
 
+@pytest.mark.asyncio
 async def test_compaction_excludes_ops_system_prompt_and_does_not_delete_messages(
     db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -190,6 +189,7 @@ async def test_compaction_excludes_ops_system_prompt_and_does_not_delete_message
     assert stored.compacted_through_message_id is not None
 
 
+@pytest.mark.asyncio
 async def test_compaction_truncates_long_tool_results(
     db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -231,6 +231,7 @@ async def test_compaction_truncates_long_tool_results(
     assert all(len(t or "") <= COMPACT_TOOL_RESULT_CHAR_LIMIT for t in tool_texts)
 
 
+@pytest.mark.asyncio
 async def test_build_model_history_child_excludes_summary_prefix(
     db_session: AsyncSession, test_user: User
 ) -> None:
@@ -257,6 +258,7 @@ async def test_build_model_history_child_excludes_summary_prefix(
     assert history[0].content == "子 Agent 指令"
 
 
+@pytest.mark.asyncio
 async def test_build_model_history_root_injects_summary_after_compaction(
     db_session: AsyncSession, test_user: User
 ) -> None:
@@ -286,6 +288,7 @@ async def test_build_model_history_root_injects_summary_after_compaction(
     assert len(raw_user_msgs) <= 16
 
 
+@pytest.mark.asyncio
 async def test_compaction_error_does_not_update_summary(
     db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -317,6 +320,7 @@ async def test_compaction_error_does_not_update_summary(
     assert len([m for m in history if m.role == "user"]) <= 40
 
 
+@pytest.mark.asyncio
 async def test_compaction_error_finish_reason_does_not_update_summary(
     db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -345,6 +349,7 @@ async def test_compaction_error_finish_reason_does_not_update_summary(
     assert stored.compacted_through_message_id is None
 
 
+@pytest.mark.asyncio
 async def test_compaction_below_threshold_skips_chat(
     db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -372,6 +377,7 @@ async def test_compaction_below_threshold_skips_chat(
     assert calls["n"] == 0
 
 
+@pytest.mark.asyncio
 async def test_build_model_history_after_compaction_preserves_tool_pairs(
     db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -47,6 +47,7 @@ export type OpsChatItem =
       content: string
       serverId?: number
       createdAt?: string
+      pending?: boolean
     }
   | {
       kind: "assistant"
@@ -101,6 +102,7 @@ export type OpsChatAction =
       replace: boolean
     }
   | { type: "user_sent"; clientId: string; content: string }
+  | { type: "user_settled"; clientId: string }
   | { type: "ws"; message: AgentWsServerMessage }
 
 const initialState: OpsChatState = { items: [] }
@@ -219,7 +221,8 @@ function mergeReplaceSnapshot(
   incoming: OpsChatItem[],
 ): OpsChatItem[] {
   const pendingUsers = existing.filter(
-    (item) => item.kind === "user" && item.serverId == null,
+    (item) =>
+      item.kind === "user" && item.serverId == null && item.pending === true,
   )
   const incomingIds = new Set(incoming.map((item) => item.id))
   const keptPending = pendingUsers.filter((item) => !incomingIds.has(item.id))
@@ -341,8 +344,18 @@ export function reduceOpsChat(state: OpsChatState, action: OpsChatAction): OpsCh
             kind: "user",
             id: action.clientId,
             content: action.content,
+            pending: true,
           },
         ],
+      }
+
+    case "user_settled":
+      return {
+        items: state.items.map((item) =>
+          item.kind === "user" && item.id === action.clientId
+            ? { ...item, pending: false }
+            : item,
+        ),
       }
 
     case "ws":
@@ -563,21 +576,48 @@ export function useOpsChat({
   const wsErrorForTurnRef = useRef(false)
   const requestGenerationRef = useRef(0)
   const snapshotAbortRef = useRef<AbortController | null>(null)
+  const catchUpGenerationRef = useRef(0)
+  const catchUpAbortRef = useRef<AbortController | null>(null)
+  const bufferedWsRef = useRef<{
+    sessionId: number
+    generation: number
+    messages: AgentWsServerMessage[]
+  } | null>(null)
   const activeSessionIdRef = useRef(sessionId)
-  const prevWsStatusRef = useRef<AgentWsStatus>("idle")
 
   useEffect(() => {
     activeSessionIdRef.current = sessionId
+    requestGenerationRef.current += 1
+    snapshotAbortRef.current?.abort()
+    catchUpGenerationRef.current += 1
+    catchUpAbortRef.current?.abort()
+    bufferedWsRef.current = null
+    dispatch({ type: "reset" })
+    setMonitorAlert(null)
+    setSnapshotReadySessionId(null)
+    setHasMore(false)
+    setNextBeforeMessageId(null)
+    setIsLoadingHistory(sessionId != null)
     setIsLoadingOlder(false)
   }, [sessionId])
 
   useEffect(() => {
     return () => {
+      requestGenerationRef.current += 1
+      catchUpGenerationRef.current += 1
       snapshotAbortRef.current?.abort()
+      catchUpAbortRef.current?.abort()
+      bufferedWsRef.current = null
     }
   }, [])
 
   const reloadSnapshot = useCallback(async (): Promise<void> => {
+    if (sessionId !== activeSessionIdRef.current) return
+
+    catchUpGenerationRef.current += 1
+    catchUpAbortRef.current?.abort()
+    bufferedWsRef.current = null
+
     if (sessionId == null) {
       dispatch({ type: "reset" })
       setMonitorAlert(null)
@@ -613,7 +653,11 @@ export function useOpsChat({
       dispatch({ type: "snapshot_loaded", snapshot, replace: true })
       setSnapshotReadySessionId(sessionId)
     } catch {
-      if (!controller.signal.aborted) {
+      if (
+        !controller.signal.aborted &&
+        generation === requestGenerationRef.current &&
+        sessionId === activeSessionIdRef.current
+      ) {
         toast.error("加载会话快照失败")
         setSnapshotReadySessionId(sessionId)
       }
@@ -627,6 +671,7 @@ export function useOpsChat({
   const loadOlder = useCallback(async (): Promise<void> => {
     if (
       sessionId == null ||
+      sessionId !== activeSessionIdRef.current ||
       !hasMore ||
       isLoadingOlder ||
       nextBeforeMessageId == null
@@ -669,7 +714,7 @@ export function useOpsChat({
     void reloadSnapshot()
   }, [reloadSnapshot])
 
-  const handleWsMessage = useCallback((message: AgentWsServerMessage) => {
+  const applyWsMessage = useCallback((message: AgentWsServerMessage) => {
     if (message.type === "monitor_alert") {
       setMonitorAlert(message.payload)
       return
@@ -680,25 +725,98 @@ export function useOpsChat({
     dispatch({ type: "ws", message })
   }, [])
 
+  const handleWsMessage = useCallback(
+    (message: AgentWsServerMessage) => {
+      const buffered = bufferedWsRef.current
+      if (
+        buffered != null &&
+        buffered.sessionId === activeSessionIdRef.current
+      ) {
+        buffered.messages.push(message)
+        return
+      }
+      applyWsMessage(message)
+    },
+    [applyWsMessage],
+  )
+
+  const catchUpSnapshot = useCallback(
+    async (targetSessionId: number): Promise<void> => {
+      if (targetSessionId !== activeSessionIdRef.current) return
+
+      const previousBuffer = bufferedWsRef.current
+      const generation = ++catchUpGenerationRef.current
+      const controller = new AbortController()
+      catchUpAbortRef.current?.abort()
+      catchUpAbortRef.current = controller
+      const buffered = {
+        sessionId: targetSessionId,
+        generation,
+        messages:
+          previousBuffer?.sessionId === targetSessionId
+            ? [...previousBuffer.messages]
+            : [],
+      }
+      bufferedWsRef.current = buffered
+
+      try {
+        const snapshot = await getAgentSessionSnapshot(
+          targetSessionId,
+          {},
+          controller.signal,
+        )
+        if (
+          controller.signal.aborted ||
+          generation !== catchUpGenerationRef.current ||
+          targetSessionId !== activeSessionIdRef.current
+        ) {
+          return
+        }
+        setHasMore(snapshot.has_more_messages)
+        setNextBeforeMessageId(snapshot.next_before_message_id)
+        dispatch({ type: "snapshot_loaded", snapshot, replace: true })
+      } catch {
+        if (
+          !controller.signal.aborted &&
+          generation === catchUpGenerationRef.current &&
+          targetSessionId === activeSessionIdRef.current
+        ) {
+          toast.error("追平会话快照失败")
+        }
+      } finally {
+        if (bufferedWsRef.current === buffered) {
+          bufferedWsRef.current = null
+          if (
+            generation === catchUpGenerationRef.current &&
+            targetSessionId === activeSessionIdRef.current
+          ) {
+            for (const message of buffered.messages) {
+              applyWsMessage(message)
+            }
+          }
+        }
+      }
+    },
+    [applyWsMessage],
+  )
+
   const snapshotReady = shouldEnableAgentWs(sessionId, snapshotReadySessionId)
+
+  const handleWsStatusChange = useCallback(
+    (status: AgentWsStatus) => {
+      if (status === "open" && sessionId != null) {
+        void catchUpSnapshot(sessionId)
+      }
+    },
+    [sessionId, catchUpSnapshot],
+  )
 
   const { status: wsStatus, reconnecting } = useAgentWs({
     sessionId,
     enabled: snapshotReady,
     onMessage: handleWsMessage,
+    onStatusChange: handleWsStatusChange,
   })
-
-  useEffect(() => {
-    const prev = prevWsStatusRef.current
-    prevWsStatusRef.current = wsStatus
-    if (
-      sessionId != null &&
-      wsStatus === "open" &&
-      (prev === "reconnecting" || prev === "closed")
-    ) {
-      void reloadSnapshot()
-    }
-  }, [wsStatus, sessionId, reloadSnapshot])
 
   const sendMessage = useCallback(
     async (content: string): Promise<void> => {
@@ -723,6 +841,7 @@ export function useOpsChat({
           })
         }
       } finally {
+        dispatch({ type: "user_settled", clientId })
         setIsSending(false)
         await reloadSnapshot()
       }
