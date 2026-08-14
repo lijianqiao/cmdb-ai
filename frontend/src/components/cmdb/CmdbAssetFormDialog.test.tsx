@@ -6,7 +6,7 @@ import {
   clearedCredentialFields,
   createFormSchema,
 } from "./cmdbAssetFormSchema"
-import { VENDOR_ITEMS } from "./CmdbAssetFormDialog"
+import { isVendorName, VENDOR_ITEMS } from "./cmdbVendors"
 
 const baseAssetFields = {
   asset_type: "server",
@@ -20,6 +20,11 @@ const baseAssetFields = {
 }
 
 describe("CmdbAssetFormDialog 凭据校验规则", () => {
+  it("仅将已登记的厂商值识别为 VendorName", () => {
+    expect(isVendorName("cisco_small_business")).toBe(true)
+    expect(isVendorName("unknown_vendor")).toBe(false)
+  })
+
   it("显示 SG350X 对应的 Cisco Small Business 厂商选项", () => {
     expect(VENDOR_ITEMS).toContainEqual({
       label: "思科 Small Business（SG350X 等）",

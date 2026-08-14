@@ -2,18 +2,9 @@
 
 import { z } from "zod"
 
-import type { CredentialType, VendorName } from "@/types/cmdb"
+import type { CredentialType } from "@/types/cmdb"
 
-/** 厂商枚举值须与后端 app/agent/device_commands.py::VendorName 手动保持一致，后端才是权威来源 */
-const VENDOR_VALUES = [
-  "cisco_iosxe",
-  "cisco_small_business",
-  "huawei_vrp",
-  "hp_comware",
-  "juniper_junos",
-  "linux",
-  "generic",
-] as const satisfies readonly VendorName[]
+import { VENDOR_VALUES } from "./cmdbVendors"
 
 /** 切换凭据类型时返回应写入 RHF 的空凭据字段，避免隐藏字段残留导致 zod 失败 */
 export function clearedCredentialFields(): {

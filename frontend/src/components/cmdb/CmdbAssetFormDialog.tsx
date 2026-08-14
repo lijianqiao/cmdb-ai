@@ -61,6 +61,7 @@ import {
   createFormSchema,
   type CmdbAssetFormValues,
 } from "./cmdbAssetFormSchema"
+import { isVendorName, VENDOR_ITEMS } from "./cmdbVendors"
 
 const ASSET_TYPE_ITEMS: { label: string; value: string }[] = [
   { label: "服务器", value: "server" },
@@ -70,20 +71,6 @@ const ASSET_TYPE_ITEMS: { label: string; value: string }[] = [
   { label: "负载均衡", value: "load_balancer" },
   { label: "存储", value: "storage" },
   { label: "其他", value: "other" },
-]
-
-// eslint-disable-next-line react-refresh/only-export-components -- Exposed for focused vendor option tests.
-export const VENDOR_ITEMS: { label: string; value: VendorName }[] = [
-  { label: "通用", value: "generic" },
-  { label: "思科 IOS-XE", value: "cisco_iosxe" },
-  {
-    label: "思科 Small Business（SG350X 等）",
-    value: "cisco_small_business",
-  },
-  { label: "华为 VRP", value: "huawei_vrp" },
-  { label: "H3C Comware", value: "hp_comware" },
-  { label: "Juniper Junos", value: "juniper_junos" },
-  { label: "Linux", value: "linux" },
 ]
 
 const CREDENTIAL_TYPE_ITEMS: { label: string; value: CredentialType }[] = [
@@ -172,19 +159,7 @@ interface CmdbAssetFormDialogProps {
 }
 
 function resolveVendor(value: string | undefined): VendorName {
-  const known: readonly VendorName[] = [
-    "cisco_iosxe",
-    "cisco_small_business",
-    "huawei_vrp",
-    "hp_comware",
-    "juniper_junos",
-    "linux",
-    "generic",
-  ]
-  if (value && (known as readonly string[]).includes(value)) {
-    return value as VendorName
-  }
-  return "generic"
+  return isVendorName(value) ? value : "generic"
 }
 
 function defaultValues(asset?: CmdbAsset | null): CmdbAssetFormValues {
