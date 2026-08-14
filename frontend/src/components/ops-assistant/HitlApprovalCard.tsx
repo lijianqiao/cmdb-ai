@@ -29,6 +29,7 @@ import { Cancel01Icon, Tick02Icon } from "@/lib/icons"
 import {
   decideHitlProposal,
   getHitlProposal,
+  resolveUnknownHitlProposal,
   retryHitlProposal,
   type HitlProposal,
 } from "@/lib/hitl-api"
@@ -37,6 +38,7 @@ import { cn } from "@/lib/utils"
 import {
   isApproveButtonDisabled,
   isRetryAvailable,
+  isUnknownResolutionAvailable,
   needsDynamicCredentialPassword,
   readLastError,
   shouldShowResultExcerpt,
@@ -74,6 +76,8 @@ function statusLabel(status: string): string {
     case "EXECUTION_FAILED":
       // T10：device_control stub 失败保持 APPROVED，前端统一为「已批准但未执行」
       return "已批准但未执行"
+    case "UNKNOWN":
+      return "执行结果不确定"
     default:
       return status || "未知状态"
   }
@@ -173,6 +177,10 @@ export function HitlApprovalCard({
 
   const lastError = readLastError(detail?.action_payload)
   const retryAvailable = isRetryAvailable(canApprove, displayStatus)
+  const unknownResolutionAvailable = isUnknownResolutionAvailable(
+    canApprove,
+    displayStatus,
+  )
 
   const approveDisabled = isApproveButtonDisabled(
     deciding,
@@ -281,6 +289,28 @@ export function HitlApprovalCard({
       )
     } catch (error: unknown) {
       toast.error(readErrorMessage(error, "重试失败"))
+    } finally {
+      setDeciding(false)
+    }
+  }
+
+  const handleResolveUnknown = async (
+    resolution: "confirm_executed" | "allow_retry",
+  ): Promise<void> => {
+    if (!unknownResolutionAvailable || deciding) return
+    setDeciding(true)
+    try {
+      const updated = await resolveUnknownHitlProposal(proposalId, resolution)
+      setDetail(updated)
+      setLocalStatus(updated.status)
+      setDynamicPassword("")
+      toast.success(
+        resolution === "confirm_executed"
+          ? "已确认设备上命令已执行"
+          : "已允许重试，请再次执行",
+      )
+    } catch (error: unknown) {
+      toast.error(readErrorMessage(error, "处置失败"))
     } finally {
       setDeciding(false)
     }
@@ -437,6 +467,40 @@ export function HitlApprovalCard({
               )}
               重试执行
             </Button>
+          </CardFooter>
+        ) : null}
+
+        {unknownResolutionAvailable ? (
+          <CardFooter className="flex flex-col items-stretch gap-3">
+            <p className="text-xs text-muted-foreground">
+              执行结果不确定。请先在真实设备上核实命令是否已生效，再选择下方处置方式。
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                disabled={deciding || detailLoading}
+                onClick={() => void handleResolveUnknown("confirm_executed")}
+                data-testid="hitl-confirm-executed-button"
+              >
+                {deciding ? (
+                  <Spinner data-icon="inline-start" />
+                ) : (
+                  <Tick02Icon data-icon="inline-start" />
+                )}
+                确认已执行（我已检查设备）
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={deciding || detailLoading}
+                onClick={() => void handleResolveUnknown("allow_retry")}
+                data-testid="hitl-allow-retry-button"
+              >
+                允许重试（我已检查设备）
+              </Button>
+            </div>
           </CardFooter>
         ) : null}
       </Card>

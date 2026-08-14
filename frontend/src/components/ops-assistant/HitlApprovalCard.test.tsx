@@ -2,9 +2,9 @@
 
 // @vitest-environment jsdom
 
-import { render, screen, waitFor } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import "@testing-library/jest-dom/vitest"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { HitlProposal } from "@/lib/hitl-api"
 
@@ -17,6 +17,10 @@ import {
   shouldShowResultExcerpt,
 } from "./hitlApprovalCardUtils"
 
+afterEach(() => {
+  cleanup()
+})
+
 vi.mock("@/hooks/use-permission", () => ({
   usePermission: vi.fn(),
 }))
@@ -25,6 +29,7 @@ vi.mock("@/lib/hitl-api", () => ({
   getHitlProposal: vi.fn(),
   decideHitlProposal: vi.fn(),
   retryHitlProposal: vi.fn(),
+  resolveUnknownHitlProposal: vi.fn(),
 }))
 
 vi.mock("sonner", () => ({
@@ -35,10 +40,21 @@ vi.mock("sonner", () => ({
 }))
 
 import { usePermission } from "@/hooks/use-permission"
-import { getHitlProposal } from "@/lib/hitl-api"
+import { getHitlProposal, resolveUnknownHitlProposal } from "@/lib/hitl-api"
 
 const mockUsePermission = vi.mocked(usePermission)
 const mockGetHitlProposal = vi.mocked(getHitlProposal)
+const mockResolveUnknownHitlProposal = vi.mocked(resolveUnknownHitlProposal)
+
+function permissionResult(canApprove: boolean) {
+  return {
+    permissions: canApprove ? ["agent:hitl_approve"] : [],
+    hasPermission: (code: string) =>
+      canApprove && code === "agent:hitl_approve",
+    hasAnyPermission: () => canApprove,
+    hasAllPermissions: () => canApprove,
+  }
+}
 
 function buildProposal(overrides: Partial<HitlProposal> = {}): HitlProposal {
   return {
@@ -220,5 +236,98 @@ describe("HitlApprovalCard 组件渲染", () => {
       )
     })
     expect(screen.getByTestId("hitl-retry-button")).toBeInTheDocument()
+  })
+})
+
+describe("HitlApprovalCard UNKNOWN 人工处置", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockUsePermission.mockReturnValue(permissionResult(false))
+  })
+
+  it("shows two administrator resolutions for UNKNOWN", async () => {
+    mockUsePermission.mockReturnValue(permissionResult(true))
+    mockGetHitlProposal.mockResolvedValue(buildProposal({ status: "UNKNOWN" }))
+    render(
+      <HitlApprovalCard
+        proposalId={1}
+        actionType="device_control"
+        status="UNKNOWN"
+        reason="重启接口"
+        assetId={9}
+      />,
+    )
+
+    expect(await screen.findByTestId("hitl-confirm-executed-button")).toBeEnabled()
+    expect(screen.getByTestId("hitl-allow-retry-button")).toBeEnabled()
+    expect(screen.queryByTestId("hitl-retry-button")).not.toBeInTheDocument()
+  })
+
+  it("无审批权限时 UNKNOWN 仅展示状态，不显示处置按钮", async () => {
+    render(
+      <HitlApprovalCard
+        proposalId={1}
+        actionType="device_control"
+        status="UNKNOWN"
+        reason="重启接口"
+        assetId={9}
+      />,
+    )
+
+    expect(screen.queryByTestId("hitl-confirm-executed-button")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("hitl-allow-retry-button")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("hitl-retry-button")).not.toBeInTheDocument()
+    expect(screen.getByText("执行结果不确定")).toBeInTheDocument()
+  })
+
+  it("点击确认已执行时发送 confirm_executed", async () => {
+    mockUsePermission.mockReturnValue(permissionResult(true))
+    mockGetHitlProposal.mockResolvedValue(buildProposal({ status: "UNKNOWN" }))
+    mockResolveUnknownHitlProposal.mockResolvedValue(
+      buildProposal({ status: "EXECUTED", executed_at: "2026-08-14T01:00:00Z" }),
+    )
+
+    render(
+      <HitlApprovalCard
+        proposalId={1}
+        actionType="device_control"
+        status="UNKNOWN"
+        reason="重启接口"
+        assetId={9}
+      />,
+    )
+
+    fireEvent.click(await screen.findByTestId("hitl-confirm-executed-button"))
+
+    await waitFor(() => {
+      expect(mockResolveUnknownHitlProposal).toHaveBeenCalledWith(
+        1,
+        "confirm_executed",
+      )
+    })
+  })
+
+  it("点击允许重试时发送 allow_retry", async () => {
+    mockUsePermission.mockReturnValue(permissionResult(true))
+    mockGetHitlProposal.mockResolvedValue(buildProposal({ status: "UNKNOWN" }))
+    mockResolveUnknownHitlProposal.mockResolvedValue(
+      buildProposal({ status: "APPROVED" }),
+    )
+
+    render(
+      <HitlApprovalCard
+        proposalId={1}
+        actionType="device_control"
+        status="UNKNOWN"
+        reason="重启接口"
+        assetId={9}
+      />,
+    )
+
+    fireEvent.click(await screen.findByTestId("hitl-allow-retry-button"))
+
+    await waitFor(() => {
+      expect(mockResolveUnknownHitlProposal).toHaveBeenCalledWith(1, "allow_retry")
+    })
   })
 })

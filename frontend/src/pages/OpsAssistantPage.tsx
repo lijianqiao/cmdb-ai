@@ -71,7 +71,8 @@ export function OpsAssistantPage() {
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<AgentSession | null>(null)
-  const [fullAccessDialogOpen, setFullAccessDialogOpen] = useState(false)
+  const [fullAccessTargetSessionId, setFullAccessTargetSessionId] =
+    useState<number | null>(null)
   const [patchingApprovalMode, setPatchingApprovalMode] = useState(false)
   const canUploadKnowledge = hasPermission(PERMISSIONS.KNOWLEDGE_UPLOAD)
 
@@ -124,6 +125,10 @@ export function OpsAssistantPage() {
     void loadSessions()
   }, [loadSessions])
 
+  useEffect(() => {
+    setFullAccessTargetSessionId(null)
+  }, [selectedSessionId])
+
   const handleCreateSession = async (): Promise<void> => {
     if (creating) return
     setCreating(true)
@@ -164,11 +169,13 @@ export function OpsAssistantPage() {
     )
   }
 
-  const patchApprovalMode = async (mode: ApprovalMode): Promise<void> => {
-    if (selectedSessionId == null) return
+  const patchApprovalMode = async (
+    sessionId: number,
+    mode: ApprovalMode,
+  ): Promise<void> => {
     setPatchingApprovalMode(true)
     try {
-      const updated = await patchAgentSession(selectedSessionId, {
+      const updated = await patchAgentSession(sessionId, {
         approval_mode: mode,
       })
       updateSessionInList(updated)
@@ -182,15 +189,17 @@ export function OpsAssistantPage() {
   const handleApprovalModeSelect = (mode: ApprovalMode): void => {
     if (selectedSessionId == null || approvalMode == null) return
     if (mode === "full" && approvalMode !== "full") {
-      setFullAccessDialogOpen(true)
+      setFullAccessTargetSessionId(selectedSessionId)
       return
     }
-    void patchApprovalMode(mode)
+    void patchApprovalMode(selectedSessionId, mode)
   }
 
   const handleFullAccessConfirm = async (): Promise<void> => {
-    setFullAccessDialogOpen(false)
-    await patchApprovalMode("full")
+    const targetId = fullAccessTargetSessionId
+    setFullAccessTargetSessionId(null)
+    if (targetId == null) return
+    await patchApprovalMode(targetId, "full")
   }
 
   const connectionLabel = wsStatusLabel(reconnecting, wsStatus)
@@ -242,7 +251,12 @@ export function OpsAssistantPage() {
         onConfirm={handleDeleteConfirm}
       />
 
-      <Dialog open={fullAccessDialogOpen} onOpenChange={setFullAccessDialogOpen}>
+      <Dialog
+        open={fullAccessTargetSessionId != null}
+        onOpenChange={(open) => {
+          if (!open) setFullAccessTargetSessionId(null)
+        }}
+      >
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>确认开启完全访问</DialogTitle>
@@ -254,7 +268,7 @@ export function OpsAssistantPage() {
             <Button
               type="button"
               variant="outline"
-              onClick={() => setFullAccessDialogOpen(false)}
+              onClick={() => setFullAccessTargetSessionId(null)}
             >
               取消
             </Button>

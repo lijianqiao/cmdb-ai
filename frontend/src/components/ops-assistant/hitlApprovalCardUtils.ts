@@ -90,3 +90,20 @@ export function readLastError(
 export function isRetryAvailable(canApprove: boolean, status: string): boolean {
   return canApprove && status.trim().toUpperCase() === "APPROVED"
 }
+
+/**
+ * 是否展示 UNKNOWN 人工处置操作（仅 UNKNOWN 且有审批权限）。
+ *
+ * Args:
+ *   canApprove: 是否持有 agent:hitl_approve
+ *   status: 当前展示状态
+ *
+ * Returns:
+ *   为 true 时展示确认已执行与允许重试按钮
+ */
+export function isUnknownResolutionAvailable(
+  canApprove: boolean,
+  status: string,
+): boolean {
+  return canApprove && status.trim().toUpperCase() === "UNKNOWN"
+}

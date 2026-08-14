@@ -14,6 +14,10 @@ export interface HitlProposal {
   reviewed_by_user_id: number | null
   reviewed_at: string | null
   executed_at: string | null
+  execution_started_at?: string | null
+  status_reason?: string | null
+  resolved_by_user_id?: number | null
+  resolved_at?: string | null
   created_at: string
   result_excerpt?: string | null
   asset_credential_type?: string | null
@@ -105,6 +109,27 @@ export async function retryHitlProposal(
   const response = await api.post<ApiResponse<HitlProposal>>(
     `/hitl/proposals/${proposalId}/retry`,
     body,
+  )
+  return response.data.data
+}
+
+/**
+ * 人工处置 UNKNOWN 提案：确认已执行或允许重试。
+ *
+ * Args:
+ *   proposalId: 提案 ID
+ *   resolution: confirm_executed 或 allow_retry
+ *
+ * Returns:
+ *   处置后的提案
+ */
+export async function resolveUnknownHitlProposal(
+  proposalId: number,
+  resolution: "confirm_executed" | "allow_retry",
+): Promise<HitlProposal> {
+  const response = await api.post<ApiResponse<HitlProposal>>(
+    `/hitl/proposals/${proposalId}/resolve-unknown`,
+    { resolution },
   )
   return response.data.data
 }
