@@ -3,13 +3,12 @@
 @Email: lijianqiao2906@live.com
 @FileName: hitl_tools.py
 @DateTime: 2026-08-12 11:26
-@Docs: 根 Agent 执行类薄工具：门控后真执行 Scrapli/通知，不再自建提案。
+@Docs: 根 Agent 执行类薄工具：门控前路径已统一由 HitlGateHook 执行。
 
 实现流程：
-1. 模型调用 notify / device_control / query_device_command；提案由 HitlGateHook.before 创建。
-2. 薄工具只调现有执行器，proposal_id 从门控钩子 current_proposal_id 读取。
-3. 自动批准时 after 钩子 attach_execution_result 回写；待人工时 before 已 block，薄工具不运行。
-4. 预期校验错误在门控层处理；此处仅处理执行器失败，不泄露原始载荷。
+1. 模型调用 notify / device_control / query_device_command；提案与执行均由门控 before 完成。
+2. 薄工具保留供直接单元测试；正常聊天路径不会到达此处。
+3. 回查与列表工具仍为只读辅助，不涉及审批或执行。
 """
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -234,6 +233,13 @@ async def get_device_query_result(
     if proposal.status == "EXECUTED":
         excerpt = proposal.action_payload.get("last_result_excerpt") or "（无输出）"
         return ToolResult(control="ok", content=f"提案 {proposal_id} 已执行：\n{excerpt}")
+    if proposal.status == "UNKNOWN":
+        return ToolResult(
+            control="ok",
+            content=(
+                f"提案 {proposal_id} 执行结果不确定，需人工核实是否已执行或授权重试。"
+            ),
+        )
     if proposal.status == "REJECTED":
         return ToolResult(control="ok", content=f"提案 {proposal_id} 已被拒绝")
     if proposal.status == "PENDING":
@@ -242,20 +248,11 @@ async def get_device_query_result(
             content=f"提案 {proposal_id} 正在等待人工审批，尚未执行。",
         )
     if proposal.status == "APPROVED":
-        last_error = proposal.action_payload.get("last_error")
-        if isinstance(last_error, str) and last_error:
-            return ToolResult(
-                control="ok",
-                content=(
-                    f"提案 {proposal_id} 已批准但上次执行失败：{last_error}，需人工处理。"
-                    "系统不会自动重试，需要管理员排查设备连通性/凭据后在审批卡片上重试执行。"
-                ),
-            )
         return ToolResult(
             control="ok",
             content=(
-                f"提案 {proposal_id} 已批准但未执行成功，需人工在审批卡片上重试执行。"
-                "这不是正在执行中。"
+                f"提案 {proposal_id} 已批准但尚未执行成功，"
+                "需管理员在审批卡片上触发执行或排查配置后重试。"
             ),
         )
     return ToolResult(

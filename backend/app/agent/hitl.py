@@ -3,26 +3,23 @@
 @Email: lijianqiao2906@live.com
 @FileName: hitl.py
 @DateTime: 2026-08-12 11:15
-@Docs: HITL 提案编排：校验动作、复用状态机、调度执行器并发布安全事件。
+@Docs: HITL 提案编排：校验动作、复用状态机并发布安全事件。
 
 实现流程：
 1. gate_action（propose_action 别名）先合并顶层 asset_id，再用严格 Pydantic 模型校验动作载荷并检查 CMDB 资产。
 2. 载荷校验失败只回传固定中文原因与字段名，绝不拼接 ValidationError / 原始 input_value。
-3. 合法提案始终先以 PENDING 追加；assist/full 档位下按策略表自动批准，但不执行——门控钩子调度薄工具，attach_execution_result 回写结果。
+3. 合法提案始终先以 PENDING 追加；assist/full 档位下按策略表自动批准，但不执行。
 4. decide_proposal 只复用 CRUD 的审批状态机，不隐式恢复执行，避免人工 API 路径重复执行。
-5. resume_proposal 仅执行 APPROVED 提案；EXECUTED 返回幂等摘要，其他状态明确拒绝。
+5. resume_proposal 委托独立执行服务 execute_approved_proposal，聊天与 HTTP 路径复用同一语义。
 6. 对 Agent 和事件发布器只暴露安全摘要，不返回原始 payload，避免设备凭据或未知字段泄露。
 """
 
-import asyncio
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Literal, Protocol, cast
-from weakref import WeakValueDictionary
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.device_commands import (
     command_supports_vendor,
@@ -32,12 +29,6 @@ from app.agent.device_commands import (
     list_commands_for_vendor,
     validate_interface_name,
 )
-from app.agent.executors import (
-    DeviceQueryExecutor,
-    ExecutionResult,
-    NotifyExecutor,
-)
-from app.agent.loop import ToolResult
 from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
@@ -113,20 +104,6 @@ class ProposalSafeSummary:
     result_excerpt: str | None = None
     # 仅在执行失败后有值；内容是执行器的分类信息，不含原始异常/设备细节。
     last_error: str | None = None
-
-
-_NOTIFY_EXECUTOR = NotifyExecutor()
-_DEVICE_QUERY_EXECUTOR = DeviceQueryExecutor()
-_EXECUTION_LOCKS: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
-
-
-def _execution_lock(proposal_id: int) -> asyncio.Lock:
-    """返回进程内提案锁，补足 SQLite 不支持行锁的测试与单进程场景。"""
-    lock = _EXECUTION_LOCKS.get(proposal_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _EXECUTION_LOCKS[proposal_id] = lock
-    return lock
 
 
 def _summary(proposal: HitlProposal) -> ProposalSafeSummary:
@@ -262,7 +239,7 @@ async def gate_action(
 ) -> ProposalSafeSummary:
     """创建经过严格校验的 HITL 提案，并按策略自动批准，但不执行。
 
-    门控钩子调用本函数；真执行由薄工具完成，执行结果由 attach_execution_result 回写。
+    门控钩子调用本函数；真执行由 hitl_execution.execute_approved_proposal 完成。
 
     Args:
         db: 调用方事务内的数据库会话。
@@ -376,79 +353,6 @@ async def gate_action(
 propose_action = gate_action
 
 
-async def attach_execution_result(
-    db: AsyncSession,
-    *,
-    proposal_id: int,
-    tool_result: ToolResult,
-    actor_user_id: int | None = None,
-    publisher: HitlEventPublisher | None = None,
-) -> ProposalSafeSummary:
-    """把薄工具执行结果写回已批准提案，不调用执行器或 resume_proposal。
-
-    Args:
-        db: 调用方事务内的数据库会话。
-        proposal_id: 已自动批准的提案 ID。
-        tool_result: 薄工具返回的结构化结果。
-        actor_user_id: 触发执行的用户 ID，可为空。
-        publisher: 可选的安全事件发布器。
-
-    Returns:
-        写库后的安全提案摘要。
-    """
-    async with _execution_lock(proposal_id):
-        stmt = (
-            select(HitlProposal)
-            .where(HitlProposal.id == proposal_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        result = await db.execute(stmt)
-        proposal = result.scalar_one_or_none()
-        if proposal is None:
-            raise HitlResumeError(f"HITL 提案不存在：{proposal_id}")
-        if proposal.status == "EXECUTED":
-            return _summary(proposal)
-        if proposal.status != "APPROVED":
-            return _summary(proposal)
-
-        if tool_result.control == "ok":
-            proposal = await hitl_proposal_crud.mark_executed(db, proposal.id)
-            updated_payload = dict(proposal.action_payload)
-            updated_payload.pop("last_error", None)
-            if proposal.action_type in ("device_query", "device_control"):
-                parts = tool_result.content.split("\n", 1)
-                if len(parts) > 1 and parts[1].strip():
-                    updated_payload["last_result_excerpt"] = parts[1]
-            if updated_payload != proposal.action_payload:
-                proposal.action_payload = updated_payload
-                await db.flush()
-            await log_audit(
-                db,
-                actor_user_id,
-                "hitl_executed",
-                target=f"hitl_proposal:{proposal.id}",
-                detail=f"动作类型：{proposal.action_type}",
-            )
-            await _publish(publisher, proposal=proposal, event_type="hitl_resolved")
-        else:
-            proposal.action_payload = {
-                **proposal.action_payload,
-                "last_error": tool_result.content[:500],
-            }
-            await db.flush()
-            await log_audit(
-                db,
-                actor_user_id,
-                "hitl_execution_failed",
-                target=f"hitl_proposal:{proposal.id}",
-                detail=tool_result.content[:500],
-            )
-            await _publish(publisher, proposal=proposal, event_type="hitl_execution_failed")
-
-        return _summary(proposal)
-
-
 async def decide_proposal(
     db: AsyncSession,
     *,
@@ -496,97 +400,33 @@ async def resume_proposal(
     publisher: HitlEventPublisher | None = None,
     dynamic_password: str | None = None,
 ) -> ProposalSafeSummary:
-    """幂等恢复一个已批准提案并调度对应执行器。
+    """幂等恢复一个已批准提案，委托独立执行服务完成外部调用。
 
     Args:
-        db: 调用方事务内的数据库会话。
+        db: 调用方事务内的数据库会话（用于派生独立短会话工厂）。
         proposal_id: 待恢复提案 ID。
         actor_user_id: 触发恢复的用户 ID，可为空。
         publisher: 可选的安全事件发布器。
         dynamic_password: 动态凭据资产执行时的一次性明文密码，不落库。
 
     Returns:
-        执行成功后的 EXECUTED 摘要，或执行失败后仍为 APPROVED 的摘要。
+        执行完成、预检失败或 UNKNOWN 后的安全摘要。
 
     Raises:
-        HitlResumeError: 提案不存在或状态不是 APPROVED/EXECUTED 时。
+        HitlResumeError: 提案不存在或状态不可执行时。
     """
-    async with _execution_lock(proposal_id):
-        stmt = (
-            select(HitlProposal)
-            .where(HitlProposal.id == proposal_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        result = await db.execute(stmt)
-        proposal = result.scalar_one_or_none()
-        if proposal is None:
-            raise HitlResumeError(f"HITL 提案不存在：{proposal_id}")
-        if proposal.status == "EXECUTED":
-            return _summary(proposal)
-        if proposal.status != "APPROVED":
-            raise HitlResumeError(f"状态 {proposal.status} 的 HITL 提案不可恢复执行")
+    engine = db.bind
+    if engine is None:
+        raise HitlResumeError("数据库会话未绑定 AsyncEngine，无法恢复执行")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    from app.agent.hitl_execution import execute_approved_proposal
 
-        if proposal.action_type == "notify":
-            execution_result = await _NOTIFY_EXECUTOR.execute(
-                db,
-                proposal_id=proposal.id,
-                payload=proposal.action_payload,
-                actor_user_id=actor_user_id,
-            )
-        elif proposal.action_type in ("device_query", "device_control"):
-            raw_asset_id = proposal.action_payload.get("asset_id")
-            asset_for_query = await cmdb_asset_crud.get(db, raw_asset_id) if isinstance(raw_asset_id, int) else None
-            if asset_for_query is None:
-                execution_result = ExecutionResult(ok=False, message="资产不存在")
-            else:
-                raw_command_name = proposal.action_payload.get("command_name")
-                raw_interface_name = proposal.action_payload.get("interface_name")
-                execution_result = await _DEVICE_QUERY_EXECUTOR.execute(
-                    db,
-                    asset=asset_for_query,
-                    command_name=str(raw_command_name),
-                    dynamic_password=dynamic_password,
-                    interface_name=raw_interface_name if isinstance(raw_interface_name, str) else None,
-                )
-        else:
-            raise HitlResumeError(f"不支持的 HITL 动作类型：{proposal.action_type}")
-
-        if execution_result.ok:
-            proposal = await hitl_proposal_crud.mark_executed(db, proposal.id)
-            updated_payload = dict(proposal.action_payload)
-            # 重试成功后清除上一次的失败标记
-            updated_payload.pop("last_error", None)
-            if proposal.action_type in ("device_query", "device_control"):
-                output = execution_result.detail.get("output")
-                if isinstance(output, str):
-                    updated_payload["last_result_excerpt"] = output
-            if updated_payload != proposal.action_payload:
-                proposal.action_payload = updated_payload
-                await db.flush()
-            await log_audit(
-                db,
-                actor_user_id,
-                "hitl_executed",
-                target=f"hitl_proposal:{proposal.id}",
-                detail=f"动作类型：{proposal.action_type}",
-            )
-            await _publish(publisher, proposal=proposal, event_type="hitl_resolved")
-        else:
-            # 把执行器的分类失败信息写回 payload，让后续回查/工具文案能区分
-            # "已批准等待执行" 与 "执行过但失败"；成功后覆盖为无错误。
-            proposal.action_payload = {
-                **proposal.action_payload,
-                "last_error": execution_result.message,
-            }
-            await db.flush()
-            await log_audit(
-                db,
-                actor_user_id,
-                "hitl_execution_failed",
-                target=f"hitl_proposal:{proposal.id}",
-                detail=execution_result.message,
-            )
-            await _publish(publisher, proposal=proposal, event_type="hitl_execution_failed")
-
-        return _summary(proposal)
+    summary = await execute_approved_proposal(
+        session_factory=session_factory,
+        proposal_id=proposal_id,
+        actor_user_id=actor_user_id,
+        publisher=publisher,
+        dynamic_password=dynamic_password,
+    )
+    db.expire_all()
+    return summary

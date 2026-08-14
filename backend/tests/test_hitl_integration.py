@@ -9,7 +9,7 @@
 1. 通过 CMDB CRUD 准备真实资产，再用 build_root_tool_dispatcher 走 notify。
 2. 校验工具结果仅含安全摘要（pending_approval），不含原始载荷秘密。
 3. 授予 agent:hitl_approve 后经 HTTP decide 完成审批，断言状态机与审计动作。
-4. 未分类 device_control 在通知自动批准开启时仍强制 HITL；stub 失败保持 APPROVED 且二次审批 409。
+4. 未分类 device_control 在通知自动批准开启时仍强制 HITL；stub 失败标记 UNKNOWN 且二次审批 409。
 5. 子角色调度器即使白名单污染也拒绝 notify，保证写路径仅根 Agent 可走。
 """
 
@@ -21,7 +21,7 @@ from cryptography.fernet import Fernet
 from httpx import AsyncClient
 from pydantic import SecretStr
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.agent.hitl_gate import HitlGateHook, dispatch_through_hitl_gate
 from app.agent.tool_dispatch import build_root_tool_dispatcher, build_tool_dispatcher
@@ -41,12 +41,21 @@ type Headers = dict[str, str]
 _PROPOSAL_ID_RE = re.compile(r"(?:通知提案|整改提案|设备管控请求|设备命令查询)\s+(\d+)")
 
 
+def _hitl_session_factory(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(db_engine, expire_on_commit=False, autoflush=False)
+
+
 def _make_gated_dispatch(
+    db_engine: AsyncEngine,
     db_session: AsyncSession,
     session_id: int,
     actor_user_id: int,
 ) -> tuple[HitlGateHook, object]:
-    gate = HitlGateHook(db_session, session_id=session_id, actor_user_id=actor_user_id)
+    gate = HitlGateHook(
+        _hitl_session_factory(db_engine),
+        session_id=session_id,
+        actor_user_id=actor_user_id,
+    )
     dispatch = build_root_tool_dispatcher(
         db_session,
         session_id=session_id,
@@ -57,13 +66,14 @@ def _make_gated_dispatch(
 
 
 async def _dispatch_gated(
+    db_engine: AsyncEngine,
     db_session: AsyncSession,
     session_id: int,
     actor_user_id: int,
     name: str,
     arguments: dict[str, object],
 ) -> object:
-    gate, dispatch = _make_gated_dispatch(db_session, session_id, actor_user_id)
+    gate, dispatch = _make_gated_dispatch(db_engine, db_session, session_id, actor_user_id)
     return await dispatch_through_hitl_gate(gate, dispatch, name, arguments)
 
 
@@ -113,6 +123,7 @@ def _extract_proposal_id(content: str) -> int:
 
 async def test_scenario_a_notify_manual_approve_end_to_end(
     client: AsyncClient,
+    db_engine: AsyncEngine,
     db_session: AsyncSession,
     test_user: User,
     auth_headers: Headers,
@@ -121,6 +132,7 @@ async def test_scenario_a_notify_manual_approve_end_to_end(
     secret = "SECRET_PAYLOAD_TOKEN_NOTIFY_X9"
     session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
     gate, dispatch = _make_gated_dispatch(
+        db_engine,
         db_session,
         session_id=session_id,
         actor_user_id=test_user.id,
@@ -168,14 +180,15 @@ async def test_scenario_a_notify_manual_approve_end_to_end(
     assert "hitl_executed" in actions or "hitl_notify_executed" in actions
 
 
-async def test_scenario_b_unclassified_device_control_forced_hitl_and_stub_stays_approved(
+async def test_scenario_b_unclassified_device_control_forced_hitl_and_stub_marks_unknown(
     client: AsyncClient,
+    db_engine: AsyncEngine,
     db_session: AsyncSession,
     test_user: User,
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Scenario B：ask 档位下未分类 device_control 仍强制 HITL；stub 失败保 APPROVED。"""
+    """Scenario B：ask 档位下未分类 device_control 仍强制 HITL；stub 失败标记 UNKNOWN。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
     asset = await cmdb_asset_crud.get(db_session, asset_id)
@@ -186,6 +199,7 @@ async def test_scenario_b_unclassified_device_control_forced_hitl_and_stub_stays
     asset.credential_password_encrypted = encrypt_credential_password("whatever")
     await db_session.flush()
     gate, dispatch = _make_gated_dispatch(
+        db_engine,
         db_session,
         session_id=session_id,
         actor_user_id=test_user.id,
@@ -220,7 +234,7 @@ async def test_scenario_b_unclassified_device_control_forced_hitl_and_stub_stays
             headers=auth_headers,
         )
     assert first.status_code == 200, first.text
-    assert first.json()["data"]["status"] == "APPROVED"
+    assert first.json()["data"]["status"] == "UNKNOWN"
 
     second = await client.post(
         f"/api/v1/hitl/proposals/{proposal_id}/decide",

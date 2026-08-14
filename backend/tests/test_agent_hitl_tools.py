@@ -9,7 +9,7 @@
 from typing import Any
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.agent import hitl_tools, tool_dispatch
 from app.agent.executors import ExecutionResult
@@ -60,12 +60,21 @@ class _FakeGateHook:
         return self._proposal_id
 
 
+def _hitl_session_factory(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(db_engine, expire_on_commit=False, autoflush=False)
+
+
 def _make_gated_dispatch(
+    db_engine: AsyncEngine,
     db_session: AsyncSession,
     session_id: int,
     actor_user_id: int,
 ) -> tuple[HitlGateHook, object]:
-    gate = HitlGateHook(db_session, session_id=session_id, actor_user_id=actor_user_id)
+    gate = HitlGateHook(
+        _hitl_session_factory(db_engine),
+        session_id=session_id,
+        actor_user_id=actor_user_id,
+    )
     dispatch = build_root_tool_dispatcher(
         db_session,
         session_id=session_id,
@@ -76,6 +85,7 @@ def _make_gated_dispatch(
 
 
 async def test_gate_before_notify_returns_pending_without_payload(
+    db_engine: AsyncEngine,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -84,7 +94,6 @@ async def test_gate_before_notify_returns_pending_without_payload(
     publisher = object()
 
     async def fake_gate_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
-        assert db is db_session
         captured.update(kwargs)
         return ProposalSafeSummary(
             proposal_id=41,
@@ -97,7 +106,7 @@ async def test_gate_before_notify_returns_pending_without_payload(
     monkeypatch.setattr("app.agent.hitl_gate.gate_action", fake_gate_action)
 
     gate = HitlGateHook(
-        db_session,
+        _hitl_session_factory(db_engine),
         session_id=11,
         actor_user_id=13,
         proposed_by_agent_id="root-agent",
@@ -149,6 +158,7 @@ async def test_notify_returns_ok_after_auto_execution(
 
 
 async def test_gate_before_notify_returns_actionable_rejection(
+    db_engine: AsyncEngine,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -159,7 +169,7 @@ async def test_gate_before_notify_returns_actionable_rejection(
 
     monkeypatch.setattr("app.agent.hitl_gate.gate_action", fake_gate_action)
 
-    gate = HitlGateHook(db_session, session_id=12, actor_user_id=14)
+    gate = HitlGateHook(_hitl_session_factory(db_engine), session_id=12, actor_user_id=14)
     decision = await gate.before(
         "notify",
         {
@@ -177,6 +187,7 @@ async def test_gate_before_notify_returns_actionable_rejection(
 
 
 async def test_gate_before_notify_rejects_extra_secret_without_echo(
+    db_engine: AsyncEngine,
     db_session: AsyncSession,
     test_user: User,
 ) -> None:
@@ -198,7 +209,11 @@ async def test_gate_before_notify_rejects_extra_secret_without_echo(
     await db_session.flush()
     secret = "SECRET_TOOL_REJECT_TOKEN_Y7"
 
-    gate = HitlGateHook(db_session, session_id=session.id, actor_user_id=test_user.id)
+    gate = HitlGateHook(
+        _hitl_session_factory(db_engine),
+        session_id=session.id,
+        actor_user_id=test_user.id,
+    )
     decision = await gate.before(
         "notify",
         {
@@ -217,6 +232,7 @@ async def test_gate_before_notify_rejects_extra_secret_without_echo(
 
 
 async def test_gate_before_notify_hides_unexpected_exception_detail(
+    db_engine: AsyncEngine,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -227,7 +243,7 @@ async def test_gate_before_notify_hides_unexpected_exception_detail(
 
     monkeypatch.setattr("app.agent.hitl_gate.gate_action", fake_gate_action)
 
-    gate = HitlGateHook(db_session, session_id=12, actor_user_id=14)
+    gate = HitlGateHook(_hitl_session_factory(db_engine), session_id=12, actor_user_id=14)
     decision = await gate.before(
         "notify",
         {
@@ -245,7 +261,9 @@ async def test_gate_before_notify_hides_unexpected_exception_detail(
 
 
 async def test_gate_before_device_control_returns_pending(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_gate_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
         return ProposalSafeSummary(
@@ -258,7 +276,7 @@ async def test_gate_before_device_control_returns_pending(
 
     monkeypatch.setattr("app.agent.hitl_gate.gate_action", fake_gate_action)
 
-    gate = HitlGateHook(db_session, session_id=1, actor_user_id=2)
+    gate = HitlGateHook(_hitl_session_factory(db_engine), session_id=1, actor_user_id=2)
     decision = await gate.before(
         "device_control",
         {"asset_id": 9, "command_name": "reboot", "reason": "故障恢复"},
@@ -470,6 +488,7 @@ async def test_child_dispatcher_never_exposes_execution_tools(
 
 
 async def test_query_device_command_returns_pending_when_not_executed(
+    db_engine: AsyncEngine,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -486,7 +505,7 @@ async def test_query_device_command_returns_pending_when_not_executed(
 
     monkeypatch.setattr("app.agent.hitl_gate.gate_action", fake_gate_action)
 
-    gate = HitlGateHook(db_session, session_id=1, actor_user_id=2)
+    gate = HitlGateHook(_hitl_session_factory(db_engine), session_id=1, actor_user_id=2)
     decision = await gate.before(
         "query_device_command",
         {"asset_id": 9, "command_name": "show_version", "reason": "排查交换机"},
@@ -554,11 +573,11 @@ async def test_get_device_query_result_scopes_to_session(
     assert other_session.control == "rejected"
 
 
-async def test_get_device_query_result_reports_execution_failure(
+async def test_get_device_query_result_reports_unknown_state(
     db_session: AsyncSession,
     test_user: User,
 ) -> None:
-    """APPROVED 且带 last_error 时，回查文案必须说明执行失败，不能说正在执行。"""
+    """UNKNOWN 时回查文案必须说明需人工核实，不能说正在执行。"""
     session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
     proposal = await hitl_proposal_crud.create(
         db_session,
@@ -568,19 +587,19 @@ async def test_get_device_query_result_reports_execution_failure(
         action_payload={
             "asset_id": asset_id,
             "command_name": "show_version",
-            "last_error": "连接或执行命令失败；如果是重启/关机类命令，设备可能已经生效，请人工核实",
+            "proposal_reason": "test",
         },
     )
-    proposal.status = "APPROVED"
+    proposal.status = "UNKNOWN"
+    proposal.status_reason = "dispatch_outcome_unknown"
     await db_session.flush()
 
     result = await hitl_tools.get_device_query_result(
         db_session, session_id=session_id, proposal_id=proposal.id
     )
     assert result.control == "ok"
-    assert "执行失败" in result.content
+    assert "不确定" in result.content
     assert "正在执行" not in result.content
-    assert "等待执行" not in result.content
 
 
 async def test_query_device_command_reports_auto_execute_failure(

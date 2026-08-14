@@ -22,7 +22,6 @@ from app.agent.hitl import (
     HitlProposalRejectedError,
     HitlResumeError,
     ProposalSafeSummary,
-    attach_execution_result,
     decide_proposal,
     gate_action,
     propose_action,
@@ -42,6 +41,27 @@ from app.models.hitl_proposal import HitlProposal
 from app.models.user import User
 
 pytestmark = pytest.mark.asyncio
+
+
+def _hitl_session_factory(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    """为门控钩子构造独立短会话工厂。"""
+    return async_sessionmaker(db_engine, expire_on_commit=False, autoflush=False)
+
+
+def _make_hitl_gate(
+    db_engine: AsyncEngine,
+    *,
+    session_id: int,
+    actor_user_id: int,
+    publisher: object | None = None,
+) -> HitlGateHook:
+    """创建绑定独立短会话工厂的门控钩子。"""
+    return HitlGateHook(
+        _hitl_session_factory(db_engine),
+        session_id=session_id,
+        actor_user_id=actor_user_id,
+        publisher=publisher,
+    )
 
 
 class RecordingPublisher:
@@ -328,15 +348,6 @@ async def test_gate_action_auto_approve_stays_approved_without_executor(
 
     monkeypatch.setattr(hitl, "resume_proposal", fail_resume)
 
-    execute_called = False
-
-    async def track_execute(*args: object, **kwargs: object) -> ExecutionResult:
-        nonlocal execute_called
-        execute_called = True
-        return ExecutionResult(ok=True, message="ok")
-
-    monkeypatch.setattr(hitl._NOTIFY_EXECUTOR, "execute", track_execute)
-
     summary = await gate_action(
         db_session,
         session_id=session_id,
@@ -353,20 +364,20 @@ async def test_gate_action_auto_approve_stays_approved_without_executor(
     assert summary.status == "APPROVED"
     assert proposal.reviewed_by_user_id == test_user.id
     assert proposal.executed_at is None
-    assert execute_called is False
 
 
 async def test_notify_auto_approve_executes_once_through_gate(
+    db_engine: AsyncEngine,
     db_session: AsyncSession,
     test_user: User,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """assist 档位完整路径：门控 → 薄工具 → attach，执行器只调一次。"""
+    """assist 档位完整路径：门控 before 内统一执行，执行器只调一次。"""
     session_id, asset_id = await _make_context(db_session, test_user.id)
     await _set_session_approval_mode(db_session, session_id, "assist")
     publisher = RecordingPublisher()
-    gate = HitlGateHook(
-        db_session,
+    gate = _make_hitl_gate(
+        db_engine,
         session_id=session_id,
         actor_user_id=test_user.id,
         publisher=publisher,
@@ -386,7 +397,10 @@ async def test_notify_auto_approve_executes_once_through_gate(
         execute_count += 1
         return ExecutionResult(ok=True, message="ok")
 
-    monkeypatch.setattr(hitl_tools._NOTIFY_EXECUTOR, "execute", counting_execute)
+    monkeypatch.setattr(
+        "app.agent.executors.NotifyExecutor.execute",
+        counting_execute,
+    )
 
     result = await dispatch_through_hitl_gate(
         gate,
@@ -406,48 +420,6 @@ async def test_notify_auto_approve_executes_once_through_gate(
     assert proposal.status == "EXECUTED"
     assert proposal.reviewed_by_user_id == test_user.id
     assert [event[1] for event in publisher.events] == ["hitl_pending", "hitl_resolved"]
-
-
-async def test_attach_execution_result_marks_executed_without_resume(
-    db_session: AsyncSession,
-    test_user: User,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """attach_execution_result 应写 EXECUTED 且绝不调用 resume_proposal。"""
-    session_id, asset_id = await _make_context(db_session, test_user.id)
-    summary = await gate_action(
-        db_session,
-        session_id=session_id,
-        proposed_by_agent_id=None,
-        action_type="notify",
-        asset_id=asset_id,
-        payload={"message": "回写测试"},
-        reason="attach 测试",
-        actor_user_id=test_user.id,
-    )
-    await decide_proposal(
-        db_session,
-        proposal_id=summary.proposal_id,
-        approve=True,
-        reviewed_by_user_id=test_user.id,
-    )
-
-    async def fail_resume(*args: object, **kwargs: object) -> ProposalSafeSummary:
-        raise AssertionError("resume_proposal 不应被 attach 调用")
-
-    monkeypatch.setattr(hitl, "resume_proposal", fail_resume)
-
-    attached = await attach_execution_result(
-        db_session,
-        proposal_id=summary.proposal_id,
-        tool_result=ToolResult(control="ok", content="通知提案 1 已自动批准并执行。"),
-        actor_user_id=test_user.id,
-    )
-
-    stored = await hitl_proposal_crud.get(db_session, summary.proposal_id)
-    assert stored is not None
-    assert attached.status == "EXECUTED"
-    assert stored.status == "EXECUTED"
 
 
 async def test_propose_rejects_missing_session_without_insert(
@@ -670,6 +642,7 @@ async def test_concurrent_decide_one_winner_never_clobbers_executed(
     assert stored.status != "EXECUTED"
 
     if stored.status == "APPROVED":
+        await hitl_proposal_crud.claim_execution(db_session, proposal.proposal_id)
         executed = await hitl_proposal_crud.mark_executed(db_session, proposal.proposal_id)
         await db_session.commit()
         assert executed.status == "EXECUTED"
@@ -710,6 +683,8 @@ async def test_concurrent_resume_executes_successful_action_once(
         reviewed_by_user_id=test_user.id,
     )
     await db_session.commit()
+    proposal_id = proposal.proposal_id
+    user_id = test_user.id
 
     first_started = asyncio.Event()
     allow_execution = asyncio.Event()
@@ -733,7 +708,27 @@ async def test_concurrent_resume_executes_successful_action_once(
             await allow_execution.wait()
             return ExecutionResult(ok=True, message="测试执行成功")
 
-    monkeypatch.setattr(hitl, "_NOTIFY_EXECUTOR", BlockingNotifyExecutor())
+    blocking_executor = BlockingNotifyExecutor()
+
+    async def patched_notify_execute(
+        self: object,
+        db: AsyncSession,
+        *,
+        proposal_id: int,
+        payload: Mapping[str, object],
+        actor_user_id: int | None,
+    ) -> ExecutionResult:
+        return await blocking_executor.execute(
+            db,
+            proposal_id=proposal_id,
+            payload=payload,
+            actor_user_id=actor_user_id,
+        )
+
+    monkeypatch.setattr(
+        "app.agent.executors.NotifyExecutor.execute",
+        patched_notify_execute,
+    )
     session_factory = async_sessionmaker(
         db_engine,
         expire_on_commit=False,
@@ -745,8 +740,8 @@ async def test_concurrent_resume_executes_successful_action_once(
         async with session_factory() as independent_session:
             summary = await resume_proposal(
                 independent_session,
-                proposal_id=proposal.proposal_id,
-                actor_user_id=test_user.id,
+                proposal_id=proposal_id,
+                actor_user_id=user_id,
             )
             await independent_session.commit()
             return summary
@@ -763,10 +758,10 @@ async def test_concurrent_resume_executes_successful_action_once(
     assert first_summary.status == "EXECUTED"
 
 
-async def test_device_control_real_execution_failure_stays_approved(
+async def test_device_control_real_execution_failure_marks_unknown(
     db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未分类命令批准后，若真实设备连接失败，必须保持 APPROVED（不伪造 EXECUTED）。"""
+    """未分类命令批准后，若真实设备连接失败，必须标记为 UNKNOWN（不伪造 EXECUTED）。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     ciphertext = encrypt_credential_password("whatever")
@@ -807,19 +802,16 @@ async def test_device_control_real_execution_failure_stays_approved(
 
     stored = await hitl_proposal_crud.get(db_session, proposal.proposal_id)
     assert stored is not None
-    assert summary.status == "APPROVED"
+    assert summary.status == "UNKNOWN"
+    assert stored.status_reason == "dispatch_outcome_unknown"
     assert stored.executed_at is None
     assert [event[1] for event in publisher.events] == ["hitl_execution_failed"]
-    # 失败分类要写回 payload 并进入安全摘要，供回查工具/前端区分"等待执行"与"执行失败"
-    assert isinstance(stored.action_payload.get("last_error"), str)
-    assert summary.last_error == stored.action_payload["last_error"]
-    assert publisher.events[-1][2].get("last_error") == summary.last_error
 
 
-async def test_resume_retry_after_failure_executes_and_clears_last_error(
+async def test_resume_retry_after_unknown_requires_allow_retry(
     db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """执行失败后再次 resume（重试）成功时，应转为 EXECUTED 并清除 last_error。"""
+    """UNKNOWN 直接 retry 被拒绝；人工 allow_retry 后才能再次执行成功。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     ciphertext = encrypt_credential_password("whatever")
@@ -845,26 +837,36 @@ async def test_resume_retry_after_failure_executes_and_clears_last_error(
         approve=True,
         reviewed_by_user_id=test_user.id,
     )
+    proposal_id = proposal.proposal_id
+    user_id = test_user.id
 
     from unittest.mock import AsyncMock, patch
 
     with patch("app.agent.executors._open_scrapli_connection", side_effect=ConnectionError("unreachable")):
-        failed = await resume_proposal(db_session, proposal_id=proposal.proposal_id, actor_user_id=test_user.id)
-    assert failed.status == "APPROVED"
-    assert failed.last_error
+        failed = await resume_proposal(db_session, proposal_id=proposal_id, actor_user_id=user_id)
+    assert failed.status == "UNKNOWN"
+
+    with pytest.raises(HitlResumeError):
+        await resume_proposal(db_session, proposal_id=proposal_id, actor_user_id=user_id)
+
+    await hitl_proposal_crud.resolve_unknown(
+        db_session,
+        proposal_id,
+        resolution="allow_retry",
+        resolved_by_user_id=user_id,
+    )
+    await db_session.commit()
 
     fake_connection = AsyncMock()
     fake_connection.send_command = AsyncMock(
         return_value=type("Resp", (), {"result": "Linux host info", "failed": False})()
     )
     with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
-        retried = await resume_proposal(db_session, proposal_id=proposal.proposal_id, actor_user_id=test_user.id)
+        retried = await resume_proposal(db_session, proposal_id=proposal_id, actor_user_id=user_id)
 
-    stored = await hitl_proposal_crud.get(db_session, proposal.proposal_id)
+    stored = await hitl_proposal_crud.get(db_session, proposal_id)
     assert stored is not None
     assert retried.status == "EXECUTED"
-    assert retried.last_error is None
-    assert "last_error" not in stored.action_payload
     assert stored.action_payload.get("last_result_excerpt") == "Linux host info"
 
 
@@ -893,7 +895,10 @@ async def test_unclassified_device_control_stays_pending(
 
 
 async def test_whitelisted_device_control_auto_executes_with_static_credential(
-    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """白名单 + 静态凭据：跟 device_query 一样一次调用直接 EXECUTED。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
@@ -923,7 +928,7 @@ async def test_whitelisted_device_control_auto_executes_with_static_credential(
         return_value=type("Resp", (), {"result": "rebooting", "failed": False})()
     )
     with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
-        gate = HitlGateHook(db_session, session_id=session_id, actor_user_id=test_user.id)
+        gate = _make_hitl_gate(db_engine, session_id=session_id, actor_user_id=test_user.id)
         dispatch = build_root_tool_dispatcher(
             db_session,
             session_id=session_id,
@@ -1255,7 +1260,10 @@ async def test_device_query_whitelist_pends_in_ask_mode_with_static_credential(
 
 
 async def test_device_query_whitelist_auto_executes_for_static_credential(
-    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """assist 档位下白名单 + 静态凭据的 device_query 应一次调用直接 EXECUTED。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
@@ -1281,7 +1289,7 @@ async def test_device_query_whitelist_auto_executes_for_static_credential(
         return_value=type("Resp", (), {"result": "fake output", "failed": False})()
     )
     with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
-        gate = HitlGateHook(db_session, session_id=session_id, actor_user_id=test_user.id)
+        gate = _make_hitl_gate(db_engine, session_id=session_id, actor_user_id=test_user.id)
         dispatch = build_root_tool_dispatcher(
             db_session,
             session_id=session_id,
@@ -1358,7 +1366,10 @@ async def test_device_query_unclassified_command_pends(
 
 
 async def test_device_query_unclassified_auto_executes_in_full_mode(
-    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """full 档位下未分类 + 静态凭据的 device_query 应一次调用直接 EXECUTED。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
@@ -1374,7 +1385,7 @@ async def test_device_query_unclassified_auto_executes_in_full_mode(
         return_value=type("Resp", (), {"result": "full mode output", "failed": False})()
     )
     with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
-        gate = HitlGateHook(db_session, session_id=session_id, actor_user_id=test_user.id)
+        gate = _make_hitl_gate(db_engine, session_id=session_id, actor_user_id=test_user.id)
         dispatch = build_root_tool_dispatcher(
             db_session,
             session_id=session_id,
