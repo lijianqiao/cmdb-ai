@@ -100,6 +100,148 @@ async def _wait_until_hub_has(session_id: int, *, max_wait_seconds: float = 1.0)
     raise AssertionError(f"Hub 在 {max_wait_seconds}s 内未注册 session_id={session_id}")
 
 
+async def test_ws_connect_without_monitor_read_has_no_monitor_capability(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+) -> None:
+    """仅有 agent:use 的用户建连后，peer 不具备 monitor:read 能力。"""
+    session = await agent_session_crud.create(
+        db_session,
+        {"user_id": test_user.id, "title": "无监控权限", "status": "active"},
+    )
+    await db_session.commit()
+    token = _access_token_from_headers(auth_headers)
+    path = f"/api/v1/ws/agent/{session.id}?access_token={token}"
+
+    ws_client = _ws_client()
+    with ws_client.websocket_connect(path, headers=_WS_HEADERS) as websocket:
+        websocket.portal.call(_wait_until_hub_has, session.id)
+        peer = next(iter(hub._connections[session.id].values()))
+        assert peer.can_read_monitor is False
+
+
+async def test_ws_with_monitor_read_receives_monitor_alert(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    test_role: Role,
+) -> None:
+    """具备 monitor:read 的用户建连后，能收到全局 monitor_alert 广播。"""
+    permission = Permission(name="查看监控", code="monitor:read", module="Monitor")
+    db_session.add(permission)
+    await db_session.flush()
+    await db_session.execute(
+        role_permissions.insert().values(role_id=test_role.id, permission_id=permission.id)
+    )
+    session = await agent_session_crud.create(
+        db_session,
+        {"user_id": test_user.id, "title": "有监控权限", "status": "active"},
+    )
+    await db_session.commit()
+    token = _access_token_from_headers(auth_headers)
+    path = f"/api/v1/ws/agent/{session.id}?access_token={token}"
+    alert_message = AgentWsServerMessage(
+        type="monitor_alert",
+        payload={"target_id": 7, "status": "down", "message": "核心交换机离线"},
+    )
+
+    ws_client = _ws_client()
+    with ws_client.websocket_connect(path, headers=_WS_HEADERS) as websocket:
+        websocket.portal.call(_wait_until_hub_has, session.id)
+        peer = next(iter(hub._connections[session.id].values()))
+        assert peer.can_read_monitor is True
+        websocket.portal.call(hub.broadcast_monitor_alert, alert_message)
+        data = websocket.receive_json()
+
+    assert data["type"] == "monitor_alert"
+    assert data["payload"] == {"target_id": 7, "status": "down", "message": "核心交换机离线"}
+
+
+async def test_periodic_reauth_refreshes_monitor_access_without_closing_chat(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    test_role: Role,
+) -> None:
+    """连接期间撤销 monitor:read 时，下一轮复查只关闭告警能力，不关闭聊天连接。"""
+    import app.api.v1.agent_ws as agent_ws_module
+    from app.core.security import decode_token
+
+    permission = Permission(name="查看监控", code="monitor:read", module="Monitor")
+    db_session.add(permission)
+    await db_session.flush()
+    await db_session.execute(
+        role_permissions.insert().values(role_id=test_role.id, permission_id=permission.id)
+    )
+    session = await agent_session_crud.create(
+        db_session,
+        {"user_id": test_user.id, "title": "复查监控权限", "status": "active"},
+    )
+    await db_session.commit()
+    token = _access_token_from_headers(auth_headers)
+    payload = decode_token(token)
+
+    close_calls: list[tuple[int, str]] = []
+
+    async def fake_close(*, code: int, reason: str) -> None:
+        close_calls.append((code, reason))
+
+    fake_websocket = AsyncMock()
+    fake_websocket.app = app
+    fake_websocket.close = fake_close
+
+    await hub.connect(session.id, fake_websocket, can_read_monitor=True)
+
+    reauth_task = asyncio.create_task(
+        agent_ws_module._periodic_reauth(
+            fake_websocket,
+            user_id=test_user.id,
+            family_id=payload.sid,
+            token_version=payload.ver,
+            session_id=session.id,
+            interval_seconds=0.02,
+        )
+    )
+    try:
+        role_id = (
+            await db_session.execute(select(user_roles.c.role_id).where(user_roles.c.user_id == test_user.id))
+        ).scalar_one()
+        permission_id = (
+            await db_session.execute(select(Permission.id).where(Permission.code == "monitor:read"))
+        ).scalar_one()
+        await db_session.execute(
+            delete(role_permissions).where(
+                role_permissions.c.role_id == role_id,
+                role_permissions.c.permission_id == permission_id,
+            )
+        )
+        await db_session.commit()
+
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while asyncio.get_running_loop().time() < deadline:
+            peer = hub._connections.get(session.id, {}).get(fake_websocket)
+            if peer is not None and peer.can_read_monitor is False:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("monitor:read 撤销后 peer 能力未刷新为 False")
+    finally:
+        if not reauth_task.done():
+            reauth_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await reauth_task
+
+    assert close_calls == []
+    assert fake_websocket in hub._connections.get(session.id, {})
+    peer = hub._connections[session.id][fake_websocket]
+    assert peer.can_read_monitor is False
+    await hub.disconnect(session.id, fake_websocket)
+
+
 async def test_ws_without_token_closes_4401(
     client: AsyncClient,
     db_session: AsyncSession,

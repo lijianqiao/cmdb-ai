@@ -62,6 +62,7 @@ class _Peer:
 
     queue: asyncio.Queue[AgentWsServerMessage]
     writer_task: asyncio.Task[None]
+    can_read_monitor: bool = False
 
 
 def _child_safe_payload(receipt: ChildReceipt) -> dict[str, Any]:
@@ -100,17 +101,47 @@ class AgentWsHub:
         self._send_timeout_seconds = send_timeout_seconds
         self._connections: dict[int, dict[WebSocket, _Peer]] = defaultdict(dict)
 
-    async def connect(self, session_id: int, websocket: WebSocket) -> None:
+    async def connect(
+        self,
+        session_id: int,
+        websocket: WebSocket,
+        *,
+        can_read_monitor: bool = False,
+    ) -> None:
         """
         将 WebSocket 注册到指定会话并启动 writer 任务。
 
         Args:
             session_id: Agent 会话主键
             websocket: 已接受的 WebSocket 连接
+            can_read_monitor: 是否具备 monitor:read 能力，用于全局监控告警过滤
         """
         queue: asyncio.Queue[AgentWsServerMessage] = asyncio.Queue(maxsize=self._queue_size)
         writer_task = asyncio.create_task(self._writer(session_id, websocket, queue))
-        self._connections[session_id][websocket] = _Peer(queue=queue, writer_task=writer_task)
+        self._connections[session_id][websocket] = _Peer(
+            queue=queue,
+            writer_task=writer_task,
+            can_read_monitor=can_read_monitor,
+        )
+
+    def update_monitor_access(
+        self,
+        session_id: int,
+        websocket: WebSocket,
+        *,
+        can_read_monitor: bool,
+    ) -> None:
+        """
+        刷新 peer 的 monitor:read 能力，不关闭聊天连接。
+
+        Args:
+            session_id: Agent 会话主键
+            websocket: 目标连接
+            can_read_monitor: 最新监控读权限判定结果
+        """
+        peer = self._connections.get(session_id, {}).get(websocket)
+        if peer is not None:
+            peer.can_read_monitor = can_read_monitor
 
     async def disconnect(
         self,
@@ -142,6 +173,33 @@ class AgentWsHub:
         with suppress(Exception):
             await websocket.close()
 
+    def _enqueue(
+        self,
+        session_id: int,
+        websocket: WebSocket,
+        peer: _Peer,
+        message: AgentWsServerMessage,
+    ) -> None:
+        """
+        向单个 peer 入队消息；队列满、断连或异常时只清理该连接。
+
+        Args:
+            session_id: 所属会话
+            websocket: 目标连接
+            peer: 连接状态
+            message: 判别式服务端消息
+        """
+        try:
+            state = getattr(websocket, "client_state", WebSocketState.CONNECTED)
+            if state != WebSocketState.CONNECTED:
+                asyncio.create_task(self.disconnect(session_id, websocket))
+                return
+            peer.queue.put_nowait(message)
+        except asyncio.QueueFull:
+            asyncio.create_task(self.disconnect(session_id, websocket))
+        except Exception:
+            asyncio.create_task(self.disconnect(session_id, websocket))
+
     async def broadcast(self, session_id: int, message: AgentWsServerMessage) -> None:
         """
         向同一 session_id 下的全部连接入队 JSON 信封，不等待网络发送完成。
@@ -154,16 +212,19 @@ class AgentWsHub:
         if not peers:
             return
         for websocket, peer in list(peers.items()):
-            try:
-                state = getattr(websocket, "client_state", WebSocketState.CONNECTED)
-                if state != WebSocketState.CONNECTED:
-                    asyncio.create_task(self.disconnect(session_id, websocket))
-                    continue
-                peer.queue.put_nowait(message)
-            except asyncio.QueueFull:
-                asyncio.create_task(self.disconnect(session_id, websocket))
-            except Exception:
-                asyncio.create_task(self.disconnect(session_id, websocket))
+            self._enqueue(session_id, websocket, peer, message)
+
+    async def broadcast_monitor_alert(self, message: AgentWsServerMessage) -> None:
+        """
+        向全部具备 monitor:read 能力的 peer 广播监控告警，跨会话全局投递。
+
+        Args:
+            message: type=monitor_alert 的服务端消息
+        """
+        for session_id, peers in list(self._connections.items()):
+            for websocket, peer in list(peers.items()):
+                if peer.can_read_monitor:
+                    self._enqueue(session_id, websocket, peer, message)
 
     async def _writer(
         self,
@@ -239,6 +300,39 @@ class WsHitlEventPublisher:
             payload=safe_payload,
         )
         await self._resolve_hub().broadcast(session_id, message)
+
+
+class WsMonitorAlertPublisher:
+    """
+    监控告警发布器：把安全摘要 payload 映射为 monitor_alert WS 消息并全局广播。
+
+    仅投递给具备 monitor:read 能力的 peer；payload 应由 monitor service 预先脱敏。
+    """
+
+    def __init__(self, bound_hub: AgentWsHub | None = None) -> None:
+        """
+        绑定广播 Hub；默认使用模块单例。
+
+        Args:
+            bound_hub: 可选注入的 Hub，便于单测隔离；省略时使用模块级 hub
+        """
+        self._bound_hub = bound_hub
+
+    def _resolve_hub(self) -> AgentWsHub:
+        """返回注入的 Hub，未注入时回落到模块单例。"""
+        if self._bound_hub is not None:
+            return self._bound_hub
+        return hub
+
+    async def publish_monitor_alert(self, payload: Mapping[str, object]) -> None:
+        """
+        发布不含凭据与探测原文的监控告警。
+
+        Args:
+            payload: 已由 monitor service 生成的安全摘要字典
+        """
+        message = AgentWsServerMessage(type="monitor_alert", payload=dict(payload))
+        await self._resolve_hub().broadcast_monitor_alert(message)
 
 
 class WsSpawnEventPublisher:

@@ -48,6 +48,7 @@ _AUTH_FRAME_TIMEOUT_SECONDS = 5.0
 # 连接建立后周期性复查 token/权限/会话状态的间隔
 _REAUTH_INTERVAL_SECONDS = 60.0
 _AGENT_USE_PERMISSION = "agent:use"
+_MONITOR_READ_PERMISSION = "monitor:read"
 
 _CLOSE_UNAUTHORIZED = 4401
 _CLOSE_FORBIDDEN = 4403
@@ -157,6 +158,38 @@ async def _authenticate_and_authorize_user(
     return authorized, payload
 
 
+async def _can_read_monitor(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    family_id: str,
+    token_version: int,
+) -> bool:
+    """
+    判定用户当前是否具备 monitor:read 权限（超管自动放行）。
+
+    Args:
+        db: 数据库会话
+        user_id: 用户主键
+        family_id: refresh token family
+        token_version: token 版本号
+
+    Returns:
+        具备监控读权限时为 True；会话失效或无权限时为 False
+    """
+    authorized = await get_authorized_session_user(
+        db,
+        user_id=user_id,
+        family_id=family_id,
+        token_version=token_version,
+        permission_code=_MONITOR_READ_PERMISSION,
+    )
+    return bool(
+        authorized is not None
+        and (authorized.user.is_superuser or authorized.has_permission)
+    )
+
+
 async def _drain_until_disconnect(websocket: WebSocket) -> None:
     """阻塞直到客户端断开；不关心入站消息的具体内容。"""
     while True:
@@ -203,6 +236,17 @@ async def _periodic_reauth(
             if session is None or session.user_id != user_id or session.status != "active":
                 await _close_ws(websocket, _CLOSE_FORBIDDEN, "无权访问该会话")
                 return
+            can_read_monitor = await _can_read_monitor(
+                db,
+                user_id=user_id,
+                family_id=family_id,
+                token_version=token_version,
+            )
+            hub.update_monitor_access(
+                session_id,
+                websocket,
+                can_read_monitor=can_read_monitor,
+            )
 
 
 @router.websocket("/agent/{session_id}")
@@ -250,8 +294,14 @@ async def agent_session_ws(
             if session.user_id != user.id or session.status != "active":
                 await _close_ws(websocket, _CLOSE_FORBIDDEN, "无权访问该会话")
                 return
+            can_read_monitor = await _can_read_monitor(
+                db,
+                user_id=user.id,
+                family_id=payload.sid,
+                token_version=payload.ver,
+            )
 
-        await hub.connect(session_id, websocket)
+        await hub.connect(session_id, websocket, can_read_monitor=can_read_monitor)
         registered = True
 
         receive_task = asyncio.create_task(_drain_until_disconnect(websocket))

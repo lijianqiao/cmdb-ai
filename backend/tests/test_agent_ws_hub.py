@@ -18,6 +18,7 @@ from app.agent.ws_hub import (
     AgentWsHub,
     BufferedWsHitlEventPublisher,
     WsHitlEventPublisher,
+    WsMonitorAlertPublisher,
     WsSpawnEventPublisher,
 )
 from app.schemas.agent_ws import AgentWsServerMessage
@@ -87,6 +88,70 @@ class BlockingWebSocket:
     async def close(self, code: int = 1000, reason: str | None = None) -> None:
         """记录服务端主动关闭，模拟 Starlette WebSocket 契约。"""
         self.closed.append((code, reason))
+
+
+async def test_monitor_alert_only_reaches_monitor_read_peers() -> None:
+    """监控告警只发给具备 monitor:read 能力的 peer，跨会话全局广播。"""
+    local_hub = AgentWsHub()
+    allowed = FakeWebSocket()
+    denied = FakeWebSocket()
+    await local_hub.connect(1, allowed, can_read_monitor=True)  # type: ignore[arg-type]
+    await local_hub.connect(2, denied, can_read_monitor=False)  # type: ignore[arg-type]
+
+    publisher = WsMonitorAlertPublisher(local_hub)
+    await publisher.publish_monitor_alert(
+        {"target_id": 7, "status": "down", "message": "核心交换机离线"}
+    )
+
+    await wait_until(lambda: len(allowed.sent) == 1)
+    assert allowed.sent == [
+        {
+            "type": "monitor_alert",
+            "payload": {"target_id": 7, "status": "down", "message": "核心交换机离线"},
+        }
+    ]
+    assert denied.sent == []
+
+
+async def test_update_monitor_access_enables_later_alerts() -> None:
+    """peer 初始无监控权限，update_monitor_access 后可收到后续告警。"""
+    local_hub = AgentWsHub()
+    peer_ws = FakeWebSocket()
+    await local_hub.connect(1, peer_ws, can_read_monitor=False)  # type: ignore[arg-type]
+
+    publisher = WsMonitorAlertPublisher(local_hub)
+    await publisher.publish_monitor_alert({"target_id": 1, "status": "up", "message": "恢复"})
+    await asyncio.sleep(0.05)
+    assert peer_ws.sent == []
+
+    local_hub.update_monitor_access(1, peer_ws, can_read_monitor=True)  # type: ignore[arg-type]
+    await publisher.publish_monitor_alert({"target_id": 2, "status": "down", "message": "故障"})
+    await wait_until(lambda: len(peer_ws.sent) == 1)
+    assert peer_ws.sent == [
+        {
+            "type": "monitor_alert",
+            "payload": {"target_id": 2, "status": "down", "message": "故障"},
+        }
+    ]
+
+
+async def test_session_broadcast_ignores_monitor_access_flag() -> None:
+    """普通会话 broadcast 仍只按 session_id 隔离，不受监控能力影响。"""
+    local_hub = AgentWsHub()
+    ws_a = FakeWebSocket()
+    ws_b = FakeWebSocket()
+    await local_hub.connect(1, ws_a, can_read_monitor=False)  # type: ignore[arg-type]
+    await local_hub.connect(2, ws_b, can_read_monitor=True)  # type: ignore[arg-type]
+
+    message = AgentWsServerMessage(
+        type="assistant_delta",
+        payload={"text": "会话内", "done": False},
+    )
+    await local_hub.broadcast(1, message)
+
+    await wait_until(lambda: len(ws_a.sent) == 1)
+    assert ws_a.sent == [{"type": "assistant_delta", "payload": {"text": "会话内", "done": False}}]
+    assert ws_b.sent == []
 
 
 async def test_broadcast_only_reaches_same_session() -> None:
