@@ -16,7 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1 import agent_sessions as agent_sessions_api
 from app.core.security import hash_password
 from app.crud.agent_message import agent_message_crud
+from app.crud.agent_registry import agent_registry_crud
 from app.crud.agent_session import agent_session_crud
+from app.crud.hitl_proposal import hitl_proposal_crud
 from app.models.permission import Permission
 from app.models.role import Role, role_permissions
 from app.models.user import User
@@ -413,3 +415,293 @@ async def test_session_endpoints_require_agent_use_permission(
 
     list_resp = await client.get("/api/v1/agent/sessions", headers=headers)
     assert list_resp.status_code == 403
+
+
+@pytest_asyncio.fixture
+async def session_with_messages_proposal_and_child(
+    db_session: AsyncSession,
+    test_user: User,
+) -> int:
+    """带根消息、敏感 HITL 提案与子 Agent 的会话，供快照安全测试使用。"""
+    session = await agent_session_crud.create(
+        db_session,
+        {"user_id": test_user.id, "title": "快照测试", "status": "active"},
+    )
+    await db_session.flush()
+    session_id = session.id
+
+    for index in range(1, 4):
+        await agent_message_crud.append(
+            db_session,
+            session_id=session_id,
+            agent_id=None,
+            role="user",
+            content=f"root-{index}",
+        )
+    await agent_message_crud.append(
+        db_session,
+        session_id=session_id,
+        agent_id="child-1",
+        role="assistant",
+        content="child-private",
+    )
+    await hitl_proposal_crud.create(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="device_query",
+        action_payload={
+            "asset_id": 42,
+            "proposal_reason": "需要巡检",
+            "password": "super-secret",
+            "command": "show version",
+        },
+    )
+    await agent_registry_crud.create(
+        db_session,
+        session_id=session_id,
+        child_id="child-1",
+        parent_agent_id=None,
+        agent_path="/root/kb",
+        trace_id="trace-1",
+        role="kb_explorer",
+        role_version="1",
+        model="local",
+        tools_allowlist=["kb_grep"],
+        sandbox_mode="read-only",
+        task_brief="查找文档",
+        budget={"max_steps": 5},
+    )
+    await db_session.commit()
+    return session_id
+
+
+async def test_snapshot_returns_safe_recoverable_state(
+    client: AsyncClient,
+    auth_headers: Headers,
+    session_with_messages_proposal_and_child: int,
+) -> None:
+    """快照分页返回根消息，提案与子 Agent 仅暴露安全摘要字段。"""
+    response = await client.get(
+        f"/api/v1/agent/sessions/{session_with_messages_proposal_and_child}/snapshot",
+        params={"limit": 2},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert len(data["messages"]) == 2
+    assert [message["content"] for message in data["messages"]] == ["root-2", "root-3"]
+    assert data["has_more_messages"] is True
+    assert data["next_before_message_id"] == data["messages"][0]["id"]
+    assert set(data["proposals"][0]) <= {
+        "proposal_id",
+        "action_type",
+        "status",
+        "status_reason",
+        "reason",
+        "asset_id",
+        "created_at",
+        "execution_started_at",
+        "resolved_at",
+    }
+    assert data["proposals"][0]["reason"] == "需要巡检"
+    assert data["proposals"][0]["asset_id"] == 42
+    assert len(data["children"]) == 1
+    assert data["children"][0]["child_id"] == "child-1"
+    assert "budget" not in response.text
+    assert "tools_allowlist" not in response.text
+    assert "password" not in response.text
+    assert "action_payload" not in response.text
+
+
+async def test_snapshot_non_owner_returns_404(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_role: Role,
+    auth_headers: Headers,
+    login_user,
+    session_with_messages_proposal_and_child: int,
+) -> None:
+    """非所有者访问快照与访问详情一样返回 404。"""
+    other = await _other_user(db_session, test_role)
+    other_headers = await login_user(other.username, "testpassword123")
+    response = await client.get(
+        f"/api/v1/agent/sessions/{session_with_messages_proposal_and_child}/snapshot",
+        headers=other_headers,
+    )
+    assert response.status_code == 404
+
+
+async def test_snapshot_excludes_child_transcript_from_messages(
+    client: AsyncClient,
+    auth_headers: Headers,
+    session_with_messages_proposal_and_child: int,
+) -> None:
+    """快照 messages 只含根 transcript，不含子 Agent 私有消息。"""
+    response = await client.get(
+        f"/api/v1/agent/sessions/{session_with_messages_proposal_and_child}/snapshot",
+        params={"limit": 10},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    contents = [message["content"] for message in response.json()["data"]["messages"]]
+    assert contents == ["root-1", "root-2", "root-3"]
+    assert "child-private" not in contents
+
+
+async def test_snapshot_returns_only_non_terminal_proposals(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+) -> None:
+    """快照只返回可恢复态提案：PENDING/APPROVED/EXECUTING/UNKNOWN。"""
+    session = await agent_session_crud.create(
+        db_session,
+        {"user_id": test_user.id, "title": "提案过滤", "status": "active"},
+    )
+    await db_session.flush()
+    session_id = session.id
+
+    pending = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="notify",
+        action_payload={"proposal_reason": "待审批"},
+    )
+    approved = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="notify",
+        action_payload={"proposal_reason": "已批准"},
+    )
+    executing = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="notify",
+        action_payload={"proposal_reason": "执行中"},
+    )
+    unknown = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="notify",
+        action_payload={"proposal_reason": "结果不确定"},
+    )
+    rejected = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="notify",
+        action_payload={"proposal_reason": "已拒绝"},
+    )
+    executed = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="notify",
+        action_payload={"proposal_reason": "已执行"},
+    )
+    await hitl_proposal_crud.decide(
+        db_session, approved.id, approve=True, reviewed_by_user_id=test_user.id
+    )
+    await hitl_proposal_crud.decide(
+        db_session, rejected.id, approve=False, reviewed_by_user_id=test_user.id
+    )
+    await hitl_proposal_crud.decide(
+        db_session, executing.id, approve=True, reviewed_by_user_id=test_user.id
+    )
+    await hitl_proposal_crud.claim_execution(db_session, executing.id)
+    await hitl_proposal_crud.decide(
+        db_session, unknown.id, approve=True, reviewed_by_user_id=test_user.id
+    )
+    await hitl_proposal_crud.claim_execution(db_session, unknown.id)
+    await hitl_proposal_crud.mark_unknown(
+        db_session, unknown.id, reason="dispatch_outcome_unknown"
+    )
+    await hitl_proposal_crud.decide(
+        db_session, executed.id, approve=True, reviewed_by_user_id=test_user.id
+    )
+    await hitl_proposal_crud.claim_execution(db_session, executed.id)
+    await hitl_proposal_crud.mark_executed(db_session, executed.id)
+    await db_session.commit()
+
+    response = await client.get(
+        f"/api/v1/agent/sessions/{session_id}/snapshot",
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    statuses = {item["status"] for item in response.json()["data"]["proposals"]}
+    assert statuses == {"PENDING", "APPROVED", "EXECUTING", "UNKNOWN"}
+
+
+async def test_snapshot_children_include_active_and_recent_terminal(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+) -> None:
+    """快照 children 包含全部活跃子 Agent 与最近 20 个已终结子 Agent。"""
+    session = await agent_session_crud.create(
+        db_session,
+        {"user_id": test_user.id, "title": "子 Agent 快照", "status": "active"},
+    )
+    await db_session.flush()
+    session_id = session.id
+
+    active_id = await agent_registry_crud.create(
+        db_session,
+        session_id=session_id,
+        child_id="active-child",
+        parent_agent_id=None,
+        agent_path="/root/active",
+        trace_id="trace-active",
+        role="kb_explorer",
+        role_version="1",
+        model="local",
+        tools_allowlist=["kb_grep"],
+        sandbox_mode="read-only",
+        task_brief="仍在运行",
+        budget={"max_steps": 5},
+    )
+    active_id = active_id.child_id
+
+    terminal_ids: list[str] = []
+    for index in range(22):
+        child_id = f"terminal-{index:02d}"
+        await agent_registry_crud.create(
+            db_session,
+            session_id=session_id,
+            child_id=child_id,
+            parent_agent_id=None,
+            agent_path=f"/root/{child_id}",
+            trace_id=f"trace-{child_id}",
+            role="kb_explorer",
+            role_version="1",
+            model="local",
+            tools_allowlist=["kb_grep"],
+            sandbox_mode="read-only",
+            task_brief=f"任务 {index}",
+            budget={"max_steps": 5},
+        )
+        await agent_registry_crud.transition_status(db_session, child_id, "SPAWNING")
+        await agent_registry_crud.transition_status(db_session, child_id, "RUNNING")
+        await agent_registry_crud.transition_status(
+            db_session, child_id, "COMPLETED", result_summary=f"done-{index}"
+        )
+        terminal_ids.append(child_id)
+    await db_session.commit()
+
+    response = await client.get(
+        f"/api/v1/agent/sessions/{session_id}/snapshot",
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    child_ids = [child["child_id"] for child in response.json()["data"]["children"]]
+    assert active_id in child_ids
+    assert len(child_ids) == 21
+    assert child_ids[0] == active_id
+    assert child_ids[1:] == terminal_ids[-20:]

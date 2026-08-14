@@ -275,5 +275,20 @@ class CRUDHitlProposal:
         await db.flush()
         return executed
 
+    async def list_non_terminal_for_session(
+        self, db: AsyncSession, session_id: int
+    ) -> list[HitlProposal]:
+        """返回会话中仍处于可恢复态的 HITL 提案。"""
+        stmt = (
+            select(HitlProposal)
+            .where(
+                HitlProposal.session_id == session_id,
+                HitlProposal.status.in_(("PENDING", "APPROVED", "EXECUTING", "UNKNOWN")),
+            )
+            .order_by(HitlProposal.id.asc())
+        )
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
 
 hitl_proposal_crud = CRUDHitlProposal()

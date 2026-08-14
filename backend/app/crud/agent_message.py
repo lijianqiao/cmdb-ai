@@ -116,5 +116,30 @@ class CRUDAgentMessage:
         messages.reverse()
         return messages
 
+    async def list_root_before_id(
+        self,
+        db: AsyncSession,
+        session_id: int,
+        *,
+        before_id: int | None,
+        limit: int,
+    ) -> tuple[list[AgentMessage], bool]:
+        """按 cursor 分页返回根消息，页内按 id 升序（最旧在前）。"""
+        stmt = select(AgentMessage).where(
+            AgentMessage.session_id == session_id,
+            AgentMessage.agent_id.is_(None),
+        )
+        if before_id is not None:
+            stmt = stmt.where(AgentMessage.id < before_id)
+        rows = list(
+            (await db.execute(stmt.order_by(AgentMessage.id.desc()).limit(limit + 1)))
+            .scalars()
+            .all()
+        )
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        rows.reverse()
+        return rows, has_more
+
 
 agent_message_crud = CRUDAgentMessage()

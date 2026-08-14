@@ -68,3 +68,39 @@ class AgentMessageResponse(ApiModel):
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     created_at: datetime
+
+
+class HitlProposalSafeResponse(ApiModel):
+    """快照中暴露的 HITL 提案安全摘要（不含 action_payload 与凭据）。"""
+
+    proposal_id: int
+    action_type: str
+    status: str
+    status_reason: str | None
+    reason: str
+    asset_id: int | None
+    created_at: datetime
+    execution_started_at: datetime | None
+    resolved_at: datetime | None
+
+
+class ChildAgentSnapshotResponse(ApiModel):
+    """快照中暴露的子 Agent 安全摘要。"""
+
+    child_id: str
+    role: str
+    task_brief: str
+    status: str
+    result_summary: str | None
+    created_at: datetime
+    status_changed_at: datetime
+
+
+class AgentSessionSnapshotResponse(ApiModel):
+    """会话恢复快照：根消息分页 + 可恢复提案 + 子 Agent 摘要。"""
+
+    messages: list[AgentMessageResponse]
+    proposals: list[HitlProposalSafeResponse]
+    children: list[ChildAgentSnapshotResponse]
+    has_more_messages: bool
+    next_before_message_id: int | None

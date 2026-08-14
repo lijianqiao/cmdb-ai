@@ -29,8 +29,12 @@ from app.agent.ws_hub import BufferedWsHitlEventPublisher
 from app.core.database import get_db
 from app.core.deps import require_permission
 from app.crud.agent_message import agent_message_crud
+from app.crud.agent_registry import agent_registry_crud
 from app.crud.agent_session import agent_session_crud
+from app.crud.hitl_proposal import hitl_proposal_crud
+from app.models.agent_registry import AgentRegistry
 from app.models.agent_session import AgentSession
+from app.models.hitl_proposal import HitlProposal
 from app.models.user import User
 from app.schemas.agent_session import (
     AgentChatTurnResponse,
@@ -39,6 +43,9 @@ from app.schemas.agent_session import (
     AgentSessionApprovalUpdate,
     AgentSessionCreate,
     AgentSessionResponse,
+    AgentSessionSnapshotResponse,
+    ChildAgentSnapshotResponse,
+    HitlProposalSafeResponse,
 )
 from app.schemas.common import PaginatedData, ResponseEnvelope, paginated_response, success_response
 from app.utils.audit import log_audit
@@ -72,6 +79,58 @@ async def _owned_session_or_404(
             detail="会话不存在",
         )
     return session
+
+
+def _safe_proposal_response(proposal: HitlProposal) -> HitlProposalSafeResponse:
+    """从白名单字段组装 HITL 安全摘要，避免泄露 action_payload。"""
+    payload = proposal.action_payload if isinstance(proposal.action_payload, dict) else {}
+    raw_asset_id = payload.get("asset_id")
+    asset_id = (
+        raw_asset_id if isinstance(raw_asset_id, int) and not isinstance(raw_asset_id, bool) else None
+    )
+    raw_reason = payload.get("proposal_reason")
+    reason = raw_reason if isinstance(raw_reason, str) else ""
+    return HitlProposalSafeResponse(
+        proposal_id=proposal.id,
+        action_type=proposal.action_type,
+        status=proposal.status,
+        status_reason=proposal.status_reason,
+        reason=reason,
+        asset_id=asset_id,
+        created_at=proposal.created_at,
+        execution_started_at=proposal.execution_started_at,
+        resolved_at=proposal.resolved_at,
+    )
+
+
+def _safe_child_response(child: AgentRegistry) -> ChildAgentSnapshotResponse:
+    """从白名单字段组装子 Agent 安全摘要。"""
+    return ChildAgentSnapshotResponse(
+        child_id=child.child_id,
+        role=child.role,
+        task_brief=child.task_brief,
+        status=child.status,
+        result_summary=child.result_summary,
+        created_at=child.created_at,
+        status_changed_at=child.status_changed_at,
+    )
+
+
+def _snapshot_response(
+    messages: list,
+    proposals: list[HitlProposal],
+    children: list[AgentRegistry],
+    has_more: bool,
+    next_before: int | None,
+) -> AgentSessionSnapshotResponse:
+    """组装会话快照响应。"""
+    return AgentSessionSnapshotResponse(
+        messages=[AgentMessageResponse.model_validate(item) for item in messages],
+        proposals=[_safe_proposal_response(item) for item in proposals],
+        children=[_safe_child_response(item) for item in children],
+        has_more_messages=has_more,
+        next_before_message_id=next_before,
+    )
 
 
 @router.post(
@@ -196,6 +255,7 @@ async def delete_session(
 )
 async def list_session_messages(
     session_id: int,
+    limit: int = Query(default=100, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("agent:use")),
 ) -> ResponseEnvelope[list[AgentMessageResponse]]:
@@ -205,8 +265,33 @@ async def list_session_messages(
         db,
         session_id,
         agent_id=None,
+        limit=limit,
     )
     return success_response([AgentMessageResponse.model_validate(item) for item in messages])
+
+
+@router.get(
+    "/sessions/{session_id}/snapshot",
+    response_model=ResponseEnvelope[AgentSessionSnapshotResponse],
+)
+async def get_session_snapshot(
+    session_id: int,
+    before_message_id: int | None = Query(default=None, gt=0),
+    limit: int = Query(default=100, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("agent:use")),
+) -> ResponseEnvelope[AgentSessionSnapshotResponse]:
+    """返回可恢复的会话安全快照：根消息 cursor 分页 + 提案与子 Agent 摘要。"""
+    await _owned_session_or_404(db, session_id, current_user.id)
+    messages, has_more = await agent_message_crud.list_root_before_id(
+        db, session_id, before_id=before_message_id, limit=limit
+    )
+    proposals = await hitl_proposal_crud.list_non_terminal_for_session(db, session_id)
+    children = await agent_registry_crud.list_snapshot_for_session(db, session_id)
+    next_before = messages[0].id if has_more and messages else None
+    return success_response(
+        _snapshot_response(messages, proposals, children, has_more, next_before)
+    )
 
 
 @router.post(

@@ -258,6 +258,36 @@ class CRUDAgentRegistry:
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_snapshot_for_session(
+        self,
+        db: AsyncSession,
+        session_id: int,
+        *,
+        terminal_limit: int = 20,
+    ) -> list[AgentRegistry]:
+        """返回快照所需的子 Agent：全部活跃项 + 最近若干已终结项。"""
+        active_stmt = (
+            select(AgentRegistry)
+            .where(
+                AgentRegistry.session_id == session_id,
+                AgentRegistry.status.in_(_ACTIVE_STATUSES),
+            )
+            .order_by(AgentRegistry.created_at.asc(), AgentRegistry.child_id.asc())
+        )
+        active = list((await db.execute(active_stmt)).scalars().all())
+        terminal_stmt = (
+            select(AgentRegistry)
+            .where(
+                AgentRegistry.session_id == session_id,
+                AgentRegistry.status.in_(_TERMINAL_STATUSES | {"CLOSED"}),
+            )
+            .order_by(AgentRegistry.created_at.desc(), AgentRegistry.child_id.desc())
+            .limit(terminal_limit)
+        )
+        recent_terminal = list((await db.execute(terminal_stmt)).scalars().all())
+        recent_terminal.reverse()
+        return active + recent_terminal
+
     async def reserved_cost_for_session(self, db: AsyncSession, session_id: int) -> float:
         """Return conservative reserved/actual child cost for one session."""
         receipts = await self.list_for_session(db, session_id)
