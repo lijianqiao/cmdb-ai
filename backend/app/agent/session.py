@@ -1,16 +1,21 @@
 """Transcript helpers built on top of the AgentMessage CRUD layer.
 
-Deliberately no compaction/summarization here yet — `build_model_history`
-returns a bounded recent window only. Summarizing older turns is deferred to
-a later plan (see docs/AGENT_ARCHITECTURE.md §8 and guide.md §6.3); adding it
-now would be speculative for a subsystem nothing yet exercises end-to-end.
+`build_model_history` assembles the model window: code-injected system prompt,
+optional root-session LLM summary (never for child agents), then a bounded recent
+raw transcript. Full audit history stays in `agent_messages` unchanged.
 """
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.compaction import (
+    COMPACT_FALLBACK_MAX_MESSAGES,
+    COMPACT_RECENT_RAW_MESSAGES,
+    MEMORY_SUMMARY_USER_PREFIX,
+)
 from app.core.llm import ChatMessage, ToolCall
 from app.crud.agent_message import agent_message_crud
 from app.models.agent_message import AgentMessage
+from app.models.agent_session import AgentSession
 
 # 工具结果是外部数据（知识库文档、设备回显等），角色分离（role="tool"）本身
 # 不能保证模型一定遵守边界；这里再加一层内容级标记，防止其中混入的伪造指令
@@ -21,27 +26,8 @@ _TOOL_RESULT_UNTRUSTED_PREFIX = (
 )
 
 
-async def build_model_history(
-    db: AsyncSession,
-    session_id: int,
-    *,
-    agent_id: str | None = None,
-    system_prompt: str | None = None,
-    max_messages: int = 40,
-) -> list[ChatMessage]:
-    """Return one exact Agent's bounded history with its code-owned instructions."""
-    rows = await agent_message_crud.list_for_agent(
-        db, session_id, agent_id=agent_id, limit=max_messages
-    )
-    # 窗口截断可能把开头的 tool 结果与它的 assistant(tool_calls) 消息切开，
-    # 孤立的 tool 消息对 OpenAI 兼容端点是非法历史，直接丢弃到合法边界。
-    start = 0
-    while start < len(rows) and rows[start].role == "tool":
-        start += 1
-    rows = rows[start:]
-    history: list[ChatMessage] = []
-    if system_prompt is not None:
-        history.append(ChatMessage(role="system", content=system_prompt))
+def _rows_to_chat_messages(rows: list[AgentMessage]) -> list[ChatMessage]:
+    messages: list[ChatMessage] = []
     for row in rows:
         tool_calls: list[ToolCall] | None = None
         if row.tool_calls:
@@ -50,7 +36,7 @@ async def build_model_history(
                 for tc in row.tool_calls
             ]
         content = _TOOL_RESULT_UNTRUSTED_PREFIX + row.content if row.role == "tool" else row.content
-        history.append(
+        messages.append(
             ChatMessage(
                 role=row.role,
                 content=content,
@@ -58,6 +44,54 @@ async def build_model_history(
                 tool_calls=tool_calls,
             )
         )
+    return messages
+
+
+async def build_model_history(
+    db: AsyncSession,
+    session_id: int,
+    *,
+    agent_id: str | None = None,
+    system_prompt: str | None = None,
+    max_messages: int = COMPACT_FALLBACK_MAX_MESSAGES,
+) -> list[ChatMessage]:
+    """Return one exact Agent's bounded history with its code-owned instructions."""
+    history: list[ChatMessage] = []
+    if system_prompt is not None:
+        history.append(ChatMessage(role="system", content=system_prompt))
+
+    if agent_id is None:
+        session = await db.get(AgentSession, session_id)
+        if session is not None and session.memory_summary:
+            history.append(
+                ChatMessage(
+                    role="user",
+                    content=f"{MEMORY_SUMMARY_USER_PREFIX}\n{session.memory_summary}",
+                )
+            )
+            rows = await agent_message_crud.list_for_agent_after_id(
+                db,
+                session_id,
+                agent_id=None,
+                after_id=session.compacted_through_message_id,
+                limit=COMPACT_RECENT_RAW_MESSAGES,
+            )
+        else:
+            rows = await agent_message_crud.list_for_agent(
+                db, session_id, agent_id=None, limit=max_messages
+            )
+    else:
+        rows = await agent_message_crud.list_for_agent(
+            db, session_id, agent_id=agent_id, limit=max_messages
+        )
+
+    # 窗口截断可能把开头的 tool 结果与它的 assistant(tool_calls) 消息切开，
+    # 孤立的 tool 消息对 OpenAI 兼容端点是非法历史，直接丢弃到合法边界。
+    start = 0
+    while start < len(rows) and rows[start].role == "tool":
+        start += 1
+    rows = rows[start:]
+    history.extend(_rows_to_chat_messages(rows))
     return history
 
 

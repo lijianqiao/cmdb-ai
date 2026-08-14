@@ -19,6 +19,7 @@ from typing import Any, Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.budget import Budget, BudgetExceededError
+from app.agent.compaction import ensure_root_compaction
 from app.agent.session import append_assistant_message, append_tool_result, build_model_history
 from app.core.llm import ChatResult, ToolCall, chat
 
@@ -98,12 +99,22 @@ async def run_loop(
     consecutive_failed_rounds = 0
     before_hook = before_tool_call or _default_before_tool_call
     after_hook = after_tool_call or _default_after_tool_call
+    last_prompt_tokens: int | None = None
 
     while True:
         try:
             active_budget.reserve_step()
         except BudgetExceededError:
             return LoopOutcome(reason="budget_exceeded", final_answer=None)
+
+        if agent_id is None:
+            await ensure_root_compaction(
+                db,
+                session_id,
+                budget=active_budget,
+                system_prompt=system_prompt or "",
+                last_prompt_tokens=last_prompt_tokens,
+            )
 
         history = await build_model_history(
             db,
@@ -119,6 +130,8 @@ async def run_loop(
 
         if result.finish_reason == "error":
             return LoopOutcome(reason="llm_error", final_answer=None)
+
+        last_prompt_tokens = result.prompt_tokens
 
         cost_exceeded = False
         try:

@@ -124,6 +124,8 @@ async def test_get_session_detail_and_non_owner_404(
     assert own.json()["data"]["id"] == session.id
     assert own.json()["data"]["title"] == "我的会话"
     assert own.json()["data"]["approval_mode"] == "ask"
+    assert "memory_summary" not in own.json()["data"]
+    assert "compacted_through_message_id" not in own.json()["data"]
 
     missing = await client.get("/api/v1/agent/sessions/999999", headers=auth_headers)
     assert missing.status_code == 404

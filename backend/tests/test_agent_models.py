@@ -26,6 +26,8 @@ async def test_agent_session_round_trip(db_session: AsyncSession, test_user: Use
     stored = result.scalar_one()
     assert stored.status == "active"
     assert stored.user_id == test_user.id
+    assert stored.memory_summary is None
+    assert stored.compacted_through_message_id is None
 
 
 async def test_agent_message_stores_tool_calls_json(

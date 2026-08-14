@@ -87,5 +87,34 @@ class CRUDAgentMessage:
             messages.reverse()
         return messages
 
+    async def list_for_agent_after_id(
+        self,
+        db: AsyncSession,
+        session_id: int,
+        *,
+        agent_id: str | None,
+        after_id: int | None,
+        limit: int,
+    ) -> list[AgentMessage]:
+        """Return messages with id > after_id, oldest-first, capped to limit."""
+        if limit <= 0:
+            return []
+        agent_filter = (
+            AgentMessage.agent_id.is_(None)
+            if agent_id is None
+            else AgentMessage.agent_id == agent_id
+        )
+        stmt = select(AgentMessage).where(
+            AgentMessage.session_id == session_id,
+            agent_filter,
+        )
+        if after_id is not None:
+            stmt = stmt.where(AgentMessage.id > after_id)
+        stmt = stmt.order_by(AgentMessage.id.desc()).limit(limit)
+        result = await db.execute(stmt)
+        messages = list(result.scalars().all())
+        messages.reverse()
+        return messages
+
 
 agent_message_crud = CRUDAgentMessage()
