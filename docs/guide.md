@@ -239,11 +239,12 @@ L6 预算：步数 / token / 美元 / 子 Agent 并发与深度
 ```text
 PENDING ──approve──> APPROVED ──claim──> EXECUTING ──success──> EXECUTED
    └────reject───> REJECTED                      └─failure/crash──> UNKNOWN
+APPROVED ──preflight: policy_blacklisted──> REJECTED
 UNKNOWN ──confirm_executed──> EXECUTED（人工确认）
 UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 ```
 
-硬规则：只有 `PENDING` 可审批决定；`REJECTED` / `EXECUTED` 为终态；认领 `EXECUTING` 前须策略复检且事务先提交，外部执行器才启动；`UNKNOWN` 不自动重试（人工处置见 §5.3.1）；待审批时敏感结果**不回传模型**；落盘原子写。
+硬规则：只有 `PENDING` 可审批决定；`REJECTED` / `EXECUTED` 为终态；认领 `EXECUTING` 前须策略复检且事务先提交，外部执行器才启动；命令不存在或动态凭据缺失时不认领、状态保持 `APPROVED`；当前策略已黑名单时原子转 `REJECTED` 并写 `status_reason=policy_blacklisted`；`UNKNOWN` 不自动重试（人工处置见 §5.3.1）；待审批时敏感结果**不回传模型**；落盘原子写。
 
 #### 5.3.1 管理员处置 UNKNOWN 提案（本项目）
 
@@ -368,9 +369,11 @@ Codex 术语：
 spawn_agent(task_name, message, agent_type?, model?, reasoning?, fork_mode?)
 wait_agent(target, timeout_ms?)
 send_input(target, message)
+list_agents(session_id)       # 读注册表，不依赖对话记忆
 close_agent(target)          # 幂等；级联关闭子孙
-list_agents() / get_status() # 读注册表，不依赖对话记忆
 ```
+
+本项目根 Agent 另暴露两个服务端确定性编排工具：`classify_documents`（批量文档分类）与 `investigate_root_cause`（多分支根因排查）；默认 reviewer 形成 `root → worker → reviewer`，单并发或无可用父节点才回退根级 reviewer。
 
 ### 7.3 生命周期状态机
 
@@ -381,7 +384,7 @@ REQUESTED → SPAWNING → RUNNING → COMPLETED|FAILED|CANCELLED → CLOSED →
 要点（来自 Codex 公开行为与踩坑）：
 
 1. **COMPLETED 仍可能占并发配额，直到 close** —— 设计里要强制「用完即关」。  
-2. `close` **幂等 + 超时强制 detach**，防止子线程挂死导致槽位永久泄漏。  
+2. `close` **幂等**；后台 GC 只关闭超过 TTL 的终态回执且 `force_closed=false`；只有显式 `close` 取消运行中 task 且宽限期结束后仍未退出时才 `force_closed=true`，防止子线程挂死导致槽位永久泄漏。
 3. 注册表在 **Session.meta / 独立 store**，不依赖对话正文（压缩会丢掉 ID）。  
 4. 父会话结束 → 级联 shutdown 整棵子树。
 
@@ -487,7 +490,7 @@ ChildReceipt {
 
 `trace_id`, `session_id`, `agent_id`, `parent_agent_id`, `step`, `tool`, `control`, `cost_usd`, `latency_ms`, `error_class`
 
-错误分类：`model` | `tool` | `policy_reject` | `infra` —— 否则 Eval「失败」无法归因。
+错误分类：`model` | `tool` | `policy_reject` | `infra` | `budget_exceeded` —— 否则 Eval「失败」无法归因。映射：`budget_exceeded`（step/cost/墙钟超限）、`llm_error` → `model`、`early_exit`（策略终止）→ `policy_reject`。
 
 ---
 
@@ -625,9 +628,10 @@ P5  嵌套深度、级联销毁、compact reconcile、产品化面板
 
 **多 Agent**
 
-- [ ] `spawn` / `wait` / `send_input` / `close`  
-- [ ] ChildReceipt + 注册表  
-- [ ] 完成必 close；close 超时强制释放  
+- [ ] `spawn` / `wait` / `send_input` / `list_agents` / `close`
+- [ ] 批量编排优先 `classify_documents` / `investigate_root_cause`
+- [ ] ChildReceipt + 注册表
+- [ ] 完成必 close；GC 只关终态回执；`force_closed` 仅 close 超时 detach
 - [ ] compact 后 reconcile  
 
 **观测与成本**

@@ -17,10 +17,11 @@ T09 为现有单 Agent 循环增加可审计的动态子 Agent 能力，交付�
 3. root、child、siblings 之间的消息上下文隔离；
 4. 五个只读角色及其最小工具白名单；
 5. `spawn_agent`、`wait_agent`、`send_input`、`close_agent`、`list_agents` 五个原语；
-6. 并发、深度、累计数量、步数、费用、墙钟时间等限额；
-7. 批量文档归类与根因排查两个有界并行编排范式；
-8. 启动孤儿回收、终态回执 GC、级联关闭和生命周期 trace；
-9. 不依赖真实 LLM 或真实 PostgreSQL 的确定性测试套件。
+6. `classify_documents`、`investigate_root_cause` 两个服务端确定性编排工具（根 Agent 优先调用）；
+7. 并发、深度、累计数量、步数、费用、墙钟时间等限额；
+8. 批量文档归类与根因排查两个有界并行编排范式（默认 reviewer 形成 `root → worker → reviewer`，单并发或无可用父节点才回退根级 reviewer）；
+9. 启动孤儿回收、终态回执 GC、级联关闭和生命周期 trace；
+10. 不依赖真实 LLM 或真实 PostgreSQL 的确定性测试套件。
 
 ## 2. 设计依据
 
@@ -276,6 +277,15 @@ T07/T08 已交付工具的参数实现是本设计的规范来源；T09 只调�
 
 按 `created_at, child_id` 稳定返回一个 session 的全部 receipts，包括 CLOSED。它只查询 registry，不依赖 root 是否还记得 child ID。
 
+### 9.6 编排工作流工具
+
+根 Agent dispatcher 另暴露两个只读编排入口，参数由严格 Pydantic schema 校验，session ID 由服务端绑定：
+
+- `classify_documents`：至少两份结构化文档元数据，调用 `orchestration.classify_documents`；
+- `investigate_root_cause`：非空事故上下文与至少两个调查分支，调用 `orchestration.investigate_root_cause`。
+
+二者只返回建议、证据缺口、失败 child 与 reviewer 总结，不写知识库分类、CMDB 或设备状态。需要 reviewer 时默认形成 `root → worker → reviewer`（深度 2）；仅当 `max_concurrent_children=1`、最后一波无可用父 worker，或父节点在 reviewer 创建前已不可用时，才回退为根级 reviewer。
+
 ## 10. 生命周期与并发
 
 ```text
@@ -353,9 +363,9 @@ T09 的总额只覆盖 spawned children。root 自身的跨轮累计费用需要
 | 结果 | 状态 | error_class |
 | :--- | :--- | :--- |
 | final answer | `COMPLETED` | 空 |
-| step/cost/wall-time 超限 | `FAILED` | `policy_reject` |
+| step/cost/wall-time 超限（`LoopOutcome.reason=budget_exceeded`） | `FAILED` | `budget_exceeded` |
 | tool `rejected`/`clarification`/`pending_approval` early exit | `FAILED` | `policy_reject` |
-| model 请求异常 | `FAILED` | `model` |
+| model 请求异常（`LoopOutcome.reason=llm_error`） | `FAILED` | `model` |
 | 工具循环最终未处理异常 | `FAILED` | `tool` |
 | DB/task/runtime 异常 | `FAILED` | `infra` |
 | close/shutdown 取消 | `CANCELLED` | 空 |
@@ -380,7 +390,7 @@ T09 的总额只覆盖 spawned children。root 自身的跨轮累计费用需要
 4. 严格解析每个分类 JSON；
 5. 收集低置信度（`confidence < 0.80`）、`needs_review=true`、新分类建议、解析失败或 child 失败；
 6. 没有问题时直接返回建议；
-7. 有问题时 Spawn 一个 reviewer，输入只包含分类摘要、冲突和证据路径；
+7. 有问题时 Spawn 一个 reviewer，输入只包含分类摘要、冲突和证据路径；默认 `parent_agent_id` 指向最后一波中一个已终态的成功 worker，形成 `root → worker → reviewer`；单并发或无可用父节点时回退根级 reviewer；
 8. wait + close reviewer；
 9. 返回分类建议、失败 child IDs 和复核结论。
 
@@ -416,7 +426,7 @@ classifier 输出：
 2. 有界并行 wait；
 3. 在 `finally` 中 close 所有 investigators；
 4. 严格解析分支 JSON；
-5. 至少一个分支成功时 Spawn reviewer；
+5. 至少一个分支成功时 Spawn reviewer；默认挂到最后一波中一个已终态的成功 investigator 下（`root → worker → reviewer`），单并发或无可用父节点时回退根级 reviewer；
 6. reviewer 检查证据矛盾、相关性/因果混淆和缺失证据，生成综合 JSON；
 7. wait + close reviewer；
 8. 返回 findings、synthesis、失败 child IDs 和 evidence gaps；
@@ -491,7 +501,7 @@ FastAPI lifespan：
 - `agent`：COMPLETED/FAILED/CANCELLED、费用、error class；
 - `close`：正常关闭、级联、GC 或 force detach。
 
-沿用 `AgentTraceEvent` 固定错误分类：`model | tool | policy_reject | infra`。同一 `step` 内的 trace 固定按 `step, created_at, id` 排序，保证并发下的历史回放稳定。`result_summary` 只保存回传父上下文的正文；内部异常详情写服务日志，不进入模型上下文。
+沿用 `AgentTraceEvent` 固定错误分类：`model | tool | policy_reject | infra | budget_exceeded`。同一 `step` 内的 trace 固定按 `step, created_at, id` 排序，保证并发下的历史回放稳定。`result_summary` 只保存回传父上下文的正文；内部异常详情写服务日志，不进入模型上下文。
 
 工具级和 generation 级完整瀑布 trace 可在 root Chat 入口接入时扩充；T09 必须先保证 child 生命周期、费用和失败类别可审计。
 

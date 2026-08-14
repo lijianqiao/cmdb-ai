@@ -315,9 +315,16 @@ classDiagram
 spawn_agent(role, task_brief, model?, tools_allowlist?, budget?, fork_mode="none")
 wait_agent(child_id, timeout_ms?)
 send_input(child_id, message)
-close_agent(child_id)          # 幂等；级联关闭子孙
 list_agents(session_id)        # 读注册表，不依赖对话记忆
+close_agent(child_id)          # 幂等；级联关闭子孙
 ```
+
+**服务端确定性编排工具**（根 Agent 优先调用，不由模型手工复刻分波并发与复核条件）：
+
+| 工具 | 用途 |
+| :--- | :--- |
+| `classify_documents` | 至少两份文档的批量并行分类建议 |
+| `investigate_root_cause` | 至少两个独立分支的多源根因排查 |
 
 所有工具遵循 [guide.md 3.2](./guide.md#32-工具设计原则claude--codex--cursor-共识) 六原则：一工具一契约、副作用分级、结构化 `control` 返回（`ok`/`rejected`/`failed`/`clarification`/`pending_approval`）、大结果截断、错误信息可行动。
 
@@ -333,9 +340,9 @@ REQUESTED → SPAWNING → RUNNING → COMPLETED|FAILED|CANCELLED → CLOSED →
 
 **关键规则：**
 
-1. **COMPLETED 仍占并发配额，直到显式 `close`**——root loop 每轮编排结束后必须对所有已完成子 Agent 调用 `close_agent`；超时未关闭由后台 GC 任务强制 `detach`（状态改 `CLOSED`，`result_summary` 标注 `force_closed=true`）。
+1. **COMPLETED 仍占并发配额，直到显式 `close`**——root loop 每轮编排结束后必须对所有已完成子 Agent 调用 `close_agent`；后台 GC 只关闭超过 TTL 且已处于终态（`COMPLETED`/`FAILED`/`CANCELLED`）的回执，正常转入 `CLOSED` 且 `force_closed=false`。只有显式 `close_agent` 取消运行中 task 且宽限期结束后仍未退出时，才强制 detach 并写 `force_closed=true`；启动 reconciliation 关闭孤儿行时也保持 `false`。
 2. **并发上限**：同一 session 内 `max_concurrent_children`（默认 5），用 `asyncio.Semaphore` 控制，对应 [guide.md 9.1](./guide.md#91-多层限额)"并发"层限额。
-3. **嵌套深度上限为 2 层**（`root → explorer/worker/classifier/investigator`，再往下最多一层 `reviewer`），运维/知识场景不需要更深的链，比 guide.md 默认的约 3 层更收紧。
+3. **嵌套深度上限为 2 层**（`root → explorer/worker/classifier/investigator`，再往下最多一层 `reviewer`），运维/知识场景不需要更深的链，比 guide.md 默认的约 3 层更收紧。`classify_documents` / `investigate_root_cause` 默认 reviewer 形成 `root → worker → reviewer`（深度 2）；仅当 `max_concurrent_children=1`、最后一波无可用父 worker，或父节点在 reviewer 创建前已不可用时，才回退为根级 reviewer。
 4. **`fork_mode` 固定为 `"none"`**（guide.md 7.5 推荐默认）：子 Agent 只收 `task_brief`，不继承父全部历史；父 Agent 必须在 `task_brief` 里显式塞齐必要上下文。
 5. **预算划拨**：父 session 有总预算（`max_total_cost_usd`，配置项），`spawn_agent` 时按 [guide.md 9.2](./guide.md#92-子-agent-预算划拨) 划拨 child budget（写入 `AgentRegistry.budget`），子超限只标记该 child `FAILED(reason=budget_exceeded)`，不影响兄弟 child 或父 session。
 
@@ -383,7 +390,7 @@ sequenceDiagram
     Root-->>U: 根因假设 + 建议(可能带 notify)
 ```
 
-**根 Agent 自动编排**（`ROOT_OPS_SYSTEM_PROMPT` + `chat_turn.py`）：当根循环判断存在两个及以上彼此独立的调查任务时，自动执行 `spawn_agent → wait_agent → 汇总 → close_agent`；简单查询由根 Agent 直接调用只读工具，不 spawn。子 Agent **仅持有角色目录中的只读工具**（`kb_explorer` / `ops_explorer` / `investigator` / `reviewer` 等），不得执行 HITL、设备变更或再次 spawn。
+**根 Agent 自动编排**（`ROOT_OPS_SYSTEM_PROMPT` + `chat_turn.py`）：批量文档分类优先 `classify_documents`，多分支根因排查优先 `investigate_root_cause`；仅当前置条件不满足或其它并行任务时，根循环才手工组合五个 Spawn 原语。简单查询由根 Agent 直接调用只读工具，不 spawn。子 Agent **仅持有角色目录中的只读工具**（`kb_explorer` / `ops_explorer` / `investigator` / `reviewer` 等），不得执行 HITL、设备变更或再次 spawn。
 
 **反模式红线**（照抄 [guide.md 7.8](./guide.md#78-反模式)，本项目额外强调）：单个文档分类、单个设备状态查询、告警文案生成——这些是单次动作，禁止 spawn；只有批量并行或多数据源独立取证才允许。
 
@@ -392,6 +399,7 @@ sequenceDiagram
 ```text
 PENDING ──approve──> APPROVED ──claim──> EXECUTING ──success──> EXECUTED
    └────reject───> REJECTED                      └─failure/crash──> UNKNOWN
+APPROVED ──preflight: policy_blacklisted──> REJECTED
 UNKNOWN ──confirm_executed──> EXECUTED（人工确认）
 UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 ```
@@ -399,7 +407,7 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 对应 `HitlProposal.status`，硬规则：
 
 - 只有 `PENDING` 可审批决定；`REJECTED` / `EXECUTED` 为终态
-- **策略在每次认领执行前复检**：`execute_approved_proposal` 经 `_preflight_and_claim` 在同一短事务内复检命令策略与凭据，通过后才认领 `EXECUTING`；预检失败（命令不存在、动态凭据缺失）不认领，提案保持 `APPROVED`
+- **策略在每次认领执行前复检**：`execute_approved_proposal` 经 `_preflight_and_claim` 在同一短事务内复检命令策略与凭据，通过后才认领 `EXECUTING`；命令不存在或动态凭据缺失时不认领，提案保持 `APPROVED`；当前策略已黑名单时原子转 `REJECTED` 并写 `status_reason=policy_blacklisted`
 - **`EXECUTING` 先提交**：认领 `EXECUTING` 的事务提交后，外部执行器（Scrapli / notify）才启动；执行器内可观测已提交的 `EXECUTING` 状态
 - **`UNKNOWN` 不自动重试**：执行失败、进程崩溃或启动恢复（`reconcile_executing_proposals` 将遗留 `EXECUTING` 批量转 `UNKNOWN`）后，系统不会自动再次执行；须管理员人工处置（见 [guide.md §5.3.1](./guide.md#531-管理员处置-unknown-提案本项目)）
 - 待审批期间，`action_payload` 中的敏感字段不通过 WebSocket 回传给发起对话的 Agent 上下文，Agent 只收到"提案已创建，等待审批"的摘要
@@ -426,8 +434,8 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 
 - 默认每 30 秒一轮，遍历 `MonitorTarget(is_active=true)`
 - 探活方式：TCP `asyncio.open_connection(ip, port)` + 超时，不做 ICMP（第一期结论，见第 11 节假设）
-- 每轮写一条 `MonitorStatusEvent`（append-only）
-- 状态较上一条事件发生翻转（up→down 或 down→up）时，**立即**经 WebSocket 广播给订阅了该资产/网段的活跃 session，不等用户下一次提问
+- 首次探测只落库、不广播；同状态探测更新当前状态行的检查时间、延迟和详情；状态翻转（up→down 或 down→up）才追加新行
+- 本轮探测结果全部提交成功后，才向所有带 `monitor:read` 的在线 Agent WebSocket peer 广播本轮收集的翻转告警；发布失败只记服务日志，不回滚已提交的监控事实
 
 **`cmdb_diff_job`**（低频，默认每小时）：
 
@@ -481,7 +489,7 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 
 ### 10. 可观测性与预算
 
-`AgentTraceEvent` 字段照抄 [guide.md 8.3](./guide.md#83-日志字段建议)：`trace_id, session_id, agent_id, parent_agent_id, step, tool, control, cost_usd, latency_ms, error_class`；错误分类固定四类 `model | tool | policy_reject | infra`。
+`AgentTraceEvent` 字段照抄 [guide.md 8.3](./guide.md#83-日志字段建议)：`trace_id, session_id, agent_id, parent_agent_id, step, tool, control, cost_usd, latency_ms, error_class`；错误分类固定五类 `model | tool | policy_reject | infra | budget_exceeded`。映射：`LoopOutcome.reason=budget_exceeded`（step/cost/墙钟超限）→ `budget_exceeded`；`llm_error` → `model`；`early_exit`（工具 rejected/clarification 等策略终止）→ `policy_reject`。
 
 预算配置分层（对应 [guide.md 9.1](./guide.md#91-多层限额)）：
 

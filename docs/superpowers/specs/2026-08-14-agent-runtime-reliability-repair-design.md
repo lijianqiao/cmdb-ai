@@ -43,11 +43,13 @@ HITL 状态机扩展为：
 
 ```text
 PENDING --批准--> APPROVED --原子认领并提交--> EXECUTING
+   |                    |
+   +--拒绝--------> REJECTED
+   |                    |
+   |    APPROVED --preflight: policy_blacklisted--> REJECTED
    |                                             |
-   +--拒绝--------------------------------> REJECTED
-                                                 |
-                          明确成功 --------------> EXECUTED
-                          结果不能确定 ----------> UNKNOWN
+   |                          明确成功 ----------> EXECUTED
+   |                          结果不能确定 --------> UNKNOWN
 
 UNKNOWN --管理员确认已执行----------------------> EXECUTED
 UNKNOWN --管理员检查后允许重试------------------> APPROVED
@@ -57,6 +59,8 @@ UNKNOWN --管理员检查后允许重试------------------> APPROVED
 
 - `PENDING` 只能进入 `APPROVED` 或 `REJECTED`。
 - `APPROVED` 只有成功通过执行前检查后才能进入 `EXECUTING`。
+- 命令不存在或动态凭据缺失等其它预检失败不认领，提案保持 `APPROVED`。
+- 当前策略已黑名单时，原子地把 `APPROVED` 转为 `REJECTED` 并记录 `status_reason=policy_blacklisted`。
 - `EXECUTING` 不能直接重试。
 - 外部调用开始后发生的异常、超时、连接中断或进程崩溃统一视为结果不确定，进入 `UNKNOWN`。
 - `UNKNOWN` 禁止自动重试，只能由持有 `agent:hitl_approve` 的管理员人工处置。
@@ -81,7 +85,7 @@ UNKNOWN --管理员检查后允许重试------------------> APPROVED
 - 当前命令定义；
 - 当前设备命令策略。
 
-设备命令已进入黑名单时，不调用执行器，将提案转为 `REJECTED` 并记录安全原因代码 `policy_blacklisted`。动态凭据仍要求本次请求提供一次性密码，密码不落库。
+设备命令已进入黑名单时，不调用执行器，将提案转为 `REJECTED` 并记录安全原因代码 `policy_blacklisted`。命令不存在或动态凭据缺失时不认领，提案保持 `APPROVED`。动态凭据仍要求本次请求提供一次性密码，密码不落库。
 
 策略复检和 `APPROVED -> EXECUTING` 认领位于同一短事务中。认领使用带旧状态条件的数据库原子更新，不能只依赖进程内 `asyncio.Lock` 或 SQLite 无效的行锁。认领成功后立即提交，随后才允许调用设备或通知执行器。
 
