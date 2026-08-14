@@ -352,6 +352,10 @@ async def test_confidence_below_point_eight_triggers_reviewer() -> None:
 
     assert outcome.review is not None
     assert [call.role for call in controller.spawn_calls] == ["classifier", "classifier", "reviewer"]
+    reviewer_call = controller.spawn_calls[-1]
+    assert reviewer_call.role == "reviewer"
+    assert reviewer_call.parent_agent_id == "child-1"
+    assert controller.close_count_at_spawn[-1] >= 1
 
 
 async def test_confidence_equal_to_point_eight_does_not_trigger_reviewer() -> None:
@@ -593,6 +597,10 @@ async def test_partial_branch_failure_still_spawns_reviewer() -> None:
     assert len(outcome.failed_child_ids) == 1
     assert outcome.review is not None
     assert [call.role for call in controller.spawn_calls] == ["investigator", "investigator", "reviewer"]
+    reviewer_call = controller.spawn_calls[-1]
+    assert reviewer_call.role == "reviewer"
+    assert reviewer_call.parent_agent_id == "child-1"
+    assert controller.close_count_at_spawn[-1] >= 1
 
 
 async def test_all_branches_failed_skips_reviewer_and_reports_failure() -> None:
@@ -681,3 +689,102 @@ async def test_root_cause_closes_investigators_and_reviewer_on_cancellation() ->
         await task
 
     assert set(controller.close_calls) == {"child-0", "child-1"}
+
+
+async def test_single_concurrency_reviewer_falls_back_to_root_level() -> None:
+    controller = FakeSpawnController(
+        scripts=[
+            _ChildScript(result_summary=_classification_json(1, confidence=0.79)),
+            _ChildScript(result_summary=_classification_json(2, confidence=0.9)),
+            _ChildScript(result_summary=_review_json()),
+        ],
+        max_concurrent_children=1,
+    )
+
+    outcome = await classify_documents(
+        controller,
+        session_id=1,
+        documents=[
+            ClassificationDocument(document_id=1, title="a", file_path="a.md"),
+            ClassificationDocument(document_id=2, title="b", file_path="b.md"),
+        ],
+    )
+
+    assert outcome.review is not None
+    reviewer_call = controller.spawn_calls[-1]
+    assert reviewer_call.role == "reviewer"
+    assert reviewer_call.parent_agent_id is None
+    # 单并发下 reviewer spawn 前最后一波 worker 必须已 close
+    assert controller.close_count_at_spawn[-1] >= 1
+    assert "child-1" in controller.close_calls
+    assert controller.close_calls.index("child-1") < controller.spawn_calls.index(reviewer_call)
+
+
+async def test_cancellation_closes_workers_reviewer_and_reserved_parent() -> None:
+    release = asyncio.Event()
+
+    controller = FakeSpawnController(
+        scripts=[
+            _ChildScript(result_summary=_classification_json(1, confidence=0.79)),
+            _ChildScript(result_summary=_classification_json(2, confidence=0.9)),
+            _ChildScript(result_summary=_review_json()),
+        ]
+    )
+
+    real_wait_agent = controller.wait_agent
+
+    async def blocking_wait_agent(child_id: str, *, timeout_ms: int | None = None) -> ChildReceipt:
+        if child_id == "child-2":
+            await release.wait()
+        return await real_wait_agent(child_id, timeout_ms=timeout_ms)
+
+    controller.wait_agent = blocking_wait_agent  # type: ignore[method-assign]
+
+    reviewer_spawned = asyncio.Event()
+    real_spawn_agent = controller.spawn_agent
+
+    async def spawn_and_signal_reviewer(
+        *,
+        session_id: int,
+        role: str,
+        task_brief: str,
+        trace_id: str | None = None,
+        parent_agent_id: str | None = None,
+        model: str | None = None,
+        tools_allowlist: Iterable[str] | None = None,
+        budget: ChildBudgetSnapshot | None = None,
+        fork_mode: str = "none",
+    ) -> ChildReceipt:
+        receipt = await real_spawn_agent(
+            session_id=session_id,
+            role=role,
+            task_brief=task_brief,
+            trace_id=trace_id,
+            parent_agent_id=parent_agent_id,
+            model=model,
+            tools_allowlist=tools_allowlist,
+            budget=budget,
+            fork_mode=fork_mode,
+        )
+        if role == "reviewer":
+            reviewer_spawned.set()
+        return receipt
+
+    controller.spawn_agent = spawn_and_signal_reviewer  # type: ignore[method-assign]
+
+    task = asyncio.create_task(
+        classify_documents(
+            controller,
+            session_id=1,
+            documents=[
+                ClassificationDocument(document_id=1, title="a", file_path="a.md"),
+                ClassificationDocument(document_id=2, title="b", file_path="b.md"),
+            ],
+        )
+    )
+    await reviewer_spawned.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert set(controller.close_calls) == {"child-0", "child-1", "child-2"}

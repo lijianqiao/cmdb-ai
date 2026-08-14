@@ -98,10 +98,15 @@ class WaveResult:
 
     `receipts[i] is None` iff that request's child failed to wait successfully;
     its child_id and failure kind are then recorded in `failures`.
+
+    `open_final_receipts` holds the last wave's spawned receipts that were waited
+    on successfully but intentionally not closed — the workflow must close them
+    after deciding whether the reviewer nests under a surviving worker.
     """
 
     receipts: tuple[ChildReceipt | None, ...]
     failures: tuple[WaveFailure, ...]
+    open_final_receipts: tuple[ChildReceipt, ...] = ()
 
 
 class WorkflowCleanupError(RuntimeError):
@@ -263,19 +268,49 @@ async def _close_all_shielded(
     raise exc
 
 
+async def _close_remaining(controller: SpawnController, receipts: Sequence[ChildReceipt]) -> None:
+    """Close every receipt still held open by the workflow, even during cancellation."""
+    if not receipts:
+        return
+    try:
+        await _close_all(controller, receipts)
+    except asyncio.CancelledError:
+        await _close_all_shielded(controller, receipts)
+        raise
+
+
+def _select_completed_parent_id(
+    wave: WaveResult,
+    open_receipts: Sequence[ChildReceipt],
+) -> str | None:
+    """Pick the last successfully completed worker from the final wave still open."""
+    open_ids = {receipt.child_id for receipt in open_receipts}
+    for receipt in reversed(wave.receipts):
+        if receipt is None:
+            continue
+        if receipt.child_id not in open_ids:
+            continue
+        if receipt.status == "COMPLETED":
+            return receipt.child_id
+    return None
+
+
 async def _run_wave(
     controller: SpawnController,
     spawn_requests: Sequence[SpawnRequest],
 ) -> WaveResult:
-    """Spawn every request in bounded waves; wait and close each wave before the next."""
+    """Spawn every request in bounded waves; close non-final waves before the next."""
     receipts: list[ChildReceipt | None] = [None] * len(spawn_requests)
     failures: list[WaveFailure] = []
     unclosed: list[ChildReceipt] = []
+    open_final_receipts: list[ChildReceipt] = []
     chunk_size = max(1, controller.max_concurrent_children)
+    total = len(spawn_requests)
 
     try:
-        for start in range(0, len(spawn_requests), chunk_size):
-            indices = range(start, min(start + chunk_size, len(spawn_requests)))
+        for start in range(0, total, chunk_size):
+            is_final_wave = start + chunk_size >= total
+            indices = range(start, min(start + chunk_size, total))
             chunk_receipts: list[ChildReceipt] = []
             for index in indices:
                 request = spawn_requests[index]
@@ -306,20 +341,28 @@ async def _run_wave(
 
             pending = tuple(unclosed)
             unclosed.clear()
-            await _close_all(controller, pending)
+            if is_final_wave:
+                open_final_receipts.extend(pending)
+            else:
+                await _close_all(controller, pending)
     except asyncio.CancelledError:
         pending = tuple(unclosed)
         unclosed.clear()
-        await _close_all_shielded(controller, pending)
+        await _close_all_shielded(controller, (*open_final_receipts, *pending))
         raise
     except BaseException:
         pending = tuple(unclosed)
         unclosed.clear()
-        if pending:
-            await _close_all(controller, pending)
+        still_open = (*open_final_receipts, *pending)
+        if still_open:
+            await _close_all(controller, still_open)
         raise
 
-    return WaveResult(receipts=tuple(receipts), failures=tuple(failures))
+    return WaveResult(
+        receipts=tuple(receipts),
+        failures=tuple(failures),
+        open_final_receipts=tuple(open_final_receipts),
+    )
 
 
 def _classification_task_brief(
@@ -371,17 +414,26 @@ async def _run_reviewer(
     session_id: int,
     trace_id: str,
     task_brief: str,
+    parent_agent_id: str | None = None,
+    spawned_out: list[ChildReceipt] | None = None,
 ) -> ChildReceipt | None:
-    """Spawn+wait+close one root-level reviewer; return its terminal receipt or None."""
+    """Spawn and wait one reviewer; the workflow finally closes its terminal receipt."""
     try:
         receipt = await controller.spawn_agent(
-            session_id=session_id, role="reviewer", task_brief=task_brief, trace_id=trace_id
+            session_id=session_id,
+            role="reviewer",
+            task_brief=task_brief,
+            trace_id=trace_id,
+            parent_agent_id=parent_agent_id,
         )
     except Exception:
         return None
 
+    if spawned_out is not None:
+        spawned_out.append(receipt)
+
     try:
-        waited = await controller.wait_agent(receipt.child_id)
+        return await controller.wait_agent(receipt.child_id)
     except asyncio.CancelledError:
         await _close_all_shielded(controller, (receipt,))
         raise
@@ -389,8 +441,55 @@ async def _run_reviewer(
         await _close_all(controller, (receipt,))
         return None
 
-    await _close_all(controller, (receipt,))
-    return waited
+
+async def _spawn_nested_or_root_reviewer(
+    controller: SpawnController,
+    *,
+    session_id: int,
+    trace_id: str,
+    task_brief: str,
+    wave: WaveResult,
+    open_receipts: list[ChildReceipt],
+    spawned_reviewers: list[ChildReceipt],
+) -> tuple[ChildReceipt | None, list[ChildReceipt]]:
+    """Close siblings, spawn nested reviewer when possible, else fall back to root-level."""
+    parent_id = _select_completed_parent_id(wave, open_receipts)
+    if parent_id is not None and controller.max_concurrent_children >= 2:
+        siblings = [receipt for receipt in open_receipts if receipt.child_id != parent_id]
+        await _close_all(controller, siblings)
+        open_receipts[:] = [receipt for receipt in open_receipts if receipt.child_id == parent_id]
+        reviewer_receipt = await _run_reviewer(
+            controller,
+            session_id=session_id,
+            trace_id=trace_id,
+            task_brief=task_brief,
+            parent_agent_id=parent_id,
+            spawned_out=spawned_reviewers,
+        )
+        return reviewer_receipt, open_receipts
+
+    await _close_all(controller, open_receipts)
+    open_receipts.clear()
+    reviewer_receipt = await _run_reviewer(
+        controller,
+        session_id=session_id,
+        trace_id=trace_id,
+        task_brief=task_brief,
+        parent_agent_id=None,
+        spawned_out=spawned_reviewers,
+    )
+    return reviewer_receipt, open_receipts
+
+
+def _dedupe_receipts(receipts: Sequence[ChildReceipt]) -> tuple[ChildReceipt, ...]:
+    seen: set[str] = set()
+    unique: list[ChildReceipt] = []
+    for receipt in receipts:
+        if receipt.child_id in seen:
+            continue
+        seen.add(receipt.child_id)
+        unique.append(receipt)
+    return tuple(unique)
 
 
 async def classify_documents(
@@ -428,86 +527,102 @@ async def classify_documents(
 
     wave = await _run_wave(controller, spawn_requests)
 
-    suggestions: list[ClassificationResult] = []
-    parse_failures: list[ParseFailure] = []
-    child_ids: list[str] = []
-    failed_child_ids = [failure.child_id for failure in wave.failures]
-    needs_review = False
+    open_receipts: list[ChildReceipt] = list(wave.open_final_receipts)
+    reviewer_receipt: ChildReceipt | None = None
+    spawned_reviewers: list[ChildReceipt] = []
 
-    for document, receipt in zip(documents, wave.receipts, strict=True):
-        if receipt is None:
-            needs_review = True
-            continue
-        child_ids.append(receipt.child_id)
-        if receipt.status != "COMPLETED" or receipt.result_summary is None:
-            failed_child_ids.append(receipt.child_id)
-            needs_review = True
-            continue
-        try:
-            result = ClassificationResult.model_validate_json(receipt.result_summary)
-        except ValidationError:
-            parse_failures.append(
-                ParseFailure(
-                    child_id=receipt.child_id, raw_summary=_truncate(receipt.result_summary)
-                )
-            )
-            needs_review = True
-            continue
-        if result.document_id != document.document_id:
-            parse_failures.append(
-                ParseFailure(
-                    child_id=receipt.child_id, raw_summary=_truncate(receipt.result_summary)
-                )
-            )
-            needs_review = True
-            continue
-        suggestions.append(result)
-        if (
-            result.needs_review
-            or result.confidence < CLASSIFICATION_LOW_CONFIDENCE_THRESHOLD
-            or (allowed and result.recommended_category not in allowed)
-        ):
-            needs_review = True
+    try:
+        suggestions: list[ClassificationResult] = []
+        parse_failures: list[ParseFailure] = []
+        child_ids: list[str] = []
+        failed_child_ids = [failure.child_id for failure in wave.failures]
+        needs_review = False
 
-    if not suggestions:
+        for document, receipt in zip(documents, wave.receipts, strict=True):
+            if receipt is None:
+                needs_review = True
+                continue
+            child_ids.append(receipt.child_id)
+            if receipt.status != "COMPLETED" or receipt.result_summary is None:
+                failed_child_ids.append(receipt.child_id)
+                needs_review = True
+                continue
+            try:
+                result = ClassificationResult.model_validate_json(receipt.result_summary)
+            except ValidationError:
+                parse_failures.append(
+                    ParseFailure(
+                        child_id=receipt.child_id, raw_summary=_truncate(receipt.result_summary)
+                    )
+                )
+                needs_review = True
+                continue
+            if result.document_id != document.document_id:
+                parse_failures.append(
+                    ParseFailure(
+                        child_id=receipt.child_id, raw_summary=_truncate(receipt.result_summary)
+                    )
+                )
+                needs_review = True
+                continue
+            suggestions.append(result)
+            if (
+                result.needs_review
+                or result.confidence < CLASSIFICATION_LOW_CONFIDENCE_THRESHOLD
+                or (allowed and result.recommended_category not in allowed)
+            ):
+                needs_review = True
+
+        if not suggestions:
+            return BatchClassificationOutcome(
+                trace_id=trace_id,
+                suggestions=(),
+                child_ids=tuple(child_ids),
+                failed_child_ids=tuple(failed_child_ids),
+                parse_failures=tuple(parse_failures),
+                review=None,
+                workflow_failure="所有分类子 Agent 均未产出可用结果",
+            )
+
+        review: ClassificationReview | None = None
+        review_failure: str | None = None
+        if needs_review:
+            review_brief = _classification_review_task_brief(
+                suggestions, failed_child_ids, parse_failures
+            )
+            reviewer_receipt, _ = await _spawn_nested_or_root_reviewer(
+                controller,
+                session_id=session_id,
+                trace_id=trace_id,
+                task_brief=review_brief,
+                wave=wave,
+                open_receipts=open_receipts,
+                spawned_reviewers=spawned_reviewers,
+            )
+            if reviewer_receipt is None:
+                review_failure = "复核子 Agent 未产出结果"
+            elif reviewer_receipt.status != "COMPLETED" or reviewer_receipt.result_summary is None:
+                review_failure = "复核子 Agent 未产出结果"
+            else:
+                try:
+                    review = ClassificationReview.model_validate_json(reviewer_receipt.result_summary)
+                except ValidationError:
+                    review_failure = "复核子 Agent 输出解析失败"
+
         return BatchClassificationOutcome(
             trace_id=trace_id,
-            suggestions=(),
+            suggestions=tuple(suggestions),
             child_ids=tuple(child_ids),
             failed_child_ids=tuple(failed_child_ids),
             parse_failures=tuple(parse_failures),
-            review=None,
-            workflow_failure="所有分类子 Agent 均未产出可用结果",
+            review=review,
+            workflow_failure=review_failure,
         )
-
-    review: ClassificationReview | None = None
-    review_failure: str | None = None
-    if needs_review:
-        review_brief = _classification_review_task_brief(
-            suggestions, failed_child_ids, parse_failures
+    finally:
+        remaining = _dedupe_receipts(
+            (*open_receipts, *spawned_reviewers, *(tuple([reviewer_receipt]) if reviewer_receipt else ()))
         )
-        review_receipt = await _run_reviewer(
-            controller, session_id=session_id, trace_id=trace_id, task_brief=review_brief
-        )
-        if review_receipt is None:
-            review_failure = "复核子 Agent 未产出结果"
-        elif review_receipt.status != "COMPLETED" or review_receipt.result_summary is None:
-            review_failure = "复核子 Agent 未产出结果"
-        else:
-            try:
-                review = ClassificationReview.model_validate_json(review_receipt.result_summary)
-            except ValidationError:
-                review_failure = "复核子 Agent 输出解析失败"
-
-    return BatchClassificationOutcome(
-        trace_id=trace_id,
-        suggestions=tuple(suggestions),
-        child_ids=tuple(child_ids),
-        failed_child_ids=tuple(failed_child_ids),
-        parse_failures=tuple(parse_failures),
-        review=review,
-        workflow_failure=review_failure,
-    )
+        await _close_remaining(controller, remaining)
 
 
 def _investigation_task_brief(branch: RootCauseBranch, incident_context: str) -> str:
@@ -579,71 +694,87 @@ async def investigate_root_cause(
 
     wave = await _run_wave(controller, spawn_requests)
 
-    findings: list[InvestigationFinding] = []
-    parse_failures: list[ParseFailure] = []
-    child_ids: list[str] = []
-    failed_child_ids = [failure.child_id for failure in wave.failures]
+    open_receipts: list[ChildReceipt] = list(wave.open_final_receipts)
+    reviewer_receipt: ChildReceipt | None = None
+    spawned_reviewers: list[ChildReceipt] = []
 
-    for branch, receipt in zip(branches, wave.receipts, strict=True):
-        if receipt is None:
-            continue
-        child_ids.append(receipt.child_id)
-        if receipt.status != "COMPLETED" or receipt.result_summary is None:
-            failed_child_ids.append(receipt.child_id)
-            continue
-        try:
-            finding = InvestigationFinding.model_validate_json(receipt.result_summary)
-        except ValidationError:
-            parse_failures.append(
-                ParseFailure(
-                    child_id=receipt.child_id, raw_summary=_truncate(receipt.result_summary)
-                )
-            )
-            continue
-        if finding.branch != branch.name:
-            parse_failures.append(
-                ParseFailure(
-                    child_id=receipt.child_id, raw_summary=_truncate(receipt.result_summary)
-                )
-            )
-            continue
-        findings.append(finding)
+    try:
+        findings: list[InvestigationFinding] = []
+        parse_failures: list[ParseFailure] = []
+        child_ids: list[str] = []
+        failed_child_ids = [failure.child_id for failure in wave.failures]
 
-    if not findings:
+        for branch, receipt in zip(branches, wave.receipts, strict=True):
+            if receipt is None:
+                continue
+            child_ids.append(receipt.child_id)
+            if receipt.status != "COMPLETED" or receipt.result_summary is None:
+                failed_child_ids.append(receipt.child_id)
+                continue
+            try:
+                finding = InvestigationFinding.model_validate_json(receipt.result_summary)
+            except ValidationError:
+                parse_failures.append(
+                    ParseFailure(
+                        child_id=receipt.child_id, raw_summary=_truncate(receipt.result_summary)
+                    )
+                )
+                continue
+            if finding.branch != branch.name:
+                parse_failures.append(
+                    ParseFailure(
+                        child_id=receipt.child_id, raw_summary=_truncate(receipt.result_summary)
+                    )
+                )
+                continue
+            findings.append(finding)
+
+        if not findings:
+            return RootCauseOutcome(
+                trace_id=trace_id,
+                findings=(),
+                child_ids=tuple(child_ids),
+                failed_child_ids=tuple(failed_child_ids),
+                parse_failures=tuple(parse_failures),
+                review=None,
+                workflow_failure="所有根因排查分支均未产出可用结果",
+            )
+
+        review: ReviewSynthesis | None = None
+        review_failure: str | None = None
+        review_brief = _root_cause_review_task_brief(
+            incident_context, findings, failed_child_ids, parse_failures
+        )
+        reviewer_receipt, _ = await _spawn_nested_or_root_reviewer(
+            controller,
+            session_id=session_id,
+            trace_id=trace_id,
+            task_brief=review_brief,
+            wave=wave,
+            open_receipts=open_receipts,
+            spawned_reviewers=spawned_reviewers,
+        )
+        if reviewer_receipt is None:
+            review_failure = "复核子 Agent 未产出结果"
+        elif reviewer_receipt.status != "COMPLETED" or reviewer_receipt.result_summary is None:
+            review_failure = "复核子 Agent 未产出结果"
+        else:
+            try:
+                review = ReviewSynthesis.model_validate_json(reviewer_receipt.result_summary)
+            except ValidationError:
+                review_failure = "复核子 Agent 输出解析失败"
+
         return RootCauseOutcome(
             trace_id=trace_id,
-            findings=(),
+            findings=tuple(findings),
             child_ids=tuple(child_ids),
             failed_child_ids=tuple(failed_child_ids),
             parse_failures=tuple(parse_failures),
-            review=None,
-            workflow_failure="所有根因排查分支均未产出可用结果",
+            review=review,
+            workflow_failure=review_failure,
         )
-
-    review: ReviewSynthesis | None = None
-    review_failure: str | None = None
-    review_brief = _root_cause_review_task_brief(
-        incident_context, findings, failed_child_ids, parse_failures
-    )
-    review_receipt = await _run_reviewer(
-        controller, session_id=session_id, trace_id=trace_id, task_brief=review_brief
-    )
-    if review_receipt is None:
-        review_failure = "复核子 Agent 未产出结果"
-    elif review_receipt.status != "COMPLETED" or review_receipt.result_summary is None:
-        review_failure = "复核子 Agent 未产出结果"
-    else:
-        try:
-            review = ReviewSynthesis.model_validate_json(review_receipt.result_summary)
-        except ValidationError:
-            review_failure = "复核子 Agent 输出解析失败"
-
-    return RootCauseOutcome(
-        trace_id=trace_id,
-        findings=tuple(findings),
-        child_ids=tuple(child_ids),
-        failed_child_ids=tuple(failed_child_ids),
-        parse_failures=tuple(parse_failures),
-        review=review,
-        workflow_failure=review_failure,
-    )
+    finally:
+        remaining = _dedupe_receipts(
+            (*open_receipts, *spawned_reviewers, *(tuple([reviewer_receipt]) if reviewer_receipt else ()))
+        )
+        await _close_remaining(controller, remaining)

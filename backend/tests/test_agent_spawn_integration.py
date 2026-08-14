@@ -243,6 +243,11 @@ async def test_batch_classification_wave_invariants(
     receipts = await manager.list_agents(integration_db.session_id)
     assert len(receipts) == 7
     assert all(receipt.status == "CLOSED" for receipt in receipts)
+    reviewer = next(receipt for receipt in receipts if receipt.role == "reviewer")
+    assert reviewer.parent_agent_id in {
+        receipt.child_id for receipt in receipts if receipt.role == "classifier"
+    }
+    assert reviewer.agent_path.count("/") == 3
 
     async with integration_db.session_factory() as db:
         assert await agent_registry_crud.list_active_children(db, integration_db.session_id) == []
