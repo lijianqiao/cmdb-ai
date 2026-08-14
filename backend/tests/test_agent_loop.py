@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.budget import Budget
-from app.agent.loop import LoopOutcome, ToolResult, run_loop
+from app.agent.loop import BeforeToolDecision, LoopOutcome, ToolResult, run_loop
 from app.agent.session import append_user_message, build_model_history
 from app.core.llm import ChatMessage, ChatResult, ToolCall
 from app.crud.agent_session import agent_session_crud
@@ -25,6 +25,100 @@ async def _make_session(db_session: AsyncSession, user_id: int) -> int:
 
 async def _never_called_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
     raise AssertionError(f"dispatch_tool should not have been called with {name!r}")
+
+
+async def test_loop_before_hook_can_block_without_dispatching(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    await append_user_message(db_session, session_id, "重启")
+    dispatched: list[str] = []
+
+    async def fake_chat(model_key: str, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        return ChatResult(
+            content=None,
+            tool_calls=[ToolCall(id="call_1", name="device_control", arguments='{"asset_id":1}')],
+            finish_reason="tool_calls",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    async def fake_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
+        dispatched.append(name)
+        return ToolResult(control="ok", content="should not run")
+
+    async def before(name: str, arguments: dict[str, Any]) -> BeforeToolDecision:
+        assert name == "device_control"
+        assert arguments == {"asset_id": 1}
+        return BeforeToolDecision(
+            block=True,
+            result=ToolResult(control="pending_approval", content="已提交审批"),
+        )
+
+    outcome = await run_loop(
+        db_session,
+        session_id=session_id,
+        model_key="local-chat",
+        dispatch_tool=fake_dispatch,
+        chat_fn=fake_chat,
+        before_tool_call=before,
+    )
+    assert outcome.reason == "early_exit"
+    assert outcome.control == "pending_approval"
+    assert dispatched == []
+
+
+async def test_loop_after_hook_called_when_before_allows(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    await append_user_message(db_session, session_id, "查 CMDB")
+    after_calls: list[tuple[str, dict[str, Any], ToolResult]] = []
+    chat_calls = {"n": 0}
+
+    async def fake_chat(model_key: str, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        chat_calls["n"] += 1
+        if chat_calls["n"] == 1:
+            return ChatResult(
+                content=None,
+                tool_calls=[
+                    ToolCall(id="call_1", name="query_cmdb", arguments='{"keyword":"SW-12"}')
+                ],
+                finish_reason="tool_calls",
+                prompt_tokens=1,
+                completion_tokens=1,
+            )
+        return ChatResult(
+            content="查到了",
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    async def fake_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
+        return ToolResult(control="ok", content="found SW-12")
+
+    async def before(name: str, arguments: dict[str, Any]) -> BeforeToolDecision:
+        return BeforeToolDecision(block=False)
+
+    async def after(name: str, arguments: dict[str, Any], result: ToolResult) -> None:
+        after_calls.append((name, arguments, result))
+
+    await run_loop(
+        db_session,
+        session_id=session_id,
+        model_key="local-chat",
+        dispatch_tool=fake_dispatch,
+        chat_fn=fake_chat,
+        before_tool_call=before,
+        after_tool_call=after,
+    )
+
+    assert len(after_calls) == 1
+    assert after_calls[0][0] == "query_cmdb"
+    assert after_calls[0][1] == {"keyword": "SW-12"}
+    assert after_calls[0][2] == ToolResult(control="ok", content="found SW-12")
 
 
 async def test_loop_returns_final_answer_when_model_calls_no_tools(

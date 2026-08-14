@@ -37,8 +37,28 @@ class ToolResult:
     content: str
 
 
+@dataclass(frozen=True, slots=True)
+class BeforeToolDecision:
+    """Whether a tool call should be blocked before dispatch."""
+
+    block: bool
+    result: ToolResult | None = None
+
+
 type ToolDispatcher = Callable[[str, dict[str, Any]], Awaitable[ToolResult]]
 type ChatFn = Callable[..., Awaitable[ChatResult]]
+type BeforeToolCall = Callable[[str, dict[str, Any]], Awaitable[BeforeToolDecision]]
+type AfterToolCall = Callable[[str, dict[str, Any], ToolResult], Awaitable[None]]
+
+
+async def _default_before_tool_call(name: str, arguments: dict[str, Any]) -> BeforeToolDecision:
+    return BeforeToolDecision(block=False)
+
+
+async def _default_after_tool_call(
+    name: str, arguments: dict[str, Any], result: ToolResult
+) -> None:
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,10 +90,14 @@ async def run_loop(
     chat_fn: ChatFn = chat,
     agent_id: str | None = None,
     system_prompt: str | None = None,
+    before_tool_call: BeforeToolCall | None = None,
+    after_tool_call: AfterToolCall | None = None,
 ) -> LoopOutcome:
     """Run one standard agent loop turn against `session_id`'s transcript."""
     active_budget = budget or Budget()
     consecutive_failed_rounds = 0
+    before_hook = before_tool_call or _default_before_tool_call
+    after_hook = after_tool_call or _default_after_tool_call
 
     while True:
         try:
@@ -121,7 +145,15 @@ async def run_loop(
 
         round_controls: list[ToolControl] = []
         for index, tool_call in enumerate(result.tool_calls):
-            tool_result = await dispatch_tool(tool_call.name, _parse_arguments(tool_call))
+            arguments = _parse_arguments(tool_call)
+            decision = await before_hook(tool_call.name, arguments)
+            if decision.block:
+                if decision.result is None:
+                    raise ValueError("block=True 时 result 必填")
+                tool_result = decision.result
+            else:
+                tool_result = await dispatch_tool(tool_call.name, arguments)
+                await after_hook(tool_call.name, arguments, tool_result)
             round_controls.append(tool_result.control)
             await append_tool_result(
                 db, session_id, tool_call.id, tool_result.content, agent_id=agent_id
