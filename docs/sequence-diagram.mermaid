@@ -220,7 +220,7 @@ sequenceDiagram
     API-->>C: 200 snapshot（刷新/重连恢复来源）
     C->>WS: WS /api/v1/ws/agent/{id}（鉴权后）
     Note over C,WS: 快照加载完成后再连 WS；WS 只加速增量
-    WS-->>C: assistant_delta / tool_call / hitl_* / spawn_* / turn_done
+    WS-->>C: assistant_delta / tool_call / hitl_* / child_status / turn_done
 
 %% ===== 7. HITL 执行与 UNKNOWN 恢复 =====
 sequenceDiagram
@@ -230,7 +230,7 @@ sequenceDiagram
     participant DB as Database
     participant Dev as DeviceExecutor
 
-    U->>API: POST /hitl/proposals/{id}/decide {approve}
+    U->>API: POST /api/v1/hitl/proposals/{id}/decide {approve}
     API->>DB: PENDING → APPROVED; COMMIT
     API->>Exec: execute_approved_proposal
     Exec->>DB: 策略复检 + 认领 EXECUTING; COMMIT
@@ -241,12 +241,12 @@ sequenceDiagram
     else 失败或进程崩溃
         Exec->>DB: EXECUTING → UNKNOWN
         Note over U: 不自动重试；管理员先查真实设备状态
-        U->>API: POST /resolve-unknown {confirm_executed|allow_retry}
+        U->>API: POST /api/v1/hitl/proposals/{id}/resolve-unknown {confirm_executed|allow_retry}
         alt confirm_executed
             API->>DB: UNKNOWN → EXECUTED
         else allow_retry
             API->>DB: UNKNOWN → APPROVED
-            U->>API: POST /retry
+            U->>API: POST /api/v1/hitl/proposals/{id}/retry
             API->>Exec: 再次 execute_approved_proposal
         end
     end

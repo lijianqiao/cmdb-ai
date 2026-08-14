@@ -443,7 +443,7 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 **快照恢复 vs WebSocket 加速**：
 
 - **快照是刷新/重连的恢复来源**：`GET /api/v1/agent/sessions/{session_id}/snapshot` 返回根消息 cursor 分页、非终态 HITL 提案摘要、子 Agent 注册表摘要；前端在选中会话、页面刷新或 WebSocket 重连前先拉快照，再建立 WS 接收增量
-- **WebSocket 是实时加速**：`WS /api/v1/ws/agent/{session_id}` 推送 `assistant_delta`、`tool_call`、`hitl_*`、`spawn_*`、`turn_done` 等事件，不替代快照的权威状态
+- **WebSocket 是实时加速**：`WS /api/v1/ws/agent/{session_id}` 推送 `assistant_delta`、`tool_call`、`hitl_*`、`child_status`、`turn_done` 等事件，不替代快照的权威状态
 
 **压缩策略**（已实现于 `app/agent/compaction.py`）：**审计历史与模型窗口分离**——`agent_messages` 表保留全量原文，不删除；送入模型的窗口由 `build_model_history` 组装。根会话（`agent_id is None`）在每次用户可见模型调用前，`run_loop` 调用 `ensure_root_compaction`：估计 token 超阈值（`COMPACT_TOKEN_THRESHOLD`）时，把窗口外旧消息送独立摘要器（直接 `llm.chat`，不走 WebSocket 的 `chat_fn`）；摘要写入 `AgentSession.memory_summary`，原文从 `compacted_through_message_id` 之后截取最近 `COMPACT_RECENT_RAW_MESSAGES` 条；无摘要时 fallback 最近 `COMPACT_FALLBACK_MAX_MESSAGES` 条。运维根指令（`ROOT_OPS_SYSTEM_PROMPT`）每轮由 `build_model_history` 从代码注入，永不进入摘要请求；子 Agent 循环不压缩。压缩失败或超预算则跳过，本轮继续用 fallback 窗口。对应 [guide.md 6.3](./guide.md#63-compaction-规范对齐-claude--openai)"System / 根指令永不被摘要吞掉"。
 
@@ -452,7 +452,7 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 **WebSocket 契约**：单一端点 `/api/v1/ws/agent/{session_id}`，鉴权复用现有 `access_token`（首帧校验）。消息用判别式 JSON：
 
 ```text
-{"type": "assistant_delta" | "tool_call" | "hitl_pending" | "hitl_resolved" | "hitl_execution_failed" | "spawn_child" | "spawn_resolved" | "monitor_alert" | "turn_done" | "error", "payload": {...}}
+{"type": "assistant_delta" | "tool_call" | "hitl_pending" | "hitl_resolved" | "hitl_execution_failed" | "child_status" | "monitor_alert" | "turn_done" | "error", "payload": {...}}
 ```
 
 前端一条 WebSocket 连接承载 chat 流式输出、HITL 状态变化、子 Agent 生命周期、监控告警等事件，不额外开连接。

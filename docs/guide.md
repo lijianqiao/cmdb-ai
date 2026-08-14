@@ -237,11 +237,13 @@ L6 预算：步数 / token / 美元 / 子 Agent 并发与深度
 ### 5.3 HITL 状态机
 
 ```text
-PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次）
-   └────reject───> REJECTED
+PENDING ──approve──> APPROVED ──claim──> EXECUTING ──success──> EXECUTED
+   └────reject───> REJECTED                      └─failure/crash──> UNKNOWN
+UNKNOWN ──confirm_executed──> EXECUTED（人工确认）
+UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 ```
 
-硬规则：只有 PENDING 可决定；APPROVED 只执行一次；待审批时敏感结果**不回传模型**；落盘原子写。
+硬规则：只有 `PENDING` 可审批决定；`REJECTED` / `EXECUTED` 为终态；认领 `EXECUTING` 前须策略复检且事务先提交，外部执行器才启动；`UNKNOWN` 不自动重试（人工处置见 §5.3.1）；待审批时敏感结果**不回传模型**；落盘原子写。
 
 #### 5.3.1 管理员处置 UNKNOWN 提案（本项目）
 
