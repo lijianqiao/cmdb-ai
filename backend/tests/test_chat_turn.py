@@ -320,6 +320,61 @@ async def test_chat_turn_llm_error_broadcasts_error_then_turn_done(
     assert turn_done["reason"] == "llm_error"
 
 
+async def test_chat_turn_llm_error_does_not_broadcast_assistant_delta(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """chat_fn 返回 finish_reason=error 时不推 assistant_delta，仅 error + turn_done。"""
+    from app.agent.chat_turn import run_chat_turn
+
+    session_id = await _make_session(db_session, test_user.id)
+    test_hub = AgentWsHub()
+    ws = FakeWebSocket()
+    await test_hub.connect(session_id, ws)  # type: ignore[arg-type]
+
+    error_content = "模型调用失败：HTTP 502"
+
+    async def error_chat(model_key: str, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        return ChatResult(
+            finish_reason="error",
+            content=error_content,
+            tool_calls=[],
+            prompt_tokens=0,
+            completion_tokens=0,
+        )
+
+    async def unused_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
+        raise AssertionError("不应调用工具")
+
+    outcome = await run_chat_turn(
+        db_session,
+        session_id=session_id,
+        actor_user_id=test_user.id,
+        content="会失败的问题",
+        chat_fn=error_chat,
+        dispatch_tool=unused_dispatch,
+        hub_instance=test_hub,
+    )
+    await db_session.commit()
+
+    assert outcome.reason == "llm_error"
+    assert outcome.final_answer is None
+
+    types = _event_types(ws)
+    assert "error" in types
+    assert types[-1] == "turn_done"
+
+    err = next(item for item in ws.sent if item["type"] == "error")
+    assert err["payload"]["message"] == "模型调用失败，请稍后重试"
+
+    turn_done = ws.sent[-1]["payload"]
+    assert turn_done["reason"] == "llm_error"
+
+    delta_events = [item for item in ws.sent if item["type"] == "assistant_delta"]
+    assert delta_events == []
+    assert not any(error_content in str(item) for item in ws.sent)
+
+
 async def test_chat_turn_error_broadcasts_chinese_message_and_keeps_user_message(
     db_session: AsyncSession,
     test_user: User,

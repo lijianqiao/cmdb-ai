@@ -154,7 +154,7 @@ async def run_chat_turn(
                         payload={"id": tool_call.id, "name": tool_call.name},
                     ),
                 )
-        elif result.content:
+        elif result.content and result.finish_reason != "error":
             if streamed_text:
                 await active_hub.broadcast(
                     session_id,
