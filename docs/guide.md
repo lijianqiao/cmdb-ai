@@ -384,7 +384,7 @@ REQUESTED → SPAWNING → RUNNING → COMPLETED|FAILED|CANCELLED → CLOSED →
 要点（来自 Codex 公开行为与踩坑）：
 
 1. **COMPLETED 仍可能占并发配额，直到 close** —— 设计里要强制「用完即关」。  
-2. `close` **幂等**；后台 GC 只关闭超过 TTL 的终态回执且 `force_closed=false`；只有显式 `close` 取消运行中 task 且宽限期结束后仍未退出时才 `force_closed=true`，防止子线程挂死导致槽位永久泄漏。
+2. `close` **幂等**；后台 GC 只关闭超过 TTL 的终态回执且 `force_closed=false`；只有显式 `close` 取消运行中 task 且宽限期结束后仍未退出时才 `force_closed=true`，防止子线程挂死导致槽位永久泄漏；启动 reconciliation 关闭孤儿行时也保持 `force_closed=false`。
 3. 注册表在 **Session.meta / 独立 store**，不依赖对话正文（压缩会丢掉 ID）。  
 4. 父会话结束 → 级联 shutdown 整棵子树。
 
@@ -631,7 +631,7 @@ P5  嵌套深度、级联销毁、compact reconcile、产品化面板
 - [ ] `spawn` / `wait` / `send_input` / `list_agents` / `close`
 - [ ] 批量编排优先 `classify_documents` / `investigate_root_cause`
 - [ ] ChildReceipt + 注册表
-- [ ] 完成必 close；GC 只关终态回执；`force_closed` 仅 close 超时 detach
+- [ ] 完成必 close；GC / 启动 reconciliation 只关终态回执且 `force_closed=false`；`force_closed=true` 仅 close 超时 detach
 - [ ] compact 后 reconcile  
 
 **观测与成本**
