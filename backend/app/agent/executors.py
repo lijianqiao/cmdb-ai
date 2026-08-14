@@ -122,9 +122,11 @@ def _truncate_output(text: str, *, limit: int = _OUTPUT_TRUNCATE_LIMIT) -> tuple
 
 
 # CMDB 厂商字段 → Netmiko device_type。device_type 决定 Netmiko 登录后发哪条
-# "关闭分页"命令，标错厂商会导致大输出命令卡在分页提示符上读超时。
+# "关闭分页"命令，标错厂商会导致大输出命令卡在分页提示符上读超时。cisco_s300 会启用
+# ANSI 清洗并发送 terminal datadump；cisco_xe 则使用 IOS-XE 的会话初始化。
 _NETMIKO_DEVICE_TYPES: Mapping[str, str] = {
     "cisco_iosxe": "cisco_xe",
+    "cisco_small_business": "cisco_s300",
     "huawei_vrp": "huawei_vrp",
     "hp_comware": "hp_comware",
     "juniper_junos": "juniper_junos",
