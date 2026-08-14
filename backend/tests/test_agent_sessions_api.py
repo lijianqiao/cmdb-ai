@@ -6,11 +6,14 @@
 @Docs: 验证 Agent 会话 REST API：创建、列表、详情与根 transcript 历史。
 """
 
+import asyncio
+
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient
+from httpx import AsyncClient, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1 import agent_sessions as agent_sessions_api
 from app.core.security import hash_password
 from app.crud.agent_message import agent_message_crud
 from app.crud.agent_session import agent_session_crud
@@ -36,6 +39,56 @@ async def _grant_agent_use(db_session: AsyncSession, test_role: Role) -> None:
         role_permissions.insert().values(role_id=test_role.id, permission_id=permission.id)
     )
     await db_session.commit()
+
+
+@pytest_asyncio.fixture
+async def session_id(
+    client: AsyncClient,
+    auth_headers: Headers,
+) -> int:
+    """创建一条测试会话并返回其 ID。"""
+    create_resp = await client.post(
+        "/api/v1/agent/sessions",
+        json={"title": "并发测试"},
+        headers=auth_headers,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    return create_resp.json()["data"]["id"]
+
+
+async def _post_message(
+    client: AsyncClient,
+    session_id: int,
+    headers: dict[str, str],
+    content: str,
+) -> Response:
+    return await client.post(
+        f"/api/v1/agent/sessions/{session_id}/messages",
+        json={"content": content},
+        headers=headers,
+    )
+
+
+async def test_same_session_rejects_second_concurrent_turn(
+    client, auth_headers, session_id, monkeypatch
+) -> None:
+    from app.agent.loop import LoopOutcome
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_turn(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return LoopOutcome(reason="final_answer", final_answer="ok")
+
+    monkeypatch.setattr(agent_sessions_api, "run_chat_turn", slow_turn)
+    first = asyncio.create_task(_post_message(client, session_id, auth_headers, "A"))
+    await entered.wait()
+    second = await _post_message(client, session_id, auth_headers, "B")
+    release.set()
+    assert second.status_code == 409
+    assert (await first).status_code == 200
 
 
 async def _other_user(db: AsyncSession, role: Role) -> User:

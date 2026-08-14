@@ -22,6 +22,7 @@ from app.api.router import api_router
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal, engine
 from app.core.security import PasswordHashOverloadedError
+from app.crud.agent_session import agent_session_crud
 from app.crud.base import RelatedObjectsNotFoundError
 from app.crud.role import RoleInUseError
 from app.crud.user import LastActiveSuperuserError
@@ -69,6 +70,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     child this process still owns, then dispose the database engine last.
     """
     await reconcile_executing_proposals(AsyncSessionLocal)
+    async with AsyncSessionLocal() as recover_db:
+        await agent_session_crud.recover_active_turns(recover_db)
+        await recover_db.commit()
     await spawn_manager.reconcile_startup()
     monitor_task = asyncio.create_task(run_monitor_sweep_loop())
     diff_task = asyncio.create_task(run_cmdb_diff_loop())

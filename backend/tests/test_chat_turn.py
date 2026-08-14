@@ -15,6 +15,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.loop import ToolResult
+from app.agent.session import append_user_message
 from app.agent.ws_hub import AgentWsHub, WsHitlEventPublisher
 from app.core.llm import ChatMessage, ChatResult, ToolCall
 from app.crud.agent_session import agent_session_crud
@@ -122,11 +123,11 @@ async def test_chat_turn_broadcasts_tool_call_then_delta_then_turn_done(
         assert name == "query_monitor_status"
         return ToolResult(control="ok", content="10.0.0.5 状态: up")
 
+    await append_user_message(db_session, session_id, "10.0.0.5 在线吗")
     outcome = await run_chat_turn(
         db_session,
         session_id=session_id,
         actor_user_id=test_user.id,
-        content="10.0.0.5 在线吗",
         chat_fn=fake_chat,
         dispatch_tool=fake_dispatch,
         hub_instance=test_hub,
@@ -186,11 +187,11 @@ async def test_chat_turn_forwards_on_delta_tokens_then_done(
     async def unused_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
         raise AssertionError(f"不应调用工具: {name}")
 
+    await append_user_message(db_session, session_id, "流式测试")
     outcome = await run_chat_turn(
         db_session,
         session_id=session_id,
         actor_user_id=test_user.id,
-        content="流式测试",
         chat_fn=streaming_chat,
         dispatch_tool=unused_dispatch,
         hub_instance=test_hub,
@@ -255,11 +256,11 @@ async def test_chat_turn_pending_approval_emits_hitl_pending_without_secrets(
         )
         return ToolResult(control="pending_approval", content="等待人工审批 #99")
 
+    await append_user_message(db_session, session_id, "重启 SW-12")
     outcome = await run_chat_turn(
         db_session,
         session_id=session_id,
         actor_user_id=test_user.id,
-        content="重启 SW-12",
         chat_fn=fake_chat,
         dispatch_tool=fake_dispatch,
         hub_instance=test_hub,
@@ -306,11 +307,11 @@ async def test_chat_turn_llm_error_broadcasts_error_then_turn_done(
         new_callable=AsyncMock,
         return_value=LoopOutcome(reason="llm_error", final_answer=None),
     ):
+        await append_user_message(db_session, session_id, "会失败的问题")
         outcome = await run_chat_turn(
             db_session,
             session_id=session_id,
             actor_user_id=test_user.id,
-            content="会失败的问题",
             hub_instance=test_hub,
         )
 
@@ -356,11 +357,11 @@ async def test_chat_turn_llm_error_does_not_broadcast_assistant_delta(
     async def unused_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
         raise AssertionError("不应调用工具")
 
+    await append_user_message(db_session, session_id, "会失败的问题")
     outcome = await run_chat_turn(
         db_session,
         session_id=session_id,
         actor_user_id=test_user.id,
-        content="会失败的问题",
         chat_fn=error_chat,
         dispatch_tool=unused_dispatch,
         hub_instance=test_hub,
@@ -404,12 +405,12 @@ async def test_chat_turn_error_broadcasts_chinese_message_and_keeps_user_message
     async def unused_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
         raise AssertionError("dispatch 不应在 chat 失败前被调用")
 
+    await append_user_message(db_session, session_id, "会失败的问题")
     with pytest.raises(RuntimeError, match="upstream timeout"):
         await run_chat_turn(
             db_session,
             session_id=session_id,
             actor_user_id=test_user.id,
-            content="会失败的问题",
             chat_fn=boom_chat,
             dispatch_tool=unused_dispatch,
             hub_instance=test_hub,
@@ -466,7 +467,7 @@ async def test_post_messages_endpoint_uses_chat_turn(
     kwargs = mocked_turn.await_args.kwargs
     assert kwargs["session_id"] == session.id
     assert kwargs["actor_user_id"] == test_user.id
-    assert kwargs["content"] == "你好"
+    assert "content" not in kwargs
 
 
 async def test_chat_turn_passes_db_to_default_chat(
@@ -497,11 +498,11 @@ async def test_chat_turn_passes_db_to_default_chat(
 
     monkeypatch.setattr(chat_turn_module, "chat", spy_chat)
 
+    await append_user_message(db_session, session_id, "你好")
     outcome = await run_chat_turn(
         db_session,
         session_id=session_id,
         actor_user_id=test_user.id,
-        content="你好",
         hub_instance=test_hub,
     )
     await db_session.commit()
@@ -532,11 +533,11 @@ async def test_chat_turn_injected_chat_fn_does_not_receive_db(
             completion_tokens=1,
         )
 
+    await append_user_message(db_session, session_id, "你好")
     outcome = await run_chat_turn(
         db_session,
         session_id=session_id,
         actor_user_id=test_user.id,
-        content="你好",
         chat_fn=fake_chat,
         hub_instance=test_hub,
     )

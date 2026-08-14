@@ -6,7 +6,7 @@
 @Docs: 根运维助手一轮对话编排：落库用户消息、包装 chat/dispatch 推 WS、复用 run_loop。
 
 实现流程：
-1. 先 append_user_message，保证即使后续模型失败，用户原话仍可被一次 commit 保留。
+1. 用户消息由 API 层在调用本函数前落库并 commit，本函数不再保存用户消息。
 2. 构造 WsHitlEventPublisher + root dispatcher（可注入替身便于单测）；工具 Schema 用 root_tool_schemas。
 3. 不改 loop.py：包装 chat_fn——默认走 llm.chat(stream=True)：
    - 文本 token 经 on_delta 实时 broadcast(assistant_delta, done=false)；
@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.hitl_gate import HitlGateHook
 from app.agent.loop import ChatFn, LoopOutcome, ToolDispatcher, ToolResult, run_loop
-from app.agent.session import append_user_message
 from app.agent.tool_dispatch import build_root_tool_dispatcher, root_tool_schemas
 from app.agent.ws_hub import AgentWsHub, WsHitlEventPublisher, hub
 from app.core.llm import ChatResult, chat
@@ -63,7 +62,6 @@ async def run_chat_turn(
     *,
     session_id: int,
     actor_user_id: int,
-    content: str,
     chat_fn: ChatFn | None = None,
     dispatch_tool: ToolDispatcher | None = None,
     hub_instance: AgentWsHub | None = None,
@@ -71,13 +69,12 @@ async def run_chat_turn(
     model_key: str | None = None,
 ) -> LoopOutcome:
     """
-    执行一轮用户发消息：落库 → 包装推送 → run_loop → turn_done/error。
+    执行一轮 Agent turn：包装推送 → run_loop → turn_done/error。
 
     Args:
         db: 异步数据库会话（本函数不 commit）
         session_id: Agent 会话 ID
         actor_user_id: 当前用户 ID（绑进 root dispatcher）
-        content: 用户消息正文
         chat_fn: 可选注入的模型调用（单测 mock；默认 llm.chat）
         dispatch_tool: 可选工具调度
         hub_instance: 可选 WS hub
@@ -111,8 +108,6 @@ async def run_chat_turn(
         )
     else:
         base_dispatch = dispatch_tool
-
-    await append_user_message(db, session_id, content)
 
     resolved_chat: ChatFn = chat_fn if chat_fn is not None else chat
     resolved_model = model_key or _DEFAULT_MODEL_KEY

@@ -148,14 +148,7 @@ async def run_loop(
         if cost_exceeded:
             return LoopOutcome(reason="budget_exceeded", final_answer=None)
 
-        await append_assistant_message(
-            db,
-            session_id,
-            result.content or "",
-            agent_id=agent_id,
-            tool_calls=result.tool_calls,
-        )
-
+        pending_tool_results: list[tuple[ToolCall, ToolResult]] = []
         round_controls: list[ToolControl] = []
         for index, tool_call in enumerate(result.tool_calls):
             arguments = _parse_arguments(tool_call)
@@ -168,21 +161,52 @@ async def run_loop(
                 tool_result = await dispatch_tool(tool_call.name, arguments)
                 await after_hook(tool_call.name, arguments, tool_result)
             round_controls.append(tool_result.control)
-            await append_tool_result(
-                db, session_id, tool_call.id, tool_result.content, agent_id=agent_id
-            )
+            pending_tool_results.append((tool_call, tool_result))
             if tool_result.control in _EARLY_EXIT_CONTROLS:
                 for skipped_call in result.tool_calls[index + 1 :]:
+                    pending_tool_results.append(
+                        (
+                            skipped_call,
+                            ToolResult(
+                                control="ok",
+                                content="已跳过：等待前一个工具调用的处理结果",
+                            ),
+                        )
+                    )
+                await append_assistant_message(
+                    db,
+                    session_id,
+                    result.content or "",
+                    agent_id=agent_id,
+                    tool_calls=result.tool_calls,
+                )
+                for paired_call, paired_result in pending_tool_results:
                     await append_tool_result(
                         db,
                         session_id,
-                        skipped_call.id,
-                        "已跳过：等待前一个工具调用的处理结果",
+                        paired_call.id,
+                        paired_result.content,
                         agent_id=agent_id,
                     )
                 return LoopOutcome(
                     reason="early_exit", final_answer=None, control=tool_result.control
                 )
+
+        await append_assistant_message(
+            db,
+            session_id,
+            result.content or "",
+            agent_id=agent_id,
+            tool_calls=result.tool_calls,
+        )
+        for paired_call, paired_result in pending_tool_results:
+            await append_tool_result(
+                db,
+                session_id,
+                paired_call.id,
+                paired_result.content,
+                agent_id=agent_id,
+            )
 
         # 整轮工具全部失败才累计；有任何一次成功就重置，避免误杀正常纠错。
         if round_controls and all(control in _FAILURE_CONTROLS for control in round_controls):

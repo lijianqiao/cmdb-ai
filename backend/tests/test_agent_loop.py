@@ -9,6 +9,7 @@ from app.agent.budget import Budget
 from app.agent.loop import BeforeToolDecision, LoopOutcome, ToolResult, run_loop
 from app.agent.session import append_user_message, build_model_history
 from app.core.llm import ChatMessage, ChatResult, ToolCall
+from app.crud.agent_message import agent_message_crud
 from app.crud.agent_session import agent_session_crud
 from app.models.user import User
 
@@ -25,6 +26,43 @@ async def _make_session(db_session: AsyncSession, user_id: int) -> int:
 
 async def _never_called_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
     raise AssertionError(f"dispatch_tool should not have been called with {name!r}")
+
+
+async def _one_tool_call(
+    model_key: str, messages: list[ChatMessage], **kwargs: Any
+) -> ChatResult:
+    return ChatResult(
+        content=None,
+        tool_calls=[ToolCall(id="call_1", name="query_monitor_status", arguments="{}")],
+        finish_reason="tool_calls",
+        prompt_tokens=1,
+        completion_tokens=1,
+    )
+
+
+async def test_dispatch_exception_does_not_persist_assistant_tool_call(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    await append_user_message(db_session, session_id, "查一下")
+    await db_session.commit()
+
+    async def exploding_dispatch(name: str, arguments: dict[str, Any]) -> ToolResult:
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        await run_loop(
+            db_session,
+            session_id=session_id,
+            model_key="fake",
+            chat_fn=_one_tool_call,
+            dispatch_tool=exploding_dispatch,
+        )
+    await db_session.commit()
+    rows = await agent_message_crud.list_for_agent(
+        db_session, session_id, agent_id=None
+    )
+    assert all(row.tool_calls is None for row in rows)
 
 
 async def test_loop_before_hook_can_block_without_dispatching(

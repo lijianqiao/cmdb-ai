@@ -13,15 +13,18 @@
 3. 详情 / 删除 / 消息历史先查会话，非所有者或不存在一律 404，避免枚举他人会话 ID。
 4. DELETE 为物理删除；消息、HITL、registry、trace 依赖库级 ON DELETE CASCADE。
 5. 消息历史优先用 list_for_agent(..., agent_id=None) 只返回根 transcript，按 id 升序。
-6. POST messages：归属校验后调用 run_chat_turn（复用 run_loop + root dispatcher + WS 推送），
+6. POST messages：归属校验后 claim turn 租约 → 落库用户消息 → run_chat_turn；
    整轮结束后一次 commit；HITL 事件经 BufferedWsHitlEventPublisher 在 commit 之后再广播。
-   异常时仍尽量 commit 已写入的用户消息。
+   同会话并发请求返回 409；异常时仍尽量 commit 已写入的用户消息；finally 释放租约。
 """
+
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.chat_turn import run_chat_turn
+from app.agent.session import append_user_message
 from app.agent.ws_hub import BufferedWsHitlEventPublisher
 from app.core.database import get_db
 from app.core.deps import require_permission
@@ -222,27 +225,38 @@ async def post_session_message(
     实时事件经 WebSocket 推送；本接口返回 turn 摘要。失败时尽量保留用户消息。
     """
     await _owned_session_or_404(db, session_id, current_user.id)
-    # HITL 事件缓冲到 commit 之后再广播：提案行在本轮事务内创建，如果事件
-    # 提前发出，前端收到后立即用另一个 DB 会话拉提案详情会拿到 404。
+    turn_token = str(uuid4())
+    if not await agent_session_crud.claim_turn(db, session_id, turn_token):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="该会话正在处理上一条消息",
+        )
+    await db.commit()
+
     hitl_publisher = BufferedWsHitlEventPublisher()
+    outcome = None
     try:
+        await append_user_message(db, session_id, body.content)
+        await db.commit()
         outcome = await run_chat_turn(
             db,
             session_id=session_id,
             actor_user_id=current_user.id,
-            content=body.content,
             publisher=hitl_publisher,
         )
-    except Exception as exc:
-        # 用户消息已在 turn 内写入；先提交再返回 500，避免整轮回滚丢原话
         await db.commit()
+    except Exception as exc:
+        await db.rollback()
         await hitl_publisher.flush()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="本轮对话处理失败，请稍后重试",
         ) from exc
+    finally:
+        await db.rollback()
+        await agent_session_crud.release_turn(db, session_id, turn_token)
+        await db.commit()
 
-    await db.commit()
     await hitl_publisher.flush()
     return success_response(
         AgentChatTurnResponse(
