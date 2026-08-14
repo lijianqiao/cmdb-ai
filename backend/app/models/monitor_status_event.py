@@ -1,9 +1,11 @@
-"""Monitor status event — append-only probe result log.
+"""Monitor status event — probe result log with same-status upsert.
 
 A target's "current" online/offline status is never stored separately; it is
 always derived from the latest row here (see app/crud/monitor_status_event.py
 `get_latest_status_for_targets`), per docs/AGENT_ARCHITECTURE.md §3's rule
-against maintaining two sources of truth for the same fact.
+against maintaining two sources of truth for the same fact. Repeated probes
+with the same status update the current row; only a status flip appends a new
+row.
 """
 
 from datetime import UTC, datetime

@@ -1,6 +1,7 @@
 """Tests for the TCP probe and the single-pass monitor sweep."""
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
@@ -262,3 +263,105 @@ async def test_status_change_inserts_new_event(
     await run_monitor_sweep_once(db_session)
     events = await monitor_status_event_crud.list_recent_for_target(db_session, target.id)
     assert [item.status for item in events] == ["down", "up"]
+
+
+class RecordingAlertPublisher:
+    """记录 publish_monitor_alert 调用，用于断言提交后发布语义。"""
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+        self.payloads: list[dict[str, object]] = []
+        self.transaction_states: list[bool] = []
+
+    async def publish_monitor_alert(self, payload: Mapping[str, object]) -> None:
+        self.transaction_states.append(self.db.in_transaction())
+        self.payloads.append(dict(payload))
+
+
+class FailingAlertPublisher:
+    """模拟 WebSocket 发布失败，用于验证不回滚已提交事实。"""
+
+    async def publish_monitor_alert(self, payload: Mapping[str, object]) -> None:
+        raise RuntimeError("fake websocket failure")
+
+
+async def test_status_flip_publishes_monitor_alert_after_commit(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """首次探测、同状态重复探测不告警；真实翻转在提交后发布一条安全 payload。"""
+    target = await monitor_target_crud.create(
+        db_session,
+        {
+            "cmdb_asset_id": None,
+            "ip_address": "10.0.0.5",
+            "port": 22,
+            "label": "核心交换机",
+            "is_active": True,
+        },
+    )
+    await db_session.commit()
+
+    probe_results = iter(
+        [
+            ("up", 3, ""),
+            ("up", 4, ""),
+            ("down", None, "连接超时"),
+        ]
+    )
+
+    async def fake_probe(ip: str, port: int, *, timeout_seconds: float) -> tuple[str, int | None, str]:
+        return next(probe_results)
+
+    monkeypatch.setattr("app.services.monitor_sweep.probe_tcp", fake_probe)
+    publisher = RecordingAlertPublisher(db_session)
+
+    await run_monitor_sweep_once(db_session, alert_publisher=publisher)
+    assert publisher.payloads == []
+    assert publisher.transaction_states == []
+
+    await run_monitor_sweep_once(db_session, alert_publisher=publisher)
+    assert publisher.payloads == []
+    assert publisher.transaction_states == []
+
+    await run_monitor_sweep_once(db_session, alert_publisher=publisher)
+    assert len(publisher.payloads) == 1
+    assert publisher.transaction_states == [False]
+
+    alert = publisher.payloads[0]
+    assert alert["target_id"] == target.id
+    assert alert["asset_id"] is None
+    assert alert["asset_name"] == "核心交换机"
+    assert alert["ip_address"] == "10.0.0.5"
+    assert alert["port"] == 22
+    assert alert["previous_status"] == "up"
+    assert alert["status"] == "down"
+    assert alert["severity"] == "critical"
+    assert alert["title"] == "设备离线告警"
+    assert alert["latency_ms"] is None
+    assert alert["checked_at"] is not None
+    assert "detail" not in alert
+    assert "连接超时" not in str(alert["message"])
+
+
+async def test_publish_failure_does_not_rollback_probe_facts(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """提交后 WS 发布失败时，本轮探测事实仍应持久化为 down。"""
+    target = await monitor_target_crud.create(
+        db_session,
+        {"cmdb_asset_id": None, "ip_address": "10.0.0.5", "port": 22, "is_active": True},
+    )
+    await db_session.commit()
+
+    probe_results = iter([("up", 3, ""), ("down", None, "连接超时")])
+
+    async def fake_probe(ip: str, port: int, *, timeout_seconds: float) -> tuple[str, int | None, str]:
+        return next(probe_results)
+
+    monkeypatch.setattr("app.services.monitor_sweep.probe_tcp", fake_probe)
+
+    await run_monitor_sweep_once(db_session)
+    await run_monitor_sweep_once(db_session, alert_publisher=FailingAlertPublisher())
+
+    events = await monitor_status_event_crud.list_recent_for_target(db_session, target.id)
+    assert events[0].status == "down"

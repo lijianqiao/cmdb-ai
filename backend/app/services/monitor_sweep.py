@@ -10,15 +10,66 @@ Constraints).
 import asyncio
 import logging
 import time
+from collections.abc import Mapping
+from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.ws_hub import WsMonitorAlertPublisher
 from app.core.database import AsyncSessionLocal
 from app.crud.monitor_status_event import monitor_status_event_crud
 from app.crud.monitor_target import monitor_target_crud
+from app.models.monitor_status_event import MonitorStatusEvent
+from app.models.monitor_target import MonitorTarget
 from app.services.system_config import get_effective_operations_config
 
 logger = logging.getLogger(__name__)
+
+_monitor_alert_publisher = WsMonitorAlertPublisher()
+
+
+class MonitorAlertPublisher(Protocol):
+    """监控告警发布器协议：由 monitor sweep 在提交后调用。"""
+
+    async def publish_monitor_alert(self, payload: Mapping[str, object]) -> None:
+        """发布一条不含凭据与探测原文的安全告警摘要。"""
+        ...
+
+
+def _monitor_alert_payload(
+    target: MonitorTarget,
+    previous_status: str,
+    event: MonitorStatusEvent,
+) -> dict[str, object]:
+    """构造前端横幅所需的安全告警字段，不包含探测 detail 或内部配置。"""
+    if event.status == "down":
+        title = "设备离线告警"
+        severity = "critical"
+    else:
+        title = "设备恢复通知"
+        severity = "info"
+
+    target_label = target.label.strip()
+    endpoint = f"{target.ip_address}:{target.port}"
+    if target_label:
+        message = f"{target_label} ({endpoint}) 状态由 {previous_status} 变为 {event.status}"
+    else:
+        message = f"{endpoint} 状态由 {previous_status} 变为 {event.status}"
+
+    return {
+        "target_id": target.id,
+        "asset_id": target.cmdb_asset_id,
+        "asset_name": target.label,
+        "ip_address": target.ip_address,
+        "port": target.port,
+        "previous_status": previous_status,
+        "status": event.status,
+        "latency_ms": event.latency_ms,
+        "checked_at": event.checked_at.isoformat(),
+        "title": title,
+        "message": message,
+        "severity": severity,
+    }
 
 
 async def probe_tcp(ip: str, port: int, *, timeout_seconds: float) -> tuple[str, int | None, str]:
@@ -50,12 +101,15 @@ async def run_monitor_sweep_once(
     db: AsyncSession,
     *,
     probe_timeout_seconds: float | None = None,
+    alert_publisher: MonitorAlertPublisher | None = None,
 ) -> int:
     """Probe every active target once, record one status event each, commit.
 
     A probe failure for one target is logged and recorded as "down" (with the
     exception text as detail) rather than aborting the whole sweep — one bad
     target must not stop the others from being checked.
+
+    状态翻转告警在数据库提交成功后发布；发布失败只记日志，不回滚已提交事实。
     """
     if probe_timeout_seconds is None:
         operations = await get_effective_operations_config(db)
@@ -64,17 +118,31 @@ async def run_monitor_sweep_once(
         operations = None
 
     targets = await monitor_target_crud.list_active(db)
+    previous = await monitor_status_event_crud.get_latest_status_for_targets(
+        db, [target.id for target in targets]
+    )
+    pending_alerts: list[dict[str, object]] = []
+
     for target in targets:
+        previous_status = previous[target.id].status if target.id in previous else None
         try:
             status, latency_ms, detail = await probe_tcp(
-                target.ip_address, target.port, timeout_seconds=probe_timeout_seconds
+                target.ip_address,
+                target.port,
+                timeout_seconds=probe_timeout_seconds,
             )
         except Exception as exc:  # noqa: BLE001 - a single target's probe must never abort the sweep
             status, latency_ms, detail = "down", None, str(exc)
 
-        await monitor_status_event_crud.record_probe(
-            db, target_id=target.id, status=status, latency_ms=latency_ms, detail=detail
+        event = await monitor_status_event_crud.record_probe(
+            db,
+            target_id=target.id,
+            status=status,
+            latency_ms=latency_ms,
+            detail=detail,
         )
+        if previous_status is not None and previous_status != status:
+            pending_alerts.append(_monitor_alert_payload(target, previous_status, event))
 
     if operations is None:
         operations = await get_effective_operations_config(db)
@@ -83,6 +151,14 @@ async def run_monitor_sweep_once(
     )
 
     await db.commit()
+    if alert_publisher is not None:
+        for payload in pending_alerts:
+            try:
+                await alert_publisher.publish_monitor_alert(payload)
+            except Exception:
+                logger.exception(
+                    "monitor_alert 发布失败", extra={"target_id": payload["target_id"]}
+                )
     return len(targets)
 
 
@@ -101,6 +177,7 @@ async def run_monitor_sweep_loop(*, interval_seconds: float | None = None) -> No
                 count = await run_monitor_sweep_once(
                     db,
                     probe_timeout_seconds=operations.monitor_probe_timeout_seconds,
+                    alert_publisher=_monitor_alert_publisher,
                 )
                 logger.info("monitor sweep 完成，探测 %d 个目标", count)
         except Exception:
