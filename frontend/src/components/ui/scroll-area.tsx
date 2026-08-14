@@ -4,13 +4,13 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
-function ScrollArea({
-  className,
-  children,
-  ...props
-}: React.ComponentProps<"div">) {
+const ScrollArea = React.forwardRef<
+  HTMLDivElement,
+  React.ComponentProps<"div">
+>(function ScrollArea({ className, children, ...props }, ref) {
   return (
     <div
+      ref={ref}
       data-slot="scroll-area"
       className={cn("relative overflow-auto", className)}
       {...props}
@@ -18,7 +18,7 @@ function ScrollArea({
       {children}
     </div>
   )
-}
+})
 
 function ScrollBar({ className, ...props }: React.ComponentProps<"div">) {
   return (

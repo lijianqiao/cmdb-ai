@@ -162,4 +162,68 @@ describe("useOpsChat snapshot recovery", () => {
     expect(abortSpy).toHaveBeenCalled()
     abortSpy.mockRestore()
   })
+
+  it("POST 触发的 reloadSnapshot 不会让 isLoadingOlder 卡住", async () => {
+    mockGetSnapshot
+      .mockResolvedValueOnce(
+        buildSnapshot({
+          has_more_messages: true,
+          next_before_message_id: 5,
+        }),
+      )
+      .mockImplementation((_sessionId, params, signal) => {
+        if (params?.before_message_id != null) {
+          return new Promise<AgentSessionSnapshot>((_resolve, reject) => {
+            signal?.addEventListener("abort", () => {
+              reject(new DOMException("Aborted", "AbortError"))
+            })
+          })
+        }
+        return Promise.resolve(buildSnapshot())
+      })
+
+    const { result } = renderHook(() => useOpsChat({ sessionId: 6 }))
+
+    await waitFor(() => expect(result.current.hasMore).toBe(true))
+
+    await act(async () => {
+      void result.current.loadOlder()
+    })
+    expect(result.current.isLoadingOlder).toBe(true)
+
+    await act(async () => {
+      await result.current.sendMessage("你好")
+    })
+
+    await waitFor(() => expect(result.current.isLoadingOlder).toBe(false))
+  })
+
+  it("切换会话会重置 isLoadingOlder", async () => {
+    const olderPending = deferred<AgentSessionSnapshot>()
+    mockGetSnapshot
+      .mockResolvedValueOnce(
+        buildSnapshot({
+          has_more_messages: true,
+          next_before_message_id: 5,
+        }),
+      )
+      .mockReturnValueOnce(olderPending.promise)
+      .mockResolvedValue(buildSnapshot())
+
+    const { result, rerender } = renderHook(
+      ({ sessionId }) => useOpsChat({ sessionId }),
+      { initialProps: { sessionId: 7 as number | null } },
+    )
+
+    await waitFor(() => expect(result.current.hasMore).toBe(true))
+
+    await act(async () => {
+      void result.current.loadOlder()
+    })
+    expect(result.current.isLoadingOlder).toBe(true)
+
+    rerender({ sessionId: 8 })
+
+    await waitFor(() => expect(result.current.isLoadingOlder).toBe(false))
+  })
 })

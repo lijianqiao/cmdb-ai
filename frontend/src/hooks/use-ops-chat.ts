@@ -492,6 +492,7 @@ export function useOpsChat({
 
   useEffect(() => {
     activeSessionIdRef.current = sessionId
+    setIsLoadingOlder(false)
   }, [sessionId])
 
   useEffect(() => {
@@ -541,7 +542,7 @@ export function useOpsChat({
         setSnapshotReadySessionId(sessionId)
       }
     } finally {
-      if (!controller.signal.aborted) {
+      if (generation === requestGenerationRef.current) {
         setIsLoadingHistory(false)
       }
     }
@@ -584,9 +585,7 @@ export function useOpsChat({
         toast.error("加载更早消息失败")
       }
     } finally {
-      if (!controller.signal.aborted) {
-        setIsLoadingOlder(false)
-      }
+      setIsLoadingOlder(false)
     }
   }, [sessionId, hasMore, isLoadingOlder, nextBeforeMessageId])
 

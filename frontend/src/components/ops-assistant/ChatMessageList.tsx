@@ -130,15 +130,19 @@ export function ChatMessageList({
   const prevFirstIdRef = useRef(messages[0]?.id)
 
   useEffect(() => {
+    const scrollRoot = scrollRootRef.current
     const node = topSentinelRef.current
-    if (!node || !hasMore || isLoadingOlder || !onLoadOlder) return
+    if (!scrollRoot || !node || !hasMore || isLoadingOlder || !onLoadOlder) return
 
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) void onLoadOlder()
-    })
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) void onLoadOlder()
+      },
+      { root: scrollRoot },
+    )
     observer.observe(node)
     return () => observer.disconnect()
-  }, [hasMore, isLoadingOlder, onLoadOlder])
+  }, [hasMore, isLoadingOlder, onLoadOlder, messages.length])
 
   useEffect(() => {
     const firstId = messages[0]?.id
@@ -199,8 +203,8 @@ export function ChatMessageList({
   }
 
   return (
-    <ScrollArea className={cn("bg-background", className)}>
-      <div ref={scrollRootRef} className="flex flex-col gap-3 p-4">
+    <ScrollArea ref={scrollRootRef} className={cn("bg-background", className)}>
+      <div className="flex flex-col gap-3 p-4">
         <div ref={topSentinelRef} className="h-px w-full shrink-0" />
         {isLoadingOlder ? (
           <div className="flex justify-center py-2">
