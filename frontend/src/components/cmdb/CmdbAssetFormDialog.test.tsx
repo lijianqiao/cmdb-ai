@@ -6,6 +6,7 @@ import {
   clearedCredentialFields,
   createFormSchema,
 } from "./cmdbAssetFormSchema"
+import { VENDOR_ITEMS } from "./CmdbAssetFormDialog"
 
 const baseAssetFields = {
   asset_type: "server",
@@ -19,6 +20,23 @@ const baseAssetFields = {
 }
 
 describe("CmdbAssetFormDialog 凭据校验规则", () => {
+  it("显示 SG350X 对应的 Cisco Small Business 厂商选项", () => {
+    expect(VENDOR_ITEMS).toContainEqual({
+      label: "思科 Small Business（SG350X 等）",
+      value: "cisco_small_business",
+    })
+  })
+
+  it("允许选择 Cisco Small Business CLI 平台", () => {
+    const result = createFormSchema(null).safeParse({
+      ...baseAssetFields,
+      vendor: "cisco_small_business",
+      credential_type: "none",
+      ...clearedCredentialFields(),
+    })
+    expect(result.success).toBe(true)
+  })
+
   it("none 类型不允许账号或密码", () => {
     const result = createFormSchema(null).safeParse({
       ...baseAssetFields,

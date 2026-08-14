@@ -7,6 +7,7 @@ import type { CredentialType, VendorName } from "@/types/cmdb"
 /** 厂商枚举值须与后端 app/agent/device_commands.py::VendorName 手动保持一致，后端才是权威来源 */
 const VENDOR_VALUES = [
   "cisco_iosxe",
+  "cisco_small_business",
   "huawei_vrp",
   "hp_comware",
   "juniper_junos",

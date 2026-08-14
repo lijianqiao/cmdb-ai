@@ -5,6 +5,7 @@ export type CredentialType = "none" | "static" | "dynamic"
 /** 厂商标识，须与后端 app/agent/device_commands.py::VendorName 手动保持一致 */
 export type VendorName =
   | "cisco_iosxe"
+  | "cisco_small_business"
   | "huawei_vrp"
   | "hp_comware"
   | "juniper_junos"
