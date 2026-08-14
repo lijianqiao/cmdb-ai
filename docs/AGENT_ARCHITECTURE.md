@@ -299,13 +299,13 @@ classDiagram
 | `query_cmdb`              | `asset_ids? \| ip? \| business_system?`     | 资产信息（含 owner/位置/所属业务系统）                       | 读         |
 | `query_cmdb_dependencies` | `asset_id, direction(up\|down), max_depth?` | 依赖图遍历结果（`max_depth` 强制上限，防止图过大拖垮上下文） | 读         |
 
-**写操作/提案类**（经 HITL，见第 6 节）：
+**写操作/执行类**（经 `HitlGateHook` 门控，见第 6 节；模型直接调用执行工具名，不再暴露 `propose_*`）：
 
 | 工具                      | 参数                                              | 返回                                                                                                             | 副作用分级         |
 | :------------------------ | :------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------- | :----------------- |
-| `propose_remediation`     | `asset_id, action_type(notify), payload, reason`  | 创建 `HitlProposal`；`assist`/`full` 档 `notify` 可自动批准并执行，默认 `ask` 档弹卡待审批；**不直接执行设备命令** | 写（HITL 门控）    |
+| `notify`                  | `asset_id, payload, reason`                       | 站内通知：`assist`/`full` 档可自动批准并当场执行，默认 `ask` 档弹卡待审批                                         | 写（HITL 门控）    |
 | `query_device_command`    | `asset_id, command_name, reason`                  | 只读诊断命令：按会话 `approval_mode` 判定——`assist` 且白名单+非动态凭据可当场返回输出；`full` 另可当场执行未分类非动态命令；默认 `ask` 及动态凭据走 `PENDING` | 读（经 HITL 门控） |
-| `propose_device_control`  | `asset_id, command_name, interface_name?, reason` | 变更类命令（`reboot`/`shutdown`/`port_enable`/`port_disable`）：`assist` 且白名单+非动态凭据可当场执行；`full` 另可当场执行未分类非动态命令；默认 `ask` 及动态凭据 `PENDING` 待审批 | 写（HITL 门控）    |
+| `device_control`          | `asset_id, command_name, interface_name?, reason` | 变更类命令（`reboot`/`shutdown`/`port_enable`/`port_disable`）：`assist` 且白名单+非动态凭据可当场执行；`full` 另可当场执行未分类非动态命令；默认 `ask` 及动态凭据 `PENDING` 待审批 | 写（HITL 门控）    |
 | `list_device_commands`    | `asset_id`                                        | 该资产可用命令名、说明、白/黑名单策略与凭据前提（只读，无审批）；策略文案随当前会话 `approval_mode` 变化，避免模型误判自动执行范围 | 读                 |
 | `get_device_query_result` | `proposal_id`                                     | 按会话回查已提交的设备命令查询提案状态或执行结果（只读，无审批）                                                 | 读                 |
 
@@ -380,7 +380,7 @@ sequenceDiagram
     end
     Root->>Root: wait_agent(全部) → 综合摘要
     Root->>Root: close_agent(全部)
-    Root-->>U: 根因假设 + 建议(可能带 propose_remediation)
+    Root-->>U: 根因假设 + 建议(可能带 notify)
 ```
 
 **反模式红线**（照抄 [guide.md 7.8](./guide.md#78-反模式)，本项目额外强调）：单个文档分类、单个设备状态查询、告警文案生成——这些是单次动作，禁止 spawn；只有批量并行或多数据源独立取证才允许。
@@ -423,7 +423,7 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 
 **Session 最小模型**直接对应 [guide.md 6.1](./guide.md#61-session-最小模型)：`AgentSession` + `AgentMessage` 承担 `messages[]`（完整审计历史，不删除）；`meta` 中的"授权集合/预算/子 Agent 注册表"不塞进 JSON 字段，而是用独立的 `AgentRegistry` 表——这样查询和 GC 更容易，也符合 guide.md"注册表不依赖对话正文"的要求（防止压缩后对话文本里丢了 `child_id`，注册表仍占槽）。
 
-**压缩策略**（P1 阶段先做最简单版本）：最近 N 轮原文 + 早期轮次摘要，触发阈值按 token 计数；根指令（Agent 的角色说明/工具契约）每轮从代码重新注入，不参与压缩，对应 [guide.md 6.3](./guide.md#63-compaction-规范对齐-claude--openai)"System / 根指令永不被摘要吞掉"。
+**压缩策略**（已实现于 `app/agent/compaction.py`）：**审计历史与模型窗口分离**——`agent_messages` 表保留全量原文，不删除；送入模型的窗口由 `build_model_history` 组装。根会话（`agent_id is None`）在每次用户可见模型调用前，`run_loop` 调用 `ensure_root_compaction`：估计 token 超阈值（`COMPACT_TOKEN_THRESHOLD`）时，把窗口外旧消息送独立摘要器（直接 `llm.chat`，不走 WebSocket 的 `chat_fn`）；摘要写入 `AgentSession.memory_summary`，原文从 `compacted_through_message_id` 之后截取最近 `COMPACT_RECENT_RAW_MESSAGES` 条；无摘要时 fallback 最近 `COMPACT_FALLBACK_MAX_MESSAGES` 条。运维根指令（`ROOT_OPS_SYSTEM_PROMPT`）每轮由 `build_model_history` 从代码注入，永不进入摘要请求；子 Agent 循环不压缩。压缩失败或超预算则跳过，本轮继续用 fallback 窗口。对应 [guide.md 6.3](./guide.md#63-compaction-规范对齐-claude--openai)"System / 根指令永不被摘要吞掉"。
 
 **WebSocket 契约**：单一端点 `/api/v1/ws/agent/{session_id}`，鉴权复用现有 `access_token`（首帧校验）。消息用判别式 JSON：
 
@@ -446,8 +446,8 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 
 | 层级          | 本项目的具体落地                                                                                                                                                                                                               |
 | :------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| L1 能力最小化 | 除 `propose_remediation`、`propose_device_control` 外全部工具只读（`query_device_command` 为只读诊断，经策略门控但不改设备状态）；`kb_grep`/`kb_read` 路径必须落在 `knowledge/` 目录内，代码层做 realpath 前缀校验防目录穿越   |
-| L2 动作审查   | `propose_remediation.payload` 做 JSON Schema 校验，`action_type` 白名单枚举，不接受自由文本命令；`propose_device_control` 的 `command_name` 必须在设备命令目录内且通过参数校验（如 `interface_name` 约束），不接受自由文本 CLI |
+| L1 能力最小化 | 除 `notify`、`device_control` 外全部工具只读（`query_device_command` 为只读诊断，经策略门控但不改设备状态）；子 Agent allowlist 不含这三个执行工具；`kb_grep`/`kb_read` 路径必须落在 `knowledge/` 目录内，代码层做 realpath 前缀校验防目录穿越   |
+| L2 动作审查   | `notify.payload` 做 JSON Schema 校验，不接受自由文本命令；`device_control` 的 `command_name` 必须在设备命令目录内且通过参数校验（如 `interface_name` 约束），不接受自由文本 CLI；门控工具在 `HitlGateHook.before` 用与 dispatch 相同的 Pydantic 模型校验 |
 | L3 风险分级   | 审批模式在 `AgentSession.approval_mode`（默认 `ask`）；黑名单不可绕过；动态凭据始终要人输入本次密码；`full` 仅额外放开未分类非动态命令；`assist`/`full` 对白名单+非动态凭据可当场执行，`ask` 默认白名单亦须人工审批                                                                                         |
 | L4 执行沙箱   | `device_control` 已接入真实执行通道：当场执行范围跟会话档位走（见 L3）；动态凭据强制人工审批并输入本次密码；生产启用 `state_changing` 白名单前须在测试网段完成手工验证（见第 11 节 A6）                                                            |
 | L5 审计       | `AgentMessage`/`MonitorStatusEvent`/`HitlProposal`/`AuditLog` 全部 append-only                                                                                                                                                 |
@@ -477,7 +477,7 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 | A4   | 监控探活第一期只做 TCP，ICMP 是后续可选扩展点                                                         | 已在工具契约/数据模型里预留空间（`MonitorTarget.port` 必填即代表 TCP 模式），不阻塞后续加 ICMP                                                                                                                                                                         |
 | A5   | WebSocket 断线重连策略留到实现阶段细化                                                                | 本设计只定义消息契约，不定义重连协议                                                                                                                                                                                                                                   |
 | A6   | `device_control` 生产启用前的手工验证                                                                 | 已接入 Scrapli 执行通道；**生产启用 `state_changing` 命令白名单前**，须在测试网段真实/虚拟设备上手工验证 `reboot`（`send_interactive` 确认提示命中）、`port_disable`/`port_enable`（`send_configs` 含 Junos `commit`）行为，验证记录归档后方可对生产资产创建白名单策略 |
-| A7   | `HitlProposal.action_payload` 中的 `asset_id` 是松引用（存 int 值，不建数据库外键约束到 `CmdbAsset`） | 使 T08（CMDB）和 T10（HITL）可以并行独立开发；校验 `asset_id` 是否存在留给调用 `propose_remediation` 的工具实现层（届时 T08 应已就绪），不在数据库层强耦合                                                                                                             |
+| A7   | `HitlProposal.action_payload` 中的 `asset_id` 是松引用（存 int 值，不建数据库外键约束到 `CmdbAsset`） | 使 T08（CMDB）和 T10（HITL）可以并行独立开发；校验 `asset_id` 是否存在留给 `gate_action` / 门控工具实现层（届时 T08 应已就绪），不在数据库层强耦合                                                                                                             |
 
 ---
 
@@ -512,7 +512,7 @@ uv add httpx              # 调用本地 llama.cpp OpenAI 兼容接口（现有 
 | **T07** | 知识库子系统：`KnowledgeCategory`/`Document`/`Chunk` 模型，`kb_glob`/`kb_grep`/`kb_read`/`kb_semantic_search` 工具，上传 API，pgvector 集成，`classifier`/`kb_explorer` 角色                                                                          | P2                                    | T06                                                   |
 | **T08** | CMDB + 监控子系统：`CmdbAsset`/`CmdbAssetDependency`/`MonitorTarget`/`MonitorStatusEvent` 模型，`monitor_sweep`/`cmdb_diff_job` 确定性任务，`query_cmdb`/`query_monitor_status`/`query_cmdb_dependencies` 工具，`ops_explorer` 角色                   | 不依赖 spawn，纯确定性管道 + 只读工具 | T06                                                   |
 | **T09** | Spawn 编排 + 角色目录：`app/agent/spawn.py`，`ChildReceipt` 落地，`investigator`/`reviewer` 角色，两个编排范式（批量归类并行、根因排查并行）                                                                                                          | P3–P4                                 | T07 + T08                                             |
-| **T10** | HITL + 安全闸门：`app/agent/hitl.py` 状态机，`propose_remediation`/`propose_device_control`/`query_device_command` 工具，设备命令经 Scrapli `DeviceQueryExecutor` 执行通道落地，新增权限码（`knowledge:*`/`cmdb:*`/`monitor:*`/`agent:hitl_approve`） | P1 + 安全基线（第 9 节）              | T06                                                   |
+| **T10** | HITL + 安全闸门：`app/agent/hitl.py` 状态机，`notify`/`device_control`/`query_device_command` 工具（经 `HitlGateHook` 门控），设备命令经 Scrapli `DeviceQueryExecutor` 执行通道落地，新增权限码（`knowledge:*`/`cmdb:*`/`monitor:*`/`agent:hitl_approve`） | P1 + 安全基线（第 9 节）              | T06                                                   |
 | **T11** | 前端 Chat 页面：`OpsAssistantPage`、WebSocket 客户端、消息流组件、`HitlApprovalCard`、`KnowledgeUploadDialog`                                                                                                                                         | 对应前端集成                          | T06（至少要有可用的 WS 端点，可用 mock 提前并行开发） |
 
 ### 14. 任务依赖图
