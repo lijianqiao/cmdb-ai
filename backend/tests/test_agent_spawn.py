@@ -2539,6 +2539,14 @@ class FakeSpawnEventPublisher:
         self.receipts.append(receipt)
 
 
+class RaisingSpawnEventPublisher:
+    """模拟发布器失败，用于验证不影响子任务状态。"""
+
+    async def publish_child_status(self, receipt: ChildReceipt) -> None:
+        del receipt
+        raise RuntimeError("publish failed")
+
+
 @pytest_asyncio.fixture
 def fake_publisher() -> FakeSpawnEventPublisher:
     return FakeSpawnEventPublisher()
@@ -2572,3 +2580,20 @@ async def test_spawn_manager_publishes_durable_statuses(
     ]
     assert fake_publisher.receipts[-1].child_id == receipt.child_id
     await spawn_manager.close_agent(receipt.child_id)
+
+
+async def test_spawn_manager_survives_failing_publisher(
+    spawn_db: SpawnDatabase,
+) -> None:
+    """发布器异常不应回滚子任务或导致 spawn 失败。"""
+    manager = SpawnManager(spawn_db.session_factory, child_runner=_completed_runner)
+    manager.set_event_publisher(RaisingSpawnEventPublisher())
+
+    receipt = await manager.spawn_agent(
+        session_id=spawn_db.session_id,
+        role="ops_explorer",
+        task_brief="检查资产 42",
+    )
+    completed = await manager.wait_agent(receipt.child_id, timeout_ms=1000)
+    assert completed.status == "COMPLETED"
+    await manager.close_agent(receipt.child_id)
