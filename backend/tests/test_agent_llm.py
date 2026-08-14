@@ -117,15 +117,24 @@ async def test_chat_replays_tool_calls_and_tool_call_id_in_request_body() -> Non
     assert sent_messages[2]["tool_call_id"] == "call_1"
 
 
-async def test_chat_raises_on_non_200() -> None:
+async def test_chat_returns_error_result_on_non_200() -> None:
     transport = httpx.MockTransport(lambda request: httpx.Response(500, text="boom"))
     async with httpx.AsyncClient(transport=transport, base_url="http://fake") as fake_client:
-        with pytest.raises(LlmRequestError):
-            await chat("local-chat", [ChatMessage(role="user", content="hi")], client=fake_client)
+        result = await chat(
+            "local-chat",
+            [ChatMessage(role="user", content="hi")],
+            client=fake_client,
+        )
+    assert result.finish_reason == "error"
+    assert result.tool_calls == []
+    assert result.prompt_tokens == 0
+    assert "模型调用失败" in (result.content or "")
+    assert "HTTP 500" in (result.content or "")
+    assert result.content is not None and len(result.content) <= 400
 
 
 @pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ReadTimeout])
-async def test_chat_wraps_transport_failures_as_model_errors(
+async def test_chat_returns_error_result_on_transport_failure(
     error_type: type[httpx.RequestError],
 ) -> None:
     def fail_transport(request: httpx.Request) -> httpx.Response:
@@ -133,22 +142,32 @@ async def test_chat_wraps_transport_failures_as_model_errors(
 
     transport = httpx.MockTransport(fail_transport)
     async with httpx.AsyncClient(transport=transport, base_url="http://fake") as fake_client:
-        with pytest.raises(LlmRequestError) as raised:
-            await chat(
-                "local-chat",
-                [ChatMessage(role="user", content="hi")],
-                client=fake_client,
-            )
+        result = await chat(
+            "local-chat",
+            [ChatMessage(role="user", content="hi")],
+            client=fake_client,
+        )
 
-    assert "transport secret" not in str(raised.value)
-    assert isinstance(raised.value.__cause__, error_type)
+    assert result.finish_reason == "error"
+    assert result.tool_calls == []
+    assert result.prompt_tokens == 0
+    assert "模型调用失败" in (result.content or "")
+    assert "transport secret" not in (result.content or "")
 
 
-async def test_chat_raises_llm_request_error_on_invalid_json_body() -> None:
+async def test_chat_returns_error_result_on_invalid_json_body() -> None:
     transport = httpx.MockTransport(lambda request: httpx.Response(200, text="not json"))
     async with httpx.AsyncClient(transport=transport, base_url="http://fake") as fake_client:
-        with pytest.raises(LlmRequestError):
-            await chat("local-chat", [ChatMessage(role="user", content="hi")], client=fake_client)
+        result = await chat(
+            "local-chat",
+            [ChatMessage(role="user", content="hi")],
+            client=fake_client,
+        )
+    assert result.finish_reason == "error"
+    assert result.tool_calls == []
+    assert result.prompt_tokens == 0
+    assert "模型调用失败" in (result.content or "")
+    assert "响应格式无效" in (result.content or "")
 
 
 async def test_chat_rejects_unknown_model_key() -> None:
@@ -403,16 +422,20 @@ async def test_chat_stream_accumulates_tool_call_deltas() -> None:
     assert result.completion_tokens == 6
 
 
-async def test_chat_stream_raises_on_non_200() -> None:
+async def test_chat_stream_returns_error_result_on_non_200() -> None:
     transport = httpx.MockTransport(lambda request: httpx.Response(500, text="boom"))
     async with httpx.AsyncClient(transport=transport, base_url="http://fake") as fake_client:
-        with pytest.raises(LlmRequestError):
-            await chat(
-                "local-chat",
-                [ChatMessage(role="user", content="hi")],
-                client=fake_client,
-                stream=True,
-            )
+        result = await chat(
+            "local-chat",
+            [ChatMessage(role="user", content="hi")],
+            client=fake_client,
+            stream=True,
+        )
+    assert result.finish_reason == "error"
+    assert result.tool_calls == []
+    assert result.prompt_tokens == 0
+    assert "模型调用失败" in (result.content or "")
+    assert "HTTP 500" in (result.content or "")
 
 
 async def test_chat_uses_database_model_config(

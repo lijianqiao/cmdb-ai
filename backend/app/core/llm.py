@@ -92,6 +92,26 @@ class LlmRequestError(RuntimeError):
     """Raised when the model provider returns a non-2xx response or a malformed body."""
 
 
+def _error_result(reason: str) -> ChatResult:
+    """构造 finish_reason=error 的 ChatResult，供传输/HTTP/解析失败共用。"""
+    return ChatResult(
+        content=f"模型调用失败：{reason}",
+        tool_calls=[],
+        finish_reason="error",
+        prompt_tokens=0,
+        completion_tokens=0,
+        cost_usd=0.0,
+    )
+
+
+def _http_error_reason(status_code: int, body: str) -> str:
+    """HTTP 非 200 时的中文短因；正文最多截断 200 字符。"""
+    truncated = body[:200] if body else ""
+    if truncated:
+        return f"HTTP {status_code}：{truncated}"
+    return f"HTTP {status_code}"
+
+
 def _message_to_payload(message: ChatMessage) -> dict[str, Any]:
     payload: dict[str, Any] = {"role": message.role, "content": message.content}
     if message.tool_call_id:
@@ -196,10 +216,8 @@ def _parse_chat_completion_body(model_key: str, body: dict[str, Any], config: Mo
             completion_tokens=completion_tokens,
             cost_usd=_cost_usd(config, prompt_tokens, completion_tokens),
         )
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
-        raise LlmRequestError(
-            f"malformed response body from model {model_key!r}: {body!r}"
-        ) from exc
+    except (KeyError, IndexError, TypeError, ValueError):
+        return _error_result("响应格式无效")
 
 
 async def _consume_chat_sse(
@@ -242,10 +260,8 @@ async def _consume_chat_sse(
                 break
             try:
                 chunk = json.loads(data)
-            except ValueError as exc:
-                raise LlmRequestError(
-                    f"malformed SSE JSON from model {model_key!r}: {data!r}"
-                ) from exc
+            except ValueError:
+                return _error_result("响应格式无效")
 
             usage = chunk.get("usage") or {}
             if usage:
@@ -281,10 +297,8 @@ async def _consume_chat_sse(
                     builder.name = str(function["name"])
                 if function.get("arguments"):
                     builder.arguments += str(function["arguments"])
-    except httpx.RequestError as exc:
-        raise LlmRequestError(
-            f"model {model_key!r} transport request failed: {type(exc).__name__}"
-        ) from exc
+    except httpx.RequestError:
+        return _error_result("网络请求失败")
 
     tool_calls = [
         ToolCall(id=builder.id, name=builder.name, arguments=builder.arguments)
@@ -348,34 +362,24 @@ async def chat(
         if not stream:
             try:
                 response = await http_client.post("/chat/completions", json=payload)
-            except httpx.RequestError as exc:
-                raise LlmRequestError(
-                    f"model {model_key!r} transport request failed: {type(exc).__name__}"
-                ) from exc
+            except httpx.RequestError:
+                return _error_result("网络请求失败")
             if response.status_code != 200:
-                raise LlmRequestError(
-                    f"model {model_key!r} returned HTTP {response.status_code}: {response.text}"
-                )
+                return _error_result(_http_error_reason(response.status_code, response.text))
             try:
                 body = response.json()
-            except ValueError as exc:
-                raise LlmRequestError(
-                    f"malformed response body from model {model_key!r}: {response.text}"
-                ) from exc
+            except ValueError:
+                return _error_result("响应格式无效")
             return _parse_chat_completion_body(model_key, body, config)
 
         try:
             async with http_client.stream("POST", "/chat/completions", json=payload) as response:
                 if response.status_code != 200:
                     error_text = (await response.aread()).decode("utf-8", errors="replace")
-                    raise LlmRequestError(
-                        f"model {model_key!r} returned HTTP {response.status_code}: {error_text}"
-                    )
+                    return _error_result(_http_error_reason(response.status_code, error_text))
                 return await _consume_chat_sse(model_key, response, config, on_delta)
-        except httpx.RequestError as exc:
-            raise LlmRequestError(
-                f"model {model_key!r} transport request failed: {type(exc).__name__}"
-            ) from exc
+        except httpx.RequestError:
+            return _error_result("网络请求失败")
     finally:
         if owns_client:
             await http_client.aclose()
