@@ -188,6 +188,25 @@ describe("reduceOpsChat", () => {
     })
   })
 
+  it("updates one child card by child_id", () => {
+    let state = reduceOpsChat({ items: [] }, {
+      type: "ws",
+      message: {
+        type: "child_status",
+        payload: { child_id: "c1", role: "ops_explorer", status: "RUNNING" },
+      },
+    })
+    state = reduceOpsChat(state, {
+      type: "ws",
+      message: {
+        type: "child_status",
+        payload: { child_id: "c1", role: "ops_explorer", status: "COMPLETED" },
+      },
+    })
+    expect(state.items.filter((item) => item.kind === "child")).toHaveLength(1)
+    expect(state.items[0]).toMatchObject({ status: "COMPLETED" })
+  })
+
   it("turn_done 只结束 streaming，不改其它条目", () => {
     let state = reduceOpsChat(empty, {
       type: "ws",

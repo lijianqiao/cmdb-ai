@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -144,6 +144,22 @@ class ChildReceiptCorruptionError(RuntimeError):
         self.child_id = child_id
         self.field = field
         super().__init__(f"child receipt is corrupt: {field}")
+
+
+@runtime_checkable
+class SpawnEventPublisher(Protocol):
+    """子 Agent 生命周期事件发布协议。"""
+
+    async def publish_child_status(self, receipt: ChildReceipt) -> None:
+        """在持久化状态提交后广播安全子任务摘要。"""
+        ...
+
+
+class NoopSpawnEventPublisher:
+    """默认空实现：测试与未注入 WS 时不广播。"""
+
+    async def publish_child_status(self, receipt: ChildReceipt) -> None:
+        del receipt
 
 
 @dataclass(slots=True)
@@ -357,6 +373,20 @@ class SpawnManager:
         self._session_runtimes: dict[int, _SessionRuntime] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._active_budgets: dict[str, Budget] = {}
+        self._event_publisher: SpawnEventPublisher = NoopSpawnEventPublisher()
+
+    def set_event_publisher(self, publisher: SpawnEventPublisher) -> None:
+        """注入子 Agent WS 事件发布器（lifespan 启动时绑定 hub）。"""
+        self._event_publisher = publisher
+
+    async def _publish_child_status(self, receipt: ChildReceipt) -> None:
+        try:
+            await self._event_publisher.publish_child_status(receipt)
+        except Exception:
+            logger.exception(
+                "发布子 Agent 状态失败",
+                extra={"child_id": receipt.child_id},
+            )
 
     @property
     def max_concurrent_children(self) -> int:
@@ -598,6 +628,7 @@ class SpawnManager:
                     )
                     await db.commit()
                     receipt = _to_receipt(row)
+                    await self._publish_child_status(receipt)
             except BaseException as exc:
                 if not slot_acquired or child_id is None:
                     if slot_acquired:
@@ -706,6 +737,7 @@ class SpawnManager:
                 )
                 await db.commit()
                 receipt = _to_receipt(row)
+        await self._publish_child_status(receipt)
         active_budget = Budget(
             max_steps=receipt.budget.max_steps,
             max_cost_usd=receipt.budget.max_cost_usd,
@@ -906,6 +938,7 @@ class SpawnManager:
                 return None
             session_id = existing.session_id
         runtime = self._runtime(session_id)
+        published_receipt: ChildReceipt | None = None
         async with runtime.lock:
             async with self._session_factory() as db:
                 row = await agent_registry_crud.get(db, child_id)
@@ -934,7 +967,10 @@ class SpawnManager:
                     error_class=error_class,
                 )
                 await db.commit()
-                return _to_receipt(row)
+                published_receipt = _to_receipt(row)
+        if published_receipt is not None:
+            await self._publish_child_status(published_receipt)
+        return published_receipt
 
     async def _get_receipt(self, child_id: str) -> ChildReceipt:
         async with self._session_factory() as db:
@@ -1094,6 +1130,7 @@ class SpawnManager:
         runtime = self._runtime(receipt.session_id)
         closed: ChildReceipt | None = None
         persistence_error: BaseException | None = None
+        publish_closed = False
         async with runtime.lock:
             try:
                 async with self._session_factory() as db:
@@ -1119,6 +1156,7 @@ class SpawnManager:
                             error_class="infra" if force_closed else error_class,
                         )
                         await db.commit()
+                        publish_closed = True
                     closed = _to_receipt(row)
             except BaseException as exc:
                 persistence_error = exc
@@ -1141,6 +1179,8 @@ class SpawnManager:
                 child_id,
                 reason="close_receipt_unavailable",
             )
+        if publish_closed:
+            await self._publish_child_status(closed)
         return closed
 
     async def _reconcile_close_persistence(

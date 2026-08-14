@@ -18,6 +18,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.agent.spawn import run_receipt_gc_loop, spawn_manager
 from app.agent.hitl_execution import reconcile_executing_proposals
+from app.agent.ws_hub import WsSpawnEventPublisher, hub
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal, engine
@@ -74,6 +75,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await agent_session_crud.recover_active_turns(recover_db)
         await recover_db.commit()
     await spawn_manager.reconcile_startup()
+    spawn_manager.set_event_publisher(WsSpawnEventPublisher(hub))
     monitor_task = asyncio.create_task(run_monitor_sweep_loop())
     diff_task = asyncio.create_task(run_cmdb_diff_loop())
     gc_task = asyncio.create_task(run_receipt_gc_loop(spawn_manager))

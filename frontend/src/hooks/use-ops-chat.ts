@@ -16,6 +16,7 @@ import type {
   AgentMessage,
   AgentSessionSnapshot,
   AgentWsServerMessage,
+  ChildAgentSnapshot,
   HitlProposalSafeSummary,
 } from "@/types/agent"
 
@@ -77,6 +78,15 @@ export type OpsChatItem =
       id: string
       message: string
     }
+  | {
+      kind: "child"
+      id: string
+      childId: string
+      role: string
+      taskBrief: string
+      status: string
+      resultSummary: string | null
+    }
 
 export interface OpsChatState {
   items: OpsChatItem[]
@@ -109,6 +119,10 @@ function messageItemId(messageId: number): string {
 
 function hitlItemId(proposalId: number): string {
   return `hitl:${proposalId}`
+}
+
+function childItemId(childId: string): string {
+  return `child:${childId}`
 }
 
 /**
@@ -177,10 +191,25 @@ function mapProposalToItem(
   }
 }
 
+function mapChildToItem(child: ChildAgentSnapshot): OpsChatItem {
+  return {
+    kind: "child",
+    id: childItemId(child.child_id),
+    childId: child.child_id,
+    role: child.role,
+    taskBrief: child.task_brief,
+    status: child.status,
+    resultSummary: child.result_summary,
+  }
+}
+
 function mapSnapshotToItems(snapshot: AgentSessionSnapshot): OpsChatItem[] {
   const items = mapHistoryToItems(snapshot.messages)
   for (const row of snapshot.proposals) {
     items.push(mapProposalToItem(row))
+  }
+  for (const row of snapshot.children) {
+    items.push(mapChildToItem(row))
   }
   return items
 }
@@ -235,6 +264,47 @@ function readAssetId(payload: Record<string, unknown>): number | null {
 function readResultExcerpt(payload: Record<string, unknown>): string | null {
   const value = payload.result_excerpt
   return typeof value === "string" ? value : null
+}
+
+function readNullableString(
+  payload: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = payload[key]
+  return typeof value === "string" ? value : null
+}
+
+function mapChildStatusPayload(
+  payload: Record<string, unknown>,
+): Extract<OpsChatItem, { kind: "child" }> | null {
+  const childId = readString(payload, "child_id")
+  if (!childId) return null
+  return {
+    kind: "child",
+    id: childItemId(childId),
+    childId,
+    role: readString(payload, "role"),
+    taskBrief: readString(payload, "task_brief"),
+    status: readString(payload, "status"),
+    resultSummary: readNullableString(payload, "result_summary"),
+  }
+}
+
+function mergeChildStatusItem(
+  items: OpsChatItem[],
+  incoming: Extract<OpsChatItem, { kind: "child" }>,
+): OpsChatItem[] {
+  let replaced = false
+  const next = items.map((item) => {
+    if (item.kind !== "child") return item
+    if (item.childId !== incoming.childId) return item
+    replaced = true
+    return incoming
+  })
+  if (!replaced) {
+    next.push(incoming)
+  }
+  return next
 }
 
 /**
@@ -427,6 +497,12 @@ function applyWsMessage(
 
     case "monitor_alert":
       return state
+
+    case "child_status": {
+      const incoming = mapChildStatusPayload(message.payload)
+      if (incoming == null) return state
+      return { items: mergeChildStatusItem(state.items, incoming) }
+    }
 
     default:
       return state

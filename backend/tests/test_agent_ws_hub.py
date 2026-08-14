@@ -6,11 +6,18 @@
 @Docs: 验证 Agent WebSocket Hub 按会话隔离广播，以及 HITL 发布器只推安全摘要。
 """
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
-from app.agent.ws_hub import AgentWsHub, BufferedWsHitlEventPublisher, WsHitlEventPublisher
+from app.agent.spawn import ChildBudgetSnapshot, ChildReceipt
+from app.agent.ws_hub import (
+    AgentWsHub,
+    BufferedWsHitlEventPublisher,
+    WsHitlEventPublisher,
+    WsSpawnEventPublisher,
+)
 from app.schemas.agent_ws import AgentWsServerMessage
 
 pytestmark = pytest.mark.asyncio
@@ -235,3 +242,111 @@ async def test_buffered_publisher_defers_events_until_flush() -> None:
     # 二次 flush 是空操作，不重复广播
     await publisher.flush()
     assert len(ws.sent) == 2
+
+
+def _receipt_with_secret_artifact() -> ChildReceipt:
+    now = datetime.now(UTC)
+    return ChildReceipt(
+        child_id="child-secret",
+        trace_id="trace-secret",
+        session_id=42,
+        parent_agent_id=None,
+        agent_path="/root/child-secret",
+        role="ops_explorer",
+        role_version="t09-v1",
+        model="local-chat",
+        tools_allowlist=("query_cmdb", "kb_read"),
+        sandbox_mode="read-only",
+        task_brief="检查资产 42",
+        budget=ChildBudgetSnapshot(5, 0.5, 30.0),
+        status="RUNNING",
+        result_summary=None,
+        artifacts=("postgresql://user:password@secret/db.sql",),
+        created_at=now,
+        status_changed_at=now,
+        closed_at=None,
+        force_closed=False,
+    )
+
+
+async def test_ws_spawn_publisher_whitelists_child_receipt() -> None:
+    """WsSpawnEventPublisher 只广播子 Agent 安全摘要字段。"""
+    hub = AgentWsHub()
+    websocket = FakeWebSocket()
+    await hub.connect(42, websocket)  # type: ignore[arg-type]
+    publisher = WsSpawnEventPublisher(hub=hub)
+    receipt = _receipt_with_secret_artifact()
+
+    await publisher.publish_child_status(receipt)
+
+    assert len(websocket.sent) == 1
+    envelope = websocket.sent[0]
+    assert envelope["type"] == "child_status"
+    payload = envelope["payload"]
+    assert set(payload) == {
+        "child_id",
+        "role",
+        "task_brief",
+        "status",
+        "result_summary",
+        "created_at",
+        "status_changed_at",
+    }
+    assert "tools_allowlist" not in payload
+    assert "budget" not in payload
+    assert "artifacts" not in payload
+    assert payload["child_id"] == "child-secret"
+
+
+def _receipt_with_secret_artifact() -> ChildReceipt:
+    now = datetime.now(UTC)
+    return ChildReceipt(
+        child_id="child-secret",
+        trace_id="trace-secret",
+        session_id=42,
+        parent_agent_id=None,
+        agent_path="/root/child-secret",
+        role="ops_explorer",
+        role_version="t09-v1",
+        model="local-chat",
+        tools_allowlist=("query_cmdb", "kb_read"),
+        sandbox_mode="read-only",
+        task_brief="检查资产 42",
+        budget=ChildBudgetSnapshot(5, 0.5, 30.0),
+        status="RUNNING",
+        result_summary=None,
+        artifacts=("postgresql://user:password@secret/db.sql",),
+        created_at=now,
+        status_changed_at=now,
+        closed_at=None,
+        force_closed=False,
+    )
+
+
+async def test_ws_spawn_publisher_whitelists_child_receipt() -> None:
+    """WsSpawnEventPublisher 只广播子 Agent 安全摘要字段。"""
+    hub = AgentWsHub()
+    websocket = FakeWebSocket()
+    await hub.connect(42, websocket)  # type: ignore[arg-type]
+    publisher = WsSpawnEventPublisher(hub=hub)
+    receipt = _receipt_with_secret_artifact()
+
+    await publisher.publish_child_status(receipt)
+
+    assert len(websocket.sent) == 1
+    envelope = websocket.sent[0]
+    assert envelope["type"] == "child_status"
+    payload = envelope["payload"]
+    assert set(payload) == {
+        "child_id",
+        "role",
+        "task_brief",
+        "status",
+        "result_summary",
+        "created_at",
+        "status_changed_at",
+    }
+    assert "tools_allowlist" not in payload
+    assert "budget" not in payload
+    assert "artifacts" not in payload
+    assert payload["child_id"] == "child-secret"

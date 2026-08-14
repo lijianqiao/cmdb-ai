@@ -15,10 +15,12 @@
 
 from collections import defaultdict
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any, cast
 
 from starlette.websockets import WebSocket, WebSocketState
 
+from app.agent.spawn import ChildReceipt
 from app.schemas.agent_ws import AgentWsEventType, AgentWsServerMessage
 
 # 与 T10 ProposalSafeSummary 字段对齐；绝不透传原始动作载荷
@@ -37,6 +39,34 @@ _HITL_SAFE_KEYS = frozenset(
     }
 )
 _HITL_EVENT_TYPES = frozenset({"hitl_pending", "hitl_resolved", "hitl_execution_failed"})
+_CHILD_SAFE_KEYS = frozenset(
+    {
+        "child_id",
+        "role",
+        "task_brief",
+        "status",
+        "result_summary",
+        "created_at",
+        "status_changed_at",
+    }
+)
+
+
+def _child_safe_payload(receipt: ChildReceipt) -> dict[str, Any]:
+    """从 ChildReceipt 提取 WS 白名单字段。"""
+
+    def _iso(value: datetime) -> str:
+        return value.isoformat()
+
+    return {
+        "child_id": receipt.child_id,
+        "role": receipt.role,
+        "task_brief": receipt.task_brief,
+        "status": receipt.status,
+        "result_summary": receipt.result_summary,
+        "created_at": _iso(receipt.created_at),
+        "status_changed_at": _iso(receipt.status_changed_at),
+    }
 
 
 class AgentWsHub:
@@ -145,6 +175,43 @@ class WsHitlEventPublisher:
             payload=safe_payload,
         )
         await self._resolve_hub().broadcast(session_id, message)
+
+
+class WsSpawnEventPublisher:
+    """
+    SpawnEventPublisher 实现：把子 Agent 状态映射为 child_status WS 消息。
+
+    仅推送安全摘要字段，过滤 budget、tools_allowlist、artifacts 等敏感键。
+    """
+
+    def __init__(self, hub: AgentWsHub | None = None) -> None:
+        """
+        绑定广播 Hub；默认使用模块单例。
+
+        Args:
+            hub: 可选注入的 Hub，便于单测隔离；省略时使用模块级 hub
+        """
+        self._bound_hub = hub
+
+    def _resolve_hub(self) -> AgentWsHub:
+        """返回注入的 Hub，未注入时回落到模块单例。"""
+        if self._bound_hub is not None:
+            return self._bound_hub
+        return hub
+
+    async def publish_child_status(self, receipt: ChildReceipt) -> None:
+        """
+        发布不含凭据与原始产物的子 Agent 安全状态。
+
+        Args:
+            receipt: 已持久化的子 Agent 回执
+        """
+        safe_payload = _child_safe_payload(receipt)
+        message = AgentWsServerMessage(
+            type=cast(AgentWsEventType, "child_status"),
+            payload=safe_payload,
+        )
+        await self._resolve_hub().broadcast(receipt.session_id, message)
 
 
 class BufferedWsHitlEventPublisher(WsHitlEventPublisher):

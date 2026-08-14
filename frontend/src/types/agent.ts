@@ -7,6 +7,7 @@ export type AgentWsEventType =
   | "hitl_pending"
   | "hitl_resolved"
   | "hitl_execution_failed"
+  | "child_status"
   | "monitor_alert"
   | "error"
   | "turn_done"

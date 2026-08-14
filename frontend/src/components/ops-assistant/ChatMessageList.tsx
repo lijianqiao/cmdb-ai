@@ -6,6 +6,7 @@
 import { useEffect, useRef } from "react"
 
 import { HitlApprovalCard } from "@/components/ops-assistant/HitlApprovalCard"
+import { ChildAgentStatusCard } from "@/components/ops-assistant/ChildAgentStatusCard"
 import { ChatMarkdown } from "@/components/ops-assistant/ChatMarkdown"
 import { BubbleChatIcon } from "@/lib/icons"
 import { Badge } from "@/components/ui/badge"
@@ -85,6 +86,21 @@ function MessageRow({ item }: { item: OpsChatItem }) {
               reason={item.reason}
               assetId={item.assetId}
               resultExcerpt={item.resultExcerpt}
+            />
+          </div>
+        </div>
+      )
+
+    case "child":
+      return (
+        <div className="flex justify-start">
+          <div className="w-full max-w-md">
+            <ChildAgentStatusCard
+              childId={item.childId}
+              role={item.role}
+              taskBrief={item.taskBrief}
+              status={item.status}
+              resultSummary={item.resultSummary}
             />
           </div>
         </div>

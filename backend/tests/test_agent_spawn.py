@@ -2527,3 +2527,48 @@ async def test_cancelled_close_cleans_closing_admission_gate(
             parent_agent_id=parent.child_id,
         )
     assert raised.value.reason == "parent_closed"
+
+
+class FakeSpawnEventPublisher:
+    """记录已发布的子 Agent 回执，供断言使用。"""
+
+    def __init__(self) -> None:
+        self.receipts: list[ChildReceipt] = []
+
+    async def publish_child_status(self, receipt: ChildReceipt) -> None:
+        self.receipts.append(receipt)
+
+
+@pytest_asyncio.fixture
+def fake_publisher() -> FakeSpawnEventPublisher:
+    return FakeSpawnEventPublisher()
+
+
+@pytest_asyncio.fixture
+async def spawn_manager(
+    spawn_db: SpawnDatabase,
+    fake_publisher: FakeSpawnEventPublisher,
+) -> SpawnManager:
+    manager = SpawnManager(spawn_db.session_factory, child_runner=_completed_runner)
+    manager.set_event_publisher(fake_publisher)
+    return manager
+
+
+async def test_spawn_manager_publishes_durable_statuses(
+    spawn_manager: SpawnManager,
+    fake_publisher: FakeSpawnEventPublisher,
+    spawn_db: SpawnDatabase,
+) -> None:
+    receipt = await spawn_manager.spawn_agent(
+        session_id=spawn_db.session_id,
+        role="ops_explorer",
+        task_brief="检查资产 42",
+    )
+    await spawn_manager.wait_agent(receipt.child_id, timeout_ms=1000)
+    assert [item.status for item in fake_publisher.receipts] == [
+        "SPAWNING",
+        "RUNNING",
+        "COMPLETED",
+    ]
+    assert fake_publisher.receipts[-1].child_id == receipt.child_id
+    await spawn_manager.close_agent(receipt.child_id)
