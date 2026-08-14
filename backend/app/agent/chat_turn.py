@@ -22,6 +22,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.hitl_gate import HitlGateHook
 from app.agent.loop import ChatFn, LoopOutcome, ToolDispatcher, ToolResult, run_loop
 from app.agent.session import append_user_message
 from app.agent.tool_dispatch import build_root_tool_dispatcher, root_tool_schemas
@@ -33,9 +34,9 @@ from app.schemas.agent_ws import AgentWsServerMessage
 ROOT_OPS_SYSTEM_PROMPT = """你是企业统一运维助手（OpsAssistant）。
 你帮助用户做运维知识问答、设备/网段在线状态查询，以及基于 CMDB 的关联排查。
 请优先通过已提供的工具取证，再给出有依据的中文回答；不要编造未查到的主机、告警或文档内容。
-需要发送站内通知时，调用 propose_remediation 提交提案；
+需要发送站内通知时，调用 notify；
 需要对某台已在 CMDB 登记凭据的设备做会改变状态的操作（重启、关机、启用/禁用接口）时，
-调用 propose_device_control（不要再用 propose_remediation 发起设备管控）；
+调用 device_control；
 port_enable/port_disable 必须提供 interface_name。
 是否当场执行取决于当前会话审批档位（默认请求审批）。以 list_device_commands
 返回的策略句和工具结果为准；若返回 pending_approval，必须如实告知已提交审批，
@@ -93,17 +94,25 @@ async def run_chat_turn(
         else WsHitlEventPublisher(hub=active_hub)
     )
 
-    await append_user_message(db, session_id, content)
-
+    gate_hook: HitlGateHook | None = None
     if dispatch_tool is None:
-        base_dispatch: ToolDispatcher = build_root_tool_dispatcher(
+        gate_hook = HitlGateHook(
             db,
             session_id=session_id,
             actor_user_id=actor_user_id,
             publisher=active_publisher,
         )
+        base_dispatch: ToolDispatcher = build_root_tool_dispatcher(
+            db,
+            session_id=session_id,
+            actor_user_id=actor_user_id,
+            publisher=active_publisher,
+            gate_hook=gate_hook,
+        )
     else:
         base_dispatch = dispatch_tool
+
+    await append_user_message(db, session_id, content)
 
     resolved_chat: ChatFn = chat_fn if chat_fn is not None else chat
     resolved_model = model_key or _DEFAULT_MODEL_KEY
@@ -187,6 +196,8 @@ async def run_chat_turn(
             tools=tools,
             chat_fn=wrapped_chat,
             system_prompt=ROOT_OPS_SYSTEM_PROMPT,
+            before_tool_call=gate_hook.before if gate_hook is not None else None,
+            after_tool_call=gate_hook.after if gate_hook is not None else None,
         )
     except Exception:
         await active_hub.broadcast(

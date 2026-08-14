@@ -16,16 +16,21 @@ from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.agent import hitl
+from app.agent import hitl, hitl_tools
 from app.agent.executors import ExecutionResult
 from app.agent.hitl import (
     HitlProposalRejectedError,
     HitlResumeError,
     ProposalSafeSummary,
+    attach_execution_result,
     decide_proposal,
+    gate_action,
     propose_action,
     resume_proposal,
 )
+from app.agent.hitl_gate import HitlGateHook, dispatch_through_hitl_gate
+from app.agent.loop import ToolResult
+from app.agent.tool_dispatch import build_root_tool_dispatcher
 from app.core.cmdb_credential import encrypt_credential_password
 from app.core.config import settings
 from app.crud.agent_session import agent_session_crud
@@ -309,16 +314,30 @@ async def test_propose_rejects_non_integer_actor_before_insert(
     assert await _proposal_count(db_session) == 0
 
 
-async def test_notify_auto_approve_uses_actor_and_executes_once(
+async def test_gate_action_auto_approve_stays_approved_without_executor(
     db_session: AsyncSession,
     test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """assist 档位下 notify 自动审批应使用真实操作者并在一次调用内执行完成。"""
+    """assist 档位下 gate_action 自动批准应停留 APPROVED，且不调用执行器或 resume。"""
     session_id, asset_id = await _make_context(db_session, test_user.id)
     await _set_session_approval_mode(db_session, session_id, "assist")
-    publisher = RecordingPublisher()
 
-    summary = await propose_action(
+    async def fail_resume(*args: object, **kwargs: object) -> ProposalSafeSummary:
+        raise AssertionError("resume_proposal 不应被 gate_action 调用")
+
+    monkeypatch.setattr(hitl, "resume_proposal", fail_resume)
+
+    execute_called = False
+
+    async def track_execute(*args: object, **kwargs: object) -> ExecutionResult:
+        nonlocal execute_called
+        execute_called = True
+        return ExecutionResult(ok=True, message="ok")
+
+    monkeypatch.setattr(hitl._NOTIFY_EXECUTOR, "execute", track_execute)
+
+    summary = await gate_action(
         db_session,
         session_id=session_id,
         proposed_by_agent_id=None,
@@ -327,28 +346,108 @@ async def test_notify_auto_approve_uses_actor_and_executes_once(
         payload={"message": "自动通知"},
         reason="低风险告警",
         actor_user_id=test_user.id,
-        publisher=publisher,
     )
 
     proposal = await hitl_proposal_crud.get(db_session, summary.proposal_id)
     assert proposal is not None
-    assert summary.status == "EXECUTED"
+    assert summary.status == "APPROVED"
     assert proposal.reviewed_by_user_id == test_user.id
-    assert proposal.executed_at is not None
-    assert [event[1] for event in publisher.events] == ["hitl_pending", "hitl_resolved"]
+    assert proposal.executed_at is None
+    assert execute_called is False
 
-    repeated = await resume_proposal(
+
+async def test_notify_auto_approve_executes_once_through_gate(
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """assist 档位完整路径：门控 → 薄工具 → attach，执行器只调一次。"""
+    session_id, asset_id = await _make_context(db_session, test_user.id)
+    await _set_session_approval_mode(db_session, session_id, "assist")
+    publisher = RecordingPublisher()
+    gate = HitlGateHook(
         db_session,
-        proposal_id=proposal.id,
+        session_id=session_id,
         actor_user_id=test_user.id,
         publisher=publisher,
     )
-    assert repeated == summary
-    assert [event[1] for event in publisher.events] == ["hitl_pending", "hitl_resolved"]
-    audit_count = await db_session.execute(
-        select(func.count()).select_from(AuditLog).where(AuditLog.action == "hitl_notify_executed")
+    dispatch = build_root_tool_dispatcher(
+        db_session,
+        session_id=session_id,
+        actor_user_id=test_user.id,
+        publisher=publisher,
+        gate_hook=gate,
     )
-    assert audit_count.scalar_one() == 1
+
+    execute_count = 0
+
+    async def counting_execute(*args: object, **kwargs: object) -> ExecutionResult:
+        nonlocal execute_count
+        execute_count += 1
+        return ExecutionResult(ok=True, message="ok")
+
+    monkeypatch.setattr(hitl_tools._NOTIFY_EXECUTOR, "execute", counting_execute)
+
+    result = await dispatch_through_hitl_gate(
+        gate,
+        dispatch,
+        "notify",
+        {
+            "asset_id": asset_id,
+            "payload": {"message": "自动通知"},
+            "reason": "低风险告警",
+        },
+    )
+
+    proposal = (await hitl_proposal_crud.list_for_session(db_session, session_id))[0]
+    assert result.control == "ok"
+    assert execute_count == 1
+    assert proposal is not None
+    assert proposal.status == "EXECUTED"
+    assert proposal.reviewed_by_user_id == test_user.id
+    assert [event[1] for event in publisher.events] == ["hitl_pending", "hitl_resolved"]
+
+
+async def test_attach_execution_result_marks_executed_without_resume(
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """attach_execution_result 应写 EXECUTED 且绝不调用 resume_proposal。"""
+    session_id, asset_id = await _make_context(db_session, test_user.id)
+    summary = await gate_action(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="notify",
+        asset_id=asset_id,
+        payload={"message": "回写测试"},
+        reason="attach 测试",
+        actor_user_id=test_user.id,
+    )
+    await decide_proposal(
+        db_session,
+        proposal_id=summary.proposal_id,
+        approve=True,
+        reviewed_by_user_id=test_user.id,
+    )
+
+    async def fail_resume(*args: object, **kwargs: object) -> ProposalSafeSummary:
+        raise AssertionError("resume_proposal 不应被 attach 调用")
+
+    monkeypatch.setattr(hitl, "resume_proposal", fail_resume)
+
+    attached = await attach_execution_result(
+        db_session,
+        proposal_id=summary.proposal_id,
+        tool_result=ToolResult(control="ok", content="通知提案 1 已自动批准并执行。"),
+        actor_user_id=test_user.id,
+    )
+
+    stored = await hitl_proposal_crud.get(db_session, summary.proposal_id)
+    assert stored is not None
+    assert attached.status == "EXECUTED"
+    assert stored.status == "EXECUTED"
 
 
 async def test_propose_rejects_missing_session_without_insert(
@@ -392,7 +491,7 @@ async def test_device_control_rejects_read_only_command_name(db_session: AsyncSe
 async def test_device_query_rejects_state_changing_command_name(db_session: AsyncSession, test_user: User) -> None:
     """反过来，query_device_command 也不能被用来偷跑变更类命令。"""
     session_id, asset_id = await _make_context(db_session, test_user.id)
-    with pytest.raises(HitlProposalRejectedError, match="会改变设备状态的命令请使用 propose_device_control"):
+    with pytest.raises(HitlProposalRejectedError, match="会改变设备状态的命令请使用 device_control"):
         await propose_action(
             db_session,
             session_id=session_id,
@@ -824,18 +923,23 @@ async def test_whitelisted_device_control_auto_executes_with_static_credential(
         return_value=type("Resp", (), {"result": "rebooting", "failed": False})()
     )
     with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
-        summary = await propose_action(
+        gate = HitlGateHook(db_session, session_id=session_id, actor_user_id=test_user.id)
+        dispatch = build_root_tool_dispatcher(
             db_session,
             session_id=session_id,
-            proposed_by_agent_id=None,
-            action_type="device_control",
-            asset_id=asset_id,
-            payload={"command_name": "reboot"},
-            reason="故障恢复",
             actor_user_id=test_user.id,
+            gate_hook=gate,
+        )
+        await dispatch_through_hitl_gate(
+            gate,
+            dispatch,
+            "device_control",
+            {"asset_id": asset_id, "command_name": "reboot", "reason": "故障恢复"},
         )
 
-    assert summary.status == "EXECUTED"
+    proposal = await hitl_proposal_crud.list_for_session(db_session, session_id)
+    assert len(proposal) == 1
+    assert proposal[0].status == "EXECUTED"
 
 
 async def test_dynamic_credential_device_control_never_auto_executes(db_session: AsyncSession, test_user: User) -> None:
@@ -1177,20 +1281,25 @@ async def test_device_query_whitelist_auto_executes_for_static_credential(
         return_value=type("Resp", (), {"result": "fake output", "failed": False})()
     )
     with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
-        summary = await propose_action(
+        gate = HitlGateHook(db_session, session_id=session_id, actor_user_id=test_user.id)
+        dispatch = build_root_tool_dispatcher(
             db_session,
             session_id=session_id,
-            proposed_by_agent_id=None,
-            action_type="device_query",
-            asset_id=asset_id,
-            payload={"command_name": "show_version"},
-            reason="test",
             actor_user_id=test_user.id,
+            gate_hook=gate,
+        )
+        await dispatch_through_hitl_gate(
+            gate,
+            dispatch,
+            "query_device_command",
+            {"asset_id": asset_id, "command_name": "show_version", "reason": "test"},
         )
 
-    assert summary.status == "EXECUTED"
-    assert summary.result_excerpt is not None
-    assert "fake output" in summary.result_excerpt
+    proposals = await hitl_proposal_crud.list_for_session(db_session, session_id)
+    assert len(proposals) == 1
+    assert proposals[0].status == "EXECUTED"
+    assert proposals[0].action_payload.get("last_result_excerpt") is not None
+    assert "fake output" in str(proposals[0].action_payload.get("last_result_excerpt"))
 
 
 async def test_device_query_whitelist_still_pends_for_dynamic_credential(
@@ -1265,18 +1374,23 @@ async def test_device_query_unclassified_auto_executes_in_full_mode(
         return_value=type("Resp", (), {"result": "full mode output", "failed": False})()
     )
     with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
-        summary = await propose_action(
+        gate = HitlGateHook(db_session, session_id=session_id, actor_user_id=test_user.id)
+        dispatch = build_root_tool_dispatcher(
             db_session,
             session_id=session_id,
-            proposed_by_agent_id=None,
-            action_type="device_query",
-            asset_id=asset_id,
-            payload={"command_name": "show_version"},
-            reason="test",
             actor_user_id=test_user.id,
+            gate_hook=gate,
+        )
+        await dispatch_through_hitl_gate(
+            gate,
+            dispatch,
+            "query_device_command",
+            {"asset_id": asset_id, "command_name": "show_version", "reason": "test"},
         )
 
-    assert summary.status == "EXECUTED"
+    proposals = await hitl_proposal_crud.list_for_session(db_session, session_id)
+    assert len(proposals) == 1
+    assert proposals[0].status == "EXECUTED"
 
 
 @pytest.mark.parametrize("approval_mode", ["ask", "assist", "full"])

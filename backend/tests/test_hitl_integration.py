@@ -23,6 +23,7 @@ from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.hitl_gate import HitlGateHook, dispatch_through_hitl_gate
 from app.agent.tool_dispatch import build_root_tool_dispatcher, build_tool_dispatcher
 from app.core.cmdb_credential import encrypt_credential_password
 from app.core.config import settings
@@ -37,7 +38,33 @@ pytestmark = pytest.mark.asyncio
 
 type Headers = dict[str, str]
 
-_PROPOSAL_ID_RE = re.compile(r"(?:整改提案|设备管控请求)\s+(\d+)")
+_PROPOSAL_ID_RE = re.compile(r"(?:通知提案|整改提案|设备管控请求|设备命令查询)\s+(\d+)")
+
+
+def _make_gated_dispatch(
+    db_session: AsyncSession,
+    session_id: int,
+    actor_user_id: int,
+) -> tuple[HitlGateHook, object]:
+    gate = HitlGateHook(db_session, session_id=session_id, actor_user_id=actor_user_id)
+    dispatch = build_root_tool_dispatcher(
+        db_session,
+        session_id=session_id,
+        actor_user_id=actor_user_id,
+        gate_hook=gate,
+    )
+    return gate, dispatch
+
+
+async def _dispatch_gated(
+    db_session: AsyncSession,
+    session_id: int,
+    actor_user_id: int,
+    name: str,
+    arguments: dict[str, object],
+) -> object:
+    gate, dispatch = _make_gated_dispatch(db_session, session_id, actor_user_id)
+    return await dispatch_through_hitl_gate(gate, dispatch, name, arguments)
 
 
 async def _grant_hitl_approve(db_session: AsyncSession, test_user: User) -> None:
@@ -93,18 +120,18 @@ async def test_scenario_a_notify_manual_approve_end_to_end(
     """Scenario A：ask 档位下根工具提案 → 人工批准 → EXECUTED 并写审计。"""
     secret = "SECRET_PAYLOAD_TOKEN_NOTIFY_X9"
     session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
-    dispatch = build_root_tool_dispatcher(
+    gate, dispatch = _make_gated_dispatch(
         db_session,
         session_id=session_id,
         actor_user_id=test_user.id,
-        proposed_by_agent_id=None,
     )
 
-    tool_result = await dispatch(
-        "propose_remediation",
+    tool_result = await dispatch_through_hitl_gate(
+        gate,
+        dispatch,
+        "notify",
         {
             "asset_id": asset_id,
-            "action_type": "notify",
             "payload": {"message": secret},
             "reason": "口联异常需确认",
         },
@@ -158,14 +185,16 @@ async def test_scenario_b_unclassified_device_control_forced_hitl_and_stub_stays
     asset.credential_username = "admin"
     asset.credential_password_encrypted = encrypt_credential_password("whatever")
     await db_session.flush()
-    dispatch = build_root_tool_dispatcher(
+    gate, dispatch = _make_gated_dispatch(
         db_session,
         session_id=session_id,
         actor_user_id=test_user.id,
     )
 
-    tool_result = await dispatch(
-        "propose_device_control",
+    tool_result = await dispatch_through_hitl_gate(
+        gate,
+        dispatch,
+        "device_control",
         {
             "asset_id": asset_id,
             "command_name": "reboot",
@@ -201,20 +230,19 @@ async def test_scenario_b_unclassified_device_control_forced_hitl_and_stub_stays
     assert second.status_code == 409, second.text
 
 
-async def test_scenario_c_child_dispatcher_rejects_propose_remediation(
+async def test_scenario_c_child_dispatcher_rejects_notify(
     db_session: AsyncSession,
 ) -> None:
-    """Scenario C：子角色调度器不得暴露或执行 propose_remediation。"""
+    """Scenario C：子角色调度器不得暴露或执行 notify。"""
     dispatch = build_tool_dispatcher(
         db_session,
-        ("query_monitor_status", "propose_remediation"),
+        ("query_monitor_status", "notify"),
     )
 
     result = await dispatch(
-        "propose_remediation",
+        "notify",
         {
             "asset_id": 1,
-            "action_type": "notify",
             "payload": {"message": "越权尝试"},
             "reason": "子角色写隔离",
         },

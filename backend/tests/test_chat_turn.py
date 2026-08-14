@@ -218,7 +218,7 @@ async def test_chat_turn_pending_approval_emits_hitl_pending_without_secrets(
             tool_calls=[
                 ToolCall(
                     id="call_hitl",
-                    name="propose_device_control",
+                    name="device_control",
                     arguments='{"asset_id": 1, "command_name": "reboot", "reason": "重启设备"}',
                 )
             ],
@@ -228,7 +228,7 @@ async def test_chat_turn_pending_approval_emits_hitl_pending_without_secrets(
         )
 
     async def fake_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
-        assert name == "propose_device_control"
+        assert name == "device_control"
         await publisher.publish(
             session_id=session_id,
             event_type="hitl_pending",

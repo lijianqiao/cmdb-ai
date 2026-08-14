@@ -6,7 +6,7 @@
 @Docs: 设备命令执行端到端验收：查询与变更类命令的白名单自动执行、黑名单拒绝、动态凭据强制人工、密码零泄露。
 
 实现流程：
-1. 通过根调度器调用 query_device_command / propose_device_control，串联策略判定、HITL 提案与 Scrapli 执行。
+1. 通过根调度器调用 query_device_command / device_control，串联策略判定、HITL 提案与 Scrapli 执行。
 2. 白名单 + 静态凭据当场执行；黑名单直接拒绝且不建提案；未分类走人工审批 HTTP 链路。
 3. 变更类 port_enable/port_disable 缺 interface_name 时在 propose 阶段拒绝；动态凭据即使白名单也强制 PENDING。
 4. asset_type 范围创建 reboot 策略被 API 拒绝；全程 HTTP 响应体不得出现已知明文密码或密文。
@@ -22,6 +22,8 @@ from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.hitl_gate import HitlGateHook, dispatch_through_hitl_gate
+from app.agent.loop import ToolResult
 from app.agent.tool_dispatch import build_root_tool_dispatcher, build_tool_dispatcher
 from app.core.cmdb_credential import encrypt_credential_password
 from app.core.config import settings
@@ -42,6 +44,32 @@ _PROPOSAL_ID_RE = re.compile(r"设备(?:命令(?:查询)?|管控(?:请求|命令
 
 def _generate_fernet_key() -> str:
     return Fernet.generate_key().decode()
+
+
+def _make_gated_dispatch(
+    db_session: AsyncSession,
+    session_id: int,
+    actor_user_id: int,
+) -> tuple[HitlGateHook, object]:
+    gate = HitlGateHook(db_session, session_id=session_id, actor_user_id=actor_user_id)
+    dispatch = build_root_tool_dispatcher(
+        db_session,
+        session_id=session_id,
+        actor_user_id=actor_user_id,
+        gate_hook=gate,
+    )
+    return gate, dispatch
+
+
+async def _dispatch_gated(
+    db_session: AsyncSession,
+    session_id: int,
+    actor_user_id: int,
+    name: str,
+    arguments: dict[str, object],
+) -> ToolResult:
+    gate, dispatch = _make_gated_dispatch(db_session, session_id, actor_user_id)
+    return await dispatch_through_hitl_gate(gate, dispatch, name, arguments)
 
 
 def _extract_proposal_id(content: str) -> int:
@@ -175,14 +203,9 @@ async def test_whitelisted_static_credential_query_executes_in_one_call(
     session.approval_mode = "assist"
     await db_session.flush()
 
-    dispatch = build_root_tool_dispatcher(
-        db_session,
-        session_id=session_id,
-        actor_user_id=test_user.id,
-    )
     fake_connection = _fake_scrapli_connection("fake device output line")
     with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
-        tool_result = await dispatch(
+        tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
             "query_device_command",
             {
                 "asset_id": asset_id,
@@ -191,7 +214,7 @@ async def test_whitelisted_static_credential_query_executes_in_one_call(
             },
         )
 
-    assert tool_result.control == "ok"
+    assert tool_result.control == "ok", tool_result.content
     assert "fake device output line" in tool_result.content
     assert "static-pass" not in tool_result.content
 
@@ -219,12 +242,7 @@ async def test_blacklisted_command_is_rejected_without_creating_proposal(
     )
     await db_session.commit()
 
-    dispatch = build_root_tool_dispatcher(
-        db_session,
-        session_id=session_id,
-        actor_user_id=test_user.id,
-    )
-    tool_result = await dispatch(
+    tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
         "query_device_command",
         {
             "asset_id": asset_id,
@@ -254,12 +272,7 @@ async def test_unclassified_command_creates_pending_proposal_visible_via_hitl_ap
     )
     await db_session.commit()
 
-    dispatch = build_root_tool_dispatcher(
-        db_session,
-        session_id=session_id,
-        actor_user_id=test_user.id,
-    )
-    tool_result = await dispatch(
+    tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
         "query_device_command",
         {
             "asset_id": asset_id,
@@ -319,12 +332,7 @@ async def test_dynamic_credential_requires_password_even_when_whitelisted(
     )
     await db_session.commit()
 
-    dispatch = build_root_tool_dispatcher(
-        db_session,
-        session_id=session_id,
-        actor_user_id=test_user.id,
-    )
-    tool_result = await dispatch(
+    tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
         "query_device_command",
         {
             "asset_id": asset_id,
@@ -401,15 +409,10 @@ async def test_response_bodies_never_contain_plaintext_or_ciphertext_password(
     await db_session.commit()
     await _grant_hitl_approve(db_session, test_user)
 
-    dispatch = build_root_tool_dispatcher(
-        db_session,
-        session_id=session_id,
-        actor_user_id=test_user.id,
-    )
 
     fake_connection = _fake_scrapli_connection("password-safe output")
     with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
-        unclassified = await dispatch(
+        unclassified = await _dispatch_gated(db_session, session_id, test_user.id, 
             "query_device_command",
             {
                 "asset_id": static_asset_id,
@@ -442,7 +445,7 @@ async def test_response_bodies_never_contain_plaintext_or_ciphertext_password(
         )
     http_bodies.append(decide_static.text)
 
-    dynamic_result = await dispatch(
+    dynamic_result = await _dispatch_gated(db_session, session_id, test_user.id, 
         "query_device_command",
         {
             "asset_id": dynamic_asset_id,
@@ -494,7 +497,7 @@ async def test_whitelisted_reboot_executes_with_interactive_confirmation(
     test_user: User,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """assist 档位下白名单 + 静态凭据的交换机：propose_device_control 一次调用当场执行 reboot。"""
+    """assist 档位下白名单 + 静态凭据的交换机：device_control 一次调用当场执行 reboot。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     session_id, asset_id = await _make_session_and_switch_asset(
         db_session,
@@ -516,15 +519,10 @@ async def test_whitelisted_reboot_executes_with_interactive_confirmation(
     session.approval_mode = "assist"
     await db_session.flush()
 
-    dispatch = build_root_tool_dispatcher(
-        db_session,
-        session_id=session_id,
-        actor_user_id=test_user.id,
-    )
     fake_connection = _fake_scrapli_reboot_connection("rebooting now")
     with patch("app.agent.executors._open_scrapli_connection", return_value=fake_connection):
-        tool_result = await dispatch(
-            "propose_device_control",
+        tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
+            "device_control",
             {
                 "asset_id": asset_id,
                 "command_name": "reboot",
@@ -532,7 +530,7 @@ async def test_whitelisted_reboot_executes_with_interactive_confirmation(
             },
         )
 
-    assert tool_result.control == "ok"
+    assert tool_result.control == "ok", tool_result.content
     assert "rebooting now" in tool_result.content
     assert "reboot-static-pass" not in tool_result.content
     fake_connection.send_interactive.assert_awaited_once()
@@ -562,13 +560,8 @@ async def test_blacklisted_port_disable_is_rejected_without_creating_proposal(
     )
     await db_session.commit()
 
-    dispatch = build_root_tool_dispatcher(
-        db_session,
-        session_id=session_id,
-        actor_user_id=test_user.id,
-    )
-    tool_result = await dispatch(
-        "propose_device_control",
+    tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
+        "device_control",
         {
             "asset_id": asset_id,
             "command_name": "port_disable",
@@ -599,13 +592,8 @@ async def test_unclassified_port_enable_creates_pending_and_requires_interface_n
     )
     await db_session.commit()
 
-    dispatch = build_root_tool_dispatcher(
-        db_session,
-        session_id=session_id,
-        actor_user_id=test_user.id,
-    )
-    missing_iface = await dispatch(
-        "propose_device_control",
+    missing_iface = await _dispatch_gated(db_session, session_id, test_user.id, 
+        "device_control",
         {
             "asset_id": asset_id,
             "command_name": "port_enable",
@@ -617,8 +605,8 @@ async def test_unclassified_port_enable_creates_pending_and_requires_interface_n
     proposals_before = await hitl_proposal_crud.list_for_session(db_session, session_id)
     assert proposals_before == []
 
-    tool_result = await dispatch(
-        "propose_device_control",
+    tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
+        "device_control",
         {
             "asset_id": asset_id,
             "command_name": "port_enable",
@@ -692,13 +680,8 @@ async def test_dynamic_credential_reboot_still_forces_manual_approval_even_when_
     )
     await db_session.commit()
 
-    dispatch = build_root_tool_dispatcher(
-        db_session,
-        session_id=session_id,
-        actor_user_id=test_user.id,
-    )
-    tool_result = await dispatch(
-        "propose_device_control",
+    tool_result = await _dispatch_gated(db_session, session_id, test_user.id, 
+        "device_control",
         {
             "asset_id": asset_id,
             "command_name": "reboot",

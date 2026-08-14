@@ -12,7 +12,9 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import hitl_tools, tool_dispatch
-from app.agent.hitl import HitlProposalRejectedError, ProposalSafeSummary
+from app.agent.executors import ExecutionResult
+from app.agent.hitl import HitlProposalRejectedError, ProposalSafeSummary, gate_action
+from app.agent.hitl_gate import HitlGateHook, dispatch_through_hitl_gate
 from app.agent.loop import ToolResult
 from app.agent.tool_dispatch import (
     build_root_tool_dispatcher,
@@ -47,7 +49,33 @@ async def _make_session_and_asset(
     return session.id, asset.id
 
 
-async def test_propose_remediation_returns_pending_without_payload(
+class _FakeGateHook:
+    """测试用门控钩子：仅提供 proposal_id。"""
+
+    def __init__(self, proposal_id: int | None) -> None:
+        self._proposal_id = proposal_id
+
+    @property
+    def current_proposal_id(self) -> int | None:
+        return self._proposal_id
+
+
+def _make_gated_dispatch(
+    db_session: AsyncSession,
+    session_id: int,
+    actor_user_id: int,
+) -> tuple[HitlGateHook, object]:
+    gate = HitlGateHook(db_session, session_id=session_id, actor_user_id=actor_user_id)
+    dispatch = build_root_tool_dispatcher(
+        db_session,
+        session_id=session_id,
+        actor_user_id=actor_user_id,
+        gate_hook=gate,
+    )
+    return gate, dispatch
+
+
+async def test_gate_before_notify_returns_pending_without_payload(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -55,7 +83,7 @@ async def test_propose_remediation_returns_pending_without_payload(
     captured: dict[str, object] = {}
     publisher = object()
 
-    async def fake_propose_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
+    async def fake_gate_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
         assert db is db_session
         captured.update(kwargs)
         return ProposalSafeSummary(
@@ -66,96 +94,89 @@ async def test_propose_remediation_returns_pending_without_payload(
             asset_id=7,
         )
 
-    monkeypatch.setattr(hitl_tools, "propose_action", fake_propose_action)
+    monkeypatch.setattr("app.agent.hitl_gate.gate_action", fake_gate_action)
 
-    result = await hitl_tools.propose_remediation(
+    gate = HitlGateHook(
         db_session,
         session_id=11,
         actor_user_id=13,
         proposed_by_agent_id="root-agent",
-        asset_id=7,
-        action_type="notify",
-        payload={"message": "不得回传"},
-        reason="恢复故障设备",
         publisher=publisher,  # type: ignore[arg-type]
     )
+    decision = await gate.before(
+        "notify",
+        {
+            "asset_id": 7,
+            "payload": {"message": "不得回传"},
+            "reason": "恢复故障设备",
+        },
+    )
 
-    assert result.control == "pending_approval"
-    assert "41" in result.content
-    assert "不得回传" not in result.content
-    assert captured == {
-        "session_id": 11,
-        "actor_user_id": 13,
-        "proposed_by_agent_id": "root-agent",
-        "asset_id": 7,
-        "action_type": "notify",
-        "payload": {"message": "不得回传"},
-        "reason": "恢复故障设备",
-        "publisher": publisher,
-    }
+    assert decision.block is True
+    assert decision.result is not None
+    assert decision.result.control == "pending_approval"
+    assert "41" in decision.result.content
+    assert "不得回传" not in decision.result.content
+    assert captured["asset_id"] == 7
+    assert captured["action_type"] == "notify"
 
 
-async def test_propose_remediation_returns_ok_after_notify_auto_execution(
+async def test_notify_returns_ok_after_auto_execution(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """通知已自动批准并执行时不应错误地要求人工审批。"""
 
-    async def fake_propose_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
-        return ProposalSafeSummary(
-            proposal_id=42,
-            action_type="notify",
-            status="EXECUTED",
-            reason="发送告警",
-            asset_id=8,
-        )
+    async def fake_execute(db: AsyncSession, **kwargs: object) -> ExecutionResult:
+        return ExecutionResult(ok=True, message="ok")
 
-    monkeypatch.setattr(hitl_tools, "propose_action", fake_propose_action)
+    monkeypatch.setattr(hitl_tools._NOTIFY_EXECUTOR, "execute", fake_execute)
 
-    result = await hitl_tools.propose_remediation(
+    result = await hitl_tools.notify(
         db_session,
         session_id=12,
         actor_user_id=14,
         proposed_by_agent_id=None,
         asset_id=8,
-        action_type="notify",
         payload={"message": "主机离线"},
         reason="发送告警",
+        gate_hook=_FakeGateHook(42),
     )
 
     assert result.control == "ok"
-    assert "已自动批准并执行通知" in result.content
+    assert "已自动批准并执行" in result.content
     assert "42" in result.content
 
 
-async def test_propose_remediation_returns_actionable_rejection(
+async def test_gate_before_notify_returns_actionable_rejection(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """载荷或资产校验失败应返回可操作的中文拒绝原因。"""
 
-    async def fake_propose_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
+    async def fake_gate_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
         raise HitlProposalRejectedError("payload.asset_id 与顶层 asset_id 不一致")
 
-    monkeypatch.setattr(hitl_tools, "propose_action", fake_propose_action)
+    monkeypatch.setattr("app.agent.hitl_gate.gate_action", fake_gate_action)
 
-    result = await hitl_tools.propose_remediation(
-        db_session,
-        session_id=12,
-        actor_user_id=14,
-        proposed_by_agent_id=None,
-        asset_id=8,
-        action_type="notify",
-        payload={"asset_id": 9, "message": "主机离线"},
-        reason="发送告警",
+    gate = HitlGateHook(db_session, session_id=12, actor_user_id=14)
+    decision = await gate.before(
+        "notify",
+        {
+            "asset_id": 8,
+            "payload": {"message": "主机离线"},
+            "reason": "发送告警",
+        },
     )
 
-    assert result.control == "rejected"
-    assert "asset_id" in result.content
-    assert "不一致" in result.content
+    assert decision.block is True
+    assert decision.result is not None
+    assert decision.result.control == "rejected"
+    assert "asset_id" in decision.result.content
+    assert "不一致" in decision.result.content
 
 
-async def test_propose_remediation_rejects_extra_secret_without_echo(
+async def test_gate_before_notify_rejects_extra_secret_without_echo(
     db_session: AsyncSession,
     test_user: User,
 ) -> None:
@@ -177,119 +198,143 @@ async def test_propose_remediation_rejects_extra_secret_without_echo(
     await db_session.flush()
     secret = "SECRET_TOOL_REJECT_TOKEN_Y7"
 
-    result = await hitl_tools.propose_remediation(
-        db_session,
-        session_id=session.id,
-        actor_user_id=test_user.id,
-        proposed_by_agent_id="root-agent",
-        asset_id=asset.id,
-        action_type="notify",
-        payload={"message": "主机离线", "password": secret},
-        reason="额外密钥字段工具回归",
+    gate = HitlGateHook(db_session, session_id=session.id, actor_user_id=test_user.id)
+    decision = await gate.before(
+        "notify",
+        {
+            "asset_id": asset.id,
+            "payload": {"message": "主机离线", "password": secret},
+            "reason": "额外密钥字段工具回归",
+        },
     )
 
-    assert result.control == "rejected"
-    assert secret not in result.content
-    assert "input_value" not in result.content
-    assert "password" in result.content
-    assert "校验失败" in result.content
+    assert decision.block is True
+    assert decision.result is not None
+    assert decision.result.control == "clarification"
+    assert secret not in decision.result.content
+    assert "input_value" not in decision.result.content
+    assert "password" in decision.result.content
 
 
-async def test_propose_remediation_hides_unexpected_exception_detail(
+async def test_gate_before_notify_hides_unexpected_exception_detail(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """意外异常只应暴露异常类型，不得泄露内部详情。"""
 
-    async def fake_propose_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
+    async def fake_gate_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
         raise RuntimeError("内部数据库地址")
 
-    monkeypatch.setattr(hitl_tools, "propose_action", fake_propose_action)
+    monkeypatch.setattr("app.agent.hitl_gate.gate_action", fake_gate_action)
 
-    result = await hitl_tools.propose_remediation(
+    gate = HitlGateHook(db_session, session_id=12, actor_user_id=14)
+    decision = await gate.before(
+        "notify",
+        {
+            "asset_id": 8,
+            "payload": {"message": "主机离线"},
+            "reason": "发送告警",
+        },
+    )
+
+    assert decision.block is True
+    assert decision.result is not None
+    assert decision.result.control == "failed"
+    assert "RuntimeError" in decision.result.content
+    assert "内部数据库地址" not in decision.result.content
+
+
+async def test_gate_before_device_control_returns_pending(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_gate_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
+        return ProposalSafeSummary(
+            proposal_id=60,
+            action_type="device_control",
+            status="PENDING",
+            reason="故障恢复",
+            asset_id=9,
+        )
+
+    monkeypatch.setattr("app.agent.hitl_gate.gate_action", fake_gate_action)
+
+    gate = HitlGateHook(db_session, session_id=1, actor_user_id=2)
+    decision = await gate.before(
+        "device_control",
+        {"asset_id": 9, "command_name": "reboot", "reason": "故障恢复"},
+    )
+    assert decision.block is True
+    assert decision.result is not None
+    assert decision.result.control == "pending_approval"
+    assert "60" in decision.result.content
+
+
+async def test_device_control_returns_ok_with_output_when_auto_executed(
+    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_execute(db: AsyncSession, **kwargs: object) -> ExecutionResult:
+        return ExecutionResult(ok=True, message="ok", detail={"output": "fake reboot output"})
+
+    monkeypatch.setattr(hitl_tools._DEVICE_QUERY_EXECUTOR, "execute", fake_execute)
+
+    session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
+    result = await hitl_tools.device_control(
         db_session,
-        session_id=12,
-        actor_user_id=14,
+        session_id=session_id,
+        actor_user_id=2,
         proposed_by_agent_id=None,
-        asset_id=8,
-        action_type="notify",
-        payload={"message": "主机离线"},
-        reason="发送告警",
-    )
-
-    assert result.control == "failed"
-    assert "RuntimeError" in result.content
-    assert "内部数据库地址" not in result.content
-
-
-async def test_propose_device_control_returns_pending_without_payload(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def fake_propose_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
-        return ProposalSafeSummary(
-            proposal_id=60, action_type="device_control", status="PENDING",
-            reason="故障恢复", asset_id=9,
-        )
-    monkeypatch.setattr(hitl_tools, "propose_action", fake_propose_action)
-
-    result = await hitl_tools.propose_device_control(
-        db_session, session_id=1, actor_user_id=2, proposed_by_agent_id=None,
-        asset_id=9, command_name="reboot", interface_name=None, reason="故障恢复",
-    )
-    assert result.control == "pending_approval"
-    assert "60" in result.content
-
-
-async def test_propose_device_control_returns_ok_with_output_when_auto_executed(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def fake_propose_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
-        return ProposalSafeSummary(
-            proposal_id=61, action_type="device_control", status="EXECUTED",
-            reason="故障恢复", asset_id=9, result_excerpt="fake reboot output",
-        )
-    monkeypatch.setattr(hitl_tools, "propose_action", fake_propose_action)
-
-    result = await hitl_tools.propose_device_control(
-        db_session, session_id=1, actor_user_id=2, proposed_by_agent_id=None,
-        asset_id=9, command_name="reboot", interface_name=None, reason="故障恢复",
+        asset_id=asset_id,
+        command_name="reboot",
+        interface_name=None,
+        reason="故障恢复",
+        gate_hook=_FakeGateHook(61),
     )
     assert result.control == "ok"
     assert "fake reboot output" in result.content
 
 
-def test_root_schema_adds_propose_device_control_and_narrows_propose_remediation() -> None:
+def test_root_schema_has_notify_and_device_control_without_propose() -> None:
     schemas = root_tool_schemas()
     functions = {item["function"]["name"]: item["function"] for item in schemas}
     assert len(functions) == 12
+    assert "notify" in functions
+    assert "device_control" in functions
+    assert "propose_remediation" not in functions
+    assert "propose_device_control" not in functions
 
-    remediation = functions["propose_remediation"]
-    assert remediation["parameters"]["properties"]["action_type"]["const"] == "notify"
+    notify = functions["notify"]
+    assert "message" in notify["parameters"]["properties"]["payload"]["properties"]
 
-    control = functions["propose_device_control"]
+    control = functions["device_control"]
     control_params = control["parameters"]
     assert control_params["additionalProperties"] is False
     assert set(control_params["required"]) == {"asset_id", "command_name", "reason"}
     assert set(control_params["properties"]["command_name"]["enum"]) == {
-        "show_version", "show_running_config", "show_interfaces", "ping",
-        "reboot", "shutdown", "port_enable", "port_disable",
+        "show_version",
+        "show_running_config",
+        "show_interfaces",
+        "ping",
+        "reboot",
+        "shutdown",
+        "port_enable",
+        "port_disable",
     }
 
 
-async def test_root_dispatcher_routes_propose_device_control(
+async def test_root_dispatcher_routes_device_control(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, object] = {}
 
-    async def fake_propose_device_control(db: AsyncSession, **kwargs: object) -> ToolResult:
+    async def fake_device_control(db: AsyncSession, **kwargs: object) -> ToolResult:
         captured.update(kwargs)
         return ToolResult(control="pending_approval", content="提案 70 待审批")
 
-    monkeypatch.setattr(tool_dispatch, "propose_device_control", fake_propose_device_control)
+    monkeypatch.setattr(tool_dispatch, "device_control", fake_device_control)
     dispatch = build_root_tool_dispatcher(db_session, session_id=21, actor_user_id=22)
 
     result = await dispatch(
-        "propose_device_control",
+        "device_control",
         {"asset_id": 9, "command_name": "port_disable", "interface_name": "Gi0/1", "reason": "端口异常"},
     )
     assert result.control == "pending_approval"
@@ -297,7 +342,7 @@ async def test_root_dispatcher_routes_propose_device_control(
     assert captured["interface_name"] == "Gi0/1"
 
 
-async def test_root_dispatcher_binds_context_to_remediation(
+async def test_root_dispatcher_binds_context_to_notify(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -305,15 +350,12 @@ async def test_root_dispatcher_binds_context_to_remediation(
     captured: dict[str, object] = {}
     publisher = object()
 
-    async def fake_propose_remediation(
-        db: AsyncSession,
-        **kwargs: object,
-    ) -> ToolResult:
+    async def fake_notify(db: AsyncSession, **kwargs: object) -> ToolResult:
         assert db is db_session
         captured.update(kwargs)
         return ToolResult(control="pending_approval", content="提案 51 待审批")
 
-    monkeypatch.setattr(tool_dispatch, "propose_remediation", fake_propose_remediation)
+    monkeypatch.setattr(tool_dispatch, "notify", fake_notify)
     dispatch = build_root_tool_dispatcher(
         db_session,
         session_id=21,
@@ -323,48 +365,35 @@ async def test_root_dispatcher_binds_context_to_remediation(
     )
 
     result = await dispatch(
-        "propose_remediation",
+        "notify",
         {
             "asset_id": 23,
-            "action_type": "notify",
             "payload": {"message": "告警"},
             "reason": "主机离线",
         },
     )
 
     assert result.control == "pending_approval"
-    assert captured == {
-        "session_id": 21,
-        "actor_user_id": 22,
-        "proposed_by_agent_id": "root-agent",
-        "asset_id": 23,
-        "action_type": "notify",
-        "payload": {"message": "告警"},
-        "reason": "主机离线",
-        "publisher": publisher,
-    }
+    assert captured["session_id"] == 21
+    assert captured["actor_user_id"] == 22
+    assert captured["asset_id"] == 23
+    assert captured["payload"] == {"message": "告警"}
+    assert captured["reason"] == "主机离线"
 
 
 @pytest.mark.parametrize(
     "arguments",
     [
-        {"asset_id": 1, "action_type": "notify", "payload": {}},
+        {"asset_id": 1, "payload": {}},
         {
             "asset_id": 1,
-            "action_type": "delete",
-            "payload": {},
-            "reason": "非法动作",
-        },
-        {
-            "asset_id": 1,
-            "action_type": "notify",
-            "payload": {},
+            "payload": {"message": "告警"},
             "reason": "额外参数",
             "session_id": 999,
         },
     ],
 )
-async def test_root_dispatcher_rejects_invalid_remediation_arguments(
+async def test_root_dispatcher_rejects_invalid_notify_arguments(
     db_session: AsyncSession,
     arguments: dict[str, Any],
 ) -> None:
@@ -375,15 +404,34 @@ async def test_root_dispatcher_rejects_invalid_remediation_arguments(
         actor_user_id=22,
     )
 
-    result = await dispatch("propose_remediation", arguments)
+    result = await dispatch("notify", arguments)
 
     assert result.control == "clarification"
+
+
+async def test_child_dispatcher_rejects_notify_execution_tool(
+    db_session: AsyncSession,
+) -> None:
+    """子调度器若被污染点到 notify，必须拒绝。"""
+    dispatch = build_tool_dispatcher(db_session, ("query_monitor_status", "notify"))
+
+    result = await dispatch(
+        "notify",
+        {
+            "asset_id": 1,
+            "payload": {"message": "告警"},
+            "reason": "越权尝试",
+        },
+    )
+
+    assert result.control == "rejected"
+    assert "未知工具" in result.content
 
 
 async def test_root_dispatcher_rejects_command_name_outside_catalog_enum(
     db_session: AsyncSession,
 ) -> None:
-    """command_name 不在目录枚举里应在校验阶段被拒绝，不进入 propose_action。"""
+    """command_name 不在目录枚举里应在校验阶段被拒绝，不进入 gate_action。"""
     dispatch = build_root_tool_dispatcher(
         db_session,
         session_id=21,
@@ -402,17 +450,16 @@ async def test_root_dispatcher_rejects_command_name_outside_catalog_enum(
     assert result.control == "clarification"
 
 
-async def test_child_dispatcher_never_exposes_remediation(
+async def test_child_dispatcher_never_exposes_execution_tools(
     db_session: AsyncSession,
 ) -> None:
     """即使持久化白名单被污染，子调度器也必须拒绝写工具。"""
-    dispatch = build_tool_dispatcher(db_session, ("propose_remediation",))
+    dispatch = build_tool_dispatcher(db_session, ("notify",))
 
     result = await dispatch(
-        "propose_remediation",
+        "notify",
         {
             "asset_id": 1,
-            "action_type": "notify",
             "payload": {"message": "告警"},
             "reason": "越权尝试",
         },
@@ -428,7 +475,7 @@ async def test_query_device_command_returns_pending_when_not_executed(
 ) -> None:
     """待审批设备命令查询应停止循环并返回提案 ID。"""
 
-    async def fake_propose_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
+    async def fake_gate_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
         return ProposalSafeSummary(
             proposal_id=51,
             action_type="device_query",
@@ -437,48 +484,42 @@ async def test_query_device_command_returns_pending_when_not_executed(
             asset_id=9,
         )
 
-    monkeypatch.setattr(hitl_tools, "propose_action", fake_propose_action)
+    monkeypatch.setattr("app.agent.hitl_gate.gate_action", fake_gate_action)
 
-    result = await hitl_tools.query_device_command(
-        db_session,
-        session_id=1,
-        actor_user_id=2,
-        proposed_by_agent_id=None,
-        asset_id=9,
-        command_name="show_version",
-        reason="排查交换机",
+    gate = HitlGateHook(db_session, session_id=1, actor_user_id=2)
+    decision = await gate.before(
+        "query_device_command",
+        {"asset_id": 9, "command_name": "show_version", "reason": "排查交换机"},
     )
 
-    assert result.control == "pending_approval"
-    assert "51" in result.content
+    assert decision.block is True
+    assert decision.result is not None
+    assert decision.result.control == "pending_approval"
+    assert "51" in decision.result.content
 
 
 async def test_query_device_command_returns_ok_with_result_when_auto_executed(
     db_session: AsyncSession,
+    test_user: User,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """白名单自动执行时应直接返回设备输出。"""
 
-    async def fake_propose_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
-        return ProposalSafeSummary(
-            proposal_id=52,
-            action_type="device_query",
-            status="EXECUTED",
-            reason="排查交换机",
-            asset_id=9,
-            result_excerpt="fake device output",
-        )
+    async def fake_execute(db: AsyncSession, **kwargs: object) -> ExecutionResult:
+        return ExecutionResult(ok=True, message="ok", detail={"output": "fake device output"})
 
-    monkeypatch.setattr(hitl_tools, "propose_action", fake_propose_action)
+    monkeypatch.setattr(hitl_tools._DEVICE_QUERY_EXECUTOR, "execute", fake_execute)
 
+    session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
     result = await hitl_tools.query_device_command(
         db_session,
-        session_id=1,
+        session_id=session_id,
         actor_user_id=2,
         proposed_by_agent_id=None,
-        asset_id=9,
+        asset_id=asset_id,
         command_name="show_version",
         reason="排查交换机",
+        gate_hook=_FakeGateHook(52),
     )
 
     assert result.control == "ok"
@@ -544,30 +585,29 @@ async def test_get_device_query_result_reports_execution_failure(
 
 async def test_query_device_command_reports_auto_execute_failure(
     db_session: AsyncSession,
+    test_user: User,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """白名单当场执行失败时，工具结果应明确失败而不是暗示仍在执行。"""
 
-    async def fake_propose_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
-        return ProposalSafeSummary(
-            proposal_id=52,
-            action_type="device_query",
-            status="APPROVED",
-            reason="排查交换机",
-            asset_id=9,
-            last_error="连接或执行命令失败；如果是重启/关机类命令，设备可能已经生效，请人工核实",
+    async def fake_execute(db: AsyncSession, **kwargs: object) -> ExecutionResult:
+        return ExecutionResult(
+            ok=False,
+            message="连接或执行命令失败；如果是重启/关机类命令，设备可能已经生效，请人工核实",
         )
 
-    monkeypatch.setattr(hitl_tools, "propose_action", fake_propose_action)
+    monkeypatch.setattr(hitl_tools._DEVICE_QUERY_EXECUTOR, "execute", fake_execute)
 
+    session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
     result = await hitl_tools.query_device_command(
         db_session,
-        session_id=1,
+        session_id=session_id,
         actor_user_id=2,
         proposed_by_agent_id=None,
-        asset_id=9,
+        asset_id=asset_id,
         command_name="show_version",
         reason="排查交换机",
+        gate_hook=_FakeGateHook(52),
     )
     assert result.control == "failed"
     assert "已批准但上次执行失败" in result.content
@@ -657,6 +697,7 @@ async def test_list_device_commands_reports_policy_and_credential_state(
     )
     assert assist_result.control == "ok"
     assert "白名单（可自动执行）" in assist_result.content
+    assert "device_control" in assist_result.content
 
 
 async def test_root_dispatcher_routes_list_device_commands(

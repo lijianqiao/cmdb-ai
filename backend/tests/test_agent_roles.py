@@ -47,10 +47,11 @@ def test_role_tool_boundaries_are_least_privilege() -> None:
     assert set(get_role("reviewer").tools_allowlist) == knowledge | ops
 
 
-def test_no_role_allows_propose_remediation() -> None:
-    """任何子 Agent 角色都不得获得 HITL 写工具。"""
+def test_no_role_allows_execution_tools() -> None:
+    """任何子 Agent 角色都不得获得 HITL 执行工具。"""
+    forbidden = {"notify", "device_control", "query_device_command", "propose_remediation"}
     for role in list_roles():
-        assert "propose_remediation" not in role.tools_allowlist
+        assert forbidden.isdisjoint(role.tools_allowlist)
 
 
 def test_role_model_tiers_match_architecture() -> None:

@@ -37,6 +37,7 @@ from app.agent.executors import (
     ExecutionResult,
     NotifyExecutor,
 )
+from app.agent.loop import ToolResult
 from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
@@ -247,7 +248,7 @@ def should_auto_approve(
     return False
 
 
-async def propose_action(
+async def gate_action(
     db: AsyncSession,
     *,
     session_id: int,
@@ -259,13 +260,15 @@ async def propose_action(
     actor_user_id: int,
     publisher: HitlEventPublisher | None = None,
 ) -> ProposalSafeSummary:
-    """创建经过严格校验的 HITL 提案，并按策略处理低风险通知。
+    """创建经过严格校验的 HITL 提案，并按策略自动批准，但不执行。
+
+    门控钩子调用本函数；真执行由薄工具完成，执行结果由 attach_execution_result 回写。
 
     Args:
         db: 调用方事务内的数据库会话。
         session_id: 提案所属 Agent 会话 ID。
         proposed_by_agent_id: 发起提案的子 Agent ID，可为空。
-        action_type: 支持 notify 或 device_control。
+        action_type: notify / device_control / device_query。
         asset_id: 顶层 CMDB 资产 ID。
         payload: 不含资产 ID 的动作参数；允许冗余传入相同资产 ID。
         reason: Agent 提案原因。
@@ -273,7 +276,7 @@ async def propose_action(
         publisher: 可选的安全事件发布器。
 
     Returns:
-        当前最终状态的安全提案摘要。
+        PENDING 或 APPROVED 状态的安全提案摘要，永不返回 EXECUTED。
 
     Raises:
         HitlProposalRejectedError: 用户 ID、动作载荷或 CMDB 资产不合法时。
@@ -300,10 +303,12 @@ async def propose_action(
             raise HitlProposalRejectedError(f"未知命令名：{command_name}；可用命令：{'、'.join(list_command_names())}")
         if action_type == "device_query" and command_type != "read_only":
             raise HitlProposalRejectedError(
-                "会改变设备状态的命令请使用 propose_device_control 工具，不能用 query_device_command"
+                "会改变设备状态的命令请使用 device_control 工具，不能用 query_device_command"
             )
         if action_type == "device_control" and command_type != "state_changing":
-            raise HitlProposalRejectedError("只读命令请使用 query_device_command 工具，不需要走 propose_device_control")
+            raise HitlProposalRejectedError(
+                "只读命令请使用 query_device_command 工具，不需要走 device_control"
+            )
 
         if asset.credential_type == "none":
             raise HitlProposalRejectedError("该资产未配置登录凭据，无法执行设备命令")
@@ -356,21 +361,92 @@ async def propose_action(
         policy_decision=policy_decision,
         credential_type=asset.credential_type,
     ):
-        await decide_proposal(
+        approved = await decide_proposal(
             db,
             proposal_id=proposal.id,
             approve=True,
             reviewed_by_user_id=actor_user_id,
             publisher=publisher,
         )
-        return await resume_proposal(
-            db,
-            proposal_id=proposal.id,
-            actor_user_id=actor_user_id,
-            publisher=publisher,
-        )
+        return approved
 
     return _summary(proposal)
+
+
+propose_action = gate_action
+
+
+async def attach_execution_result(
+    db: AsyncSession,
+    *,
+    proposal_id: int,
+    tool_result: ToolResult,
+    actor_user_id: int | None = None,
+    publisher: HitlEventPublisher | None = None,
+) -> ProposalSafeSummary:
+    """把薄工具执行结果写回已批准提案，不调用执行器或 resume_proposal。
+
+    Args:
+        db: 调用方事务内的数据库会话。
+        proposal_id: 已自动批准的提案 ID。
+        tool_result: 薄工具返回的结构化结果。
+        actor_user_id: 触发执行的用户 ID，可为空。
+        publisher: 可选的安全事件发布器。
+
+    Returns:
+        写库后的安全提案摘要。
+    """
+    async with _execution_lock(proposal_id):
+        stmt = (
+            select(HitlProposal)
+            .where(HitlProposal.id == proposal_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        result = await db.execute(stmt)
+        proposal = result.scalar_one_or_none()
+        if proposal is None:
+            raise HitlResumeError(f"HITL 提案不存在：{proposal_id}")
+        if proposal.status == "EXECUTED":
+            return _summary(proposal)
+        if proposal.status != "APPROVED":
+            return _summary(proposal)
+
+        if tool_result.control == "ok":
+            proposal = await hitl_proposal_crud.mark_executed(db, proposal.id)
+            updated_payload = dict(proposal.action_payload)
+            updated_payload.pop("last_error", None)
+            if proposal.action_type in ("device_query", "device_control"):
+                parts = tool_result.content.split("\n", 1)
+                if len(parts) > 1 and parts[1].strip():
+                    updated_payload["last_result_excerpt"] = parts[1]
+            if updated_payload != proposal.action_payload:
+                proposal.action_payload = updated_payload
+                await db.flush()
+            await log_audit(
+                db,
+                actor_user_id,
+                "hitl_executed",
+                target=f"hitl_proposal:{proposal.id}",
+                detail=f"动作类型：{proposal.action_type}",
+            )
+            await _publish(publisher, proposal=proposal, event_type="hitl_resolved")
+        else:
+            proposal.action_payload = {
+                **proposal.action_payload,
+                "last_error": tool_result.content[:500],
+            }
+            await db.flush()
+            await log_audit(
+                db,
+                actor_user_id,
+                "hitl_execution_failed",
+                target=f"hitl_proposal:{proposal.id}",
+                detail=tool_result.content[:500],
+            )
+            await _publish(publisher, proposal=proposal, event_type="hitl_execution_failed")
+
+        return _summary(proposal)
 
 
 async def decide_proposal(

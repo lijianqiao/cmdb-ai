@@ -3,13 +3,13 @@
 @Email: lijianqiao2906@live.com
 @FileName: tool_dispatch.py
 @DateTime: 2026-08-12 11:26
-@Docs: 为子 Agent 只读工具和根 Agent HITL 工具提供严格、安全的调度。
+@Docs: 为子 Agent 只读工具和根 Agent 执行类工具提供严格、安全的调度。
 
 实现流程：
 1. 为每个既有工具签名定义严格参数模型，并生成提供给模型的 JSON Schema。
 2. 将角色持久化的工具白名单冻结到调度闭包中，调用时再次检查权限。
 3. 子调度器始终只认识七个只读工具，不接受任何角色白名单扩展写权限。
-4. 根调度器额外绑定可信会话身份，并单独开放 propose_remediation。
+4. 根调度器绑定可信会话身份；HITL 门控在 run_loop before 钩子，薄工具只真执行。
 5. 校验通过后才转发；参数问题要求澄清，意外异常只返回类型。
 """
 
@@ -22,11 +22,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.device_commands import CommandName
 from app.agent.hitl import HitlEventPublisher
+from app.agent.hitl_gate import HitlGateHook
 from app.agent.hitl_tools import (
+    device_control,
     get_device_query_result,
     list_device_commands_for_asset,
-    propose_device_control,
-    propose_remediation,
+    notify,
     query_device_command,
 )
 from app.agent.knowledge_tools import kb_glob, kb_grep, kb_read, kb_semantic_search
@@ -35,7 +36,7 @@ from app.agent.ops_tools import query_cmdb, query_cmdb_dependencies, query_monit
 from app.agent.roles import ToolName
 
 TOOL_SCHEMA_VERSION = "t09-v1"
-ROOT_TOOL_SCHEMA_VERSION = "t10-v1"
+ROOT_TOOL_SCHEMA_VERSION = "t11-v1"
 
 
 class _Args(BaseModel):
@@ -99,17 +100,22 @@ class QueryMonitorStatusArgs(_Args):
         return self
 
 
-class ProposeRemediationArgs(_Args):
-    """根 Agent 整改提案的模型可控参数。"""
+class NotifyPayloadArgs(_Args):
+    """notify 工具 payload 内的 message 字段。"""
+
+    message: str = Field(min_length=1, max_length=2000)
+
+
+class NotifyArgs(_Args):
+    """根 Agent 通知工具的模型可控参数。"""
 
     asset_id: int = Field(ge=1)
-    action_type: Literal["notify"]
-    payload: dict[str, object]
+    payload: NotifyPayloadArgs
     reason: str = Field(min_length=1, max_length=2000)
 
 
-class ProposeDeviceControlArgs(_Args):
-    """根 Agent 设备管控提案的模型可控参数。"""
+class DeviceControlArgs(_Args):
+    """根 Agent 设备管控工具的模型可控参数。"""
 
     asset_id: int = Field(ge=1)
     command_name: CommandName
@@ -131,7 +137,7 @@ class ListDeviceCommandsArgs(_Args):
     asset_id: int = Field(ge=1)
 
 
-def _validation_reason(name: str, exc: ValidationError) -> str:
+def validation_reason_for_tool(name: str, exc: ValidationError) -> str:
     """把校验错误变成模型可自我纠正的提示：字段名 + 期望约束，不回显输入值。"""
     details: list[str] = []
     for error in exc.errors(include_url=False, include_input=False, include_context=False):
@@ -249,7 +255,7 @@ def build_tool_dispatcher(
         except ValidationError as exc:
             return ToolResult(
                 control="clarification",
-                content=_validation_reason(name, exc),
+                content=validation_reason_for_tool(name, exc),
             )
         try:
             return await _dispatch_validated(db, tool_name, parsed)
@@ -272,26 +278,36 @@ _ROOT_READ_ONLY_TOOLS: tuple[ToolName, ...] = (
     "query_monitor_status",
 )
 
+_ROOT_EXECUTION_TOOLS: frozenset[str] = frozenset(
+    {"notify", "device_control", "query_device_command"}
+)
+
+
+def _inline_command_name_enum(parameters: dict[str, Any]) -> dict[str, Any]:
+    """将 CommandName $ref 内联为 enum，避免模型端点 $ref 解析问题。"""
+    defs = parameters.get("$defs")
+    if defs and "CommandName" in defs:
+        parameters = deepcopy(parameters)
+        parameters["properties"]["command_name"] = defs["CommandName"]
+        parameters.pop("$defs", None)
+    return parameters
+
 
 def root_tool_schemas() -> list[dict[str, Any]]:
-    """返回根 Agent 的七个只读工具、整改提案工具和四个设备命令工具 Schema。
+    """返回根 Agent 的只读工具、执行类工具与设备命令辅助工具 Schema。
 
     Returns:
         OpenAI 兼容的十二个严格函数工具定义。
     """
-    propose_parameters = deepcopy(ProposeRemediationArgs.model_json_schema())
-    propose_parameters.pop("title", None)
-    query_parameters = deepcopy(QueryDeviceCommandArgs.model_json_schema())
+    notify_parameters = deepcopy(NotifyArgs.model_json_schema())
+    notify_parameters.pop("title", None)
+    notify_defs = notify_parameters.pop("$defs", None)
+    if notify_defs and "NotifyPayloadArgs" in notify_defs:
+        notify_parameters["properties"]["payload"] = notify_defs["NotifyPayloadArgs"]
+    query_parameters = _inline_command_name_enum(QueryDeviceCommandArgs.model_json_schema())
     query_parameters.pop("title", None)
-    # command_name: CommandName 是具名 type 别名，Pydantic 会生成 $defs + $ref
-    # 间接引用；内联展开成跟 action_type 一样的直接 enum，不依赖模型端点
-    # 是否正确解析 $ref。
-    query_parameters["properties"]["command_name"] = query_parameters.pop("$defs")["CommandName"]
-    propose_control_parameters = deepcopy(ProposeDeviceControlArgs.model_json_schema())
-    propose_control_parameters.pop("title", None)
-    propose_control_parameters["properties"]["command_name"] = propose_control_parameters.pop(
-        "$defs"
-    )["CommandName"]
+    control_parameters = _inline_command_name_enum(DeviceControlArgs.model_json_schema())
+    control_parameters.pop("title", None)
     result_parameters = deepcopy(GetDeviceQueryResultArgs.model_json_schema())
     result_parameters.pop("title", None)
     list_parameters = deepcopy(ListDeviceCommandsArgs.model_json_schema())
@@ -313,11 +329,12 @@ def root_tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
-                "name": "propose_remediation",
+                "name": "notify",
                 "description": (
-                    f"[{ROOT_TOOL_SCHEMA_VERSION}] 为指定资产创建需人工审批的整改提案。"
+                    f"[{ROOT_TOOL_SCHEMA_VERSION}] 向指定资产关联用户发送站内通知。"
+                    "是否当场执行取决于当前会话审批档位。"
                 ),
-                "parameters": propose_parameters,
+                "parameters": notify_parameters,
             },
         },
         {
@@ -338,7 +355,7 @@ def root_tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
-                "name": "propose_device_control",
+                "name": "device_control",
                 "description": (
                     f"[{ROOT_TOOL_SCHEMA_VERSION}] 对已配置凭据的资产发起会改变设备状态的命令"
                     "（reboot/shutdown/port_enable/port_disable）。是否当场执行取决于当前会话"
@@ -346,7 +363,7 @@ def root_tool_schemas() -> list[dict[str, Any]]:
                     "port_enable/port_disable 必须提供 interface_name。"
                     "不确定这台设备支持哪些变更类命令时先调用 list_device_commands。"
                 ),
-                "parameters": propose_control_parameters,
+                "parameters": control_parameters,
             },
         },
         {
@@ -369,6 +386,7 @@ def build_root_tool_dispatcher(
     actor_user_id: int,
     proposed_by_agent_id: str | None = None,
     publisher: HitlEventPublisher | None = None,
+    gate_hook: HitlGateHook | None = None,
 ) -> ToolDispatcher:
     """创建绑定可信身份的根 Agent 工具调度器。
 
@@ -378,73 +396,72 @@ def build_root_tool_dispatcher(
         actor_user_id: 当前认证用户 ID，不允许由模型覆盖。
         proposed_by_agent_id: 发起提案的 Agent ID，可为空。
         publisher: 可选的 HITL 安全事件发布器。
+        gate_hook: 可选门控钩子，薄工具从中读取当前提案 ID。
 
     Returns:
-        可调用七个只读工具、整改提案工具和四个设备命令工具的调度函数。
+        可调用只读与执行类工具的调度函数。
     """
     read_dispatch = build_tool_dispatcher(db, _ROOT_READ_ONLY_TOOLS)
+    common_kwargs = {
+        "session_id": session_id,
+        "actor_user_id": actor_user_id,
+        "proposed_by_agent_id": proposed_by_agent_id,
+        "publisher": publisher,
+        "gate_hook": gate_hook,
+    }
 
     async def dispatch(name: str, arguments: dict[str, Any]) -> ToolResult:
+        if name in _ROOT_EXECUTION_TOOLS:
+            try:
+                if name == "notify":
+                    notify_args = NotifyArgs.model_validate(arguments)
+                    return await notify(
+                        db,
+                        asset_id=notify_args.asset_id,
+                        payload=notify_args.payload.model_dump(),
+                        reason=notify_args.reason,
+                        **common_kwargs,
+                    )
+                if name == "device_control":
+                    control_args = DeviceControlArgs.model_validate(arguments)
+                    return await device_control(
+                        db,
+                        asset_id=control_args.asset_id,
+                        command_name=control_args.command_name,
+                        interface_name=control_args.interface_name,
+                        reason=control_args.reason,
+                        **common_kwargs,
+                    )
+                query_args = QueryDeviceCommandArgs.model_validate(arguments)
+                return await query_device_command(
+                    db,
+                    asset_id=query_args.asset_id,
+                    command_name=query_args.command_name,
+                    reason=query_args.reason,
+                    **common_kwargs,
+                )
+            except ValidationError as exc:
+                return ToolResult(
+                    control="clarification",
+                    content=validation_reason_for_tool(name, exc),
+                )
+            except Exception as exc:
+                return ToolResult(
+                    control="failed",
+                    content=f"工具 {name!r} 执行失败: {type(exc).__name__}",
+                )
+
         if name == "list_device_commands":
             try:
                 list_args = ListDeviceCommandsArgs.model_validate(arguments)
             except ValidationError as exc:
                 return ToolResult(
                     control="clarification",
-                    content=_validation_reason(name, exc),
+                    content=validation_reason_for_tool(name, exc),
                 )
             try:
                 return await list_device_commands_for_asset(
                     db, session_id=session_id, asset_id=list_args.asset_id
-                )
-            except Exception as exc:
-                return ToolResult(
-                    control="failed",
-                    content=f"工具 {name!r} 执行失败: {type(exc).__name__}",
-                )
-        if name == "query_device_command":
-            try:
-                query_args = QueryDeviceCommandArgs.model_validate(arguments)
-            except ValidationError as exc:
-                return ToolResult(
-                    control="clarification",
-                    content=_validation_reason(name, exc),
-                )
-            try:
-                return await query_device_command(
-                    db,
-                    session_id=session_id,
-                    actor_user_id=actor_user_id,
-                    proposed_by_agent_id=proposed_by_agent_id,
-                    asset_id=query_args.asset_id,
-                    command_name=query_args.command_name,
-                    reason=query_args.reason,
-                    publisher=publisher,
-                )
-            except Exception as exc:
-                return ToolResult(
-                    control="failed",
-                    content=f"工具 {name!r} 执行失败: {type(exc).__name__}",
-                )
-        if name == "propose_device_control":
-            try:
-                control_args = ProposeDeviceControlArgs.model_validate(arguments)
-            except ValidationError as exc:
-                return ToolResult(
-                    control="clarification",
-                    content=_validation_reason(name, exc),
-                )
-            try:
-                return await propose_device_control(
-                    db,
-                    session_id=session_id,
-                    actor_user_id=actor_user_id,
-                    proposed_by_agent_id=proposed_by_agent_id,
-                    asset_id=control_args.asset_id,
-                    command_name=control_args.command_name,
-                    interface_name=control_args.interface_name,
-                    reason=control_args.reason,
-                    publisher=publisher,
                 )
             except Exception as exc:
                 return ToolResult(
@@ -457,7 +474,7 @@ def build_root_tool_dispatcher(
             except ValidationError as exc:
                 return ToolResult(
                     control="clarification",
-                    content=_validation_reason(name, exc),
+                    content=validation_reason_for_tool(name, exc),
                 )
             try:
                 return await get_device_query_result(
@@ -470,31 +487,6 @@ def build_root_tool_dispatcher(
                     control="failed",
                     content=f"工具 {name!r} 执行失败: {type(exc).__name__}",
                 )
-        if name != "propose_remediation":
-            return await read_dispatch(name, arguments)
-        try:
-            remediation_args = ProposeRemediationArgs.model_validate(arguments)
-        except ValidationError as exc:
-            return ToolResult(
-                control="clarification",
-                content=_validation_reason(name, exc),
-            )
-        try:
-            return await propose_remediation(
-                db,
-                session_id=session_id,
-                actor_user_id=actor_user_id,
-                proposed_by_agent_id=proposed_by_agent_id,
-                asset_id=remediation_args.asset_id,
-                action_type=remediation_args.action_type,
-                payload=remediation_args.payload,
-                reason=remediation_args.reason,
-                publisher=publisher,
-            )
-        except Exception as exc:
-            return ToolResult(
-                control="failed",
-                content=f"工具 {name!r} 执行失败: {type(exc).__name__}",
-            )
+        return await read_dispatch(name, arguments)
 
     return dispatch
