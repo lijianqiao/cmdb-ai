@@ -14,9 +14,8 @@ from app.models.agent_trace_event import AgentTraceEvent
 from app.models.hitl_proposal import HitlProposal
 from app.models.user import User
 
-pytestmark = pytest.mark.asyncio
 
-
+@pytest.mark.asyncio
 async def test_agent_session_round_trip(db_session: AsyncSession, test_user: User) -> None:
     session = AgentSession(user_id=test_user.id, title="网段巡检", status="active")
     db_session.add(session)
@@ -30,6 +29,7 @@ async def test_agent_session_round_trip(db_session: AsyncSession, test_user: Use
     assert stored.compacted_through_message_id is None
 
 
+@pytest.mark.asyncio
 async def test_agent_message_stores_tool_calls_json(
     db_session: AsyncSession, test_user: User
 ) -> None:
@@ -52,6 +52,7 @@ async def test_agent_message_stores_tool_calls_json(
     assert stored.tool_call_id is None
 
 
+@pytest.mark.asyncio
 async def test_agent_registry_defaults_to_requested_status(
     db_session: AsyncSession, test_user: User
 ) -> None:
@@ -87,6 +88,7 @@ async def test_agent_registry_defaults_to_requested_status(
     assert stored.force_closed is False
 
 
+@pytest.mark.asyncio
 async def test_hitl_proposal_defaults_to_pending(db_session: AsyncSession, test_user: User) -> None:
     session = AgentSession(user_id=test_user.id, title="", status="active")
     db_session.add(session)
@@ -107,6 +109,7 @@ async def test_hitl_proposal_defaults_to_pending(db_session: AsyncSession, test_
     assert stored.reviewed_at is None
 
 
+@pytest.mark.asyncio
 async def test_agent_trace_event_records_span(db_session: AsyncSession, test_user: User) -> None:
     session = AgentSession(user_id=test_user.id, title="", status="active")
     db_session.add(session)
@@ -135,3 +138,19 @@ async def test_agent_trace_event_records_span(db_session: AsyncSession, test_use
     assert stored.error_class is None
     assert isinstance(stored.created_at, datetime)
     assert stored.created_at.tzinfo is not None
+
+
+def test_hitl_execution_recovery_columns_exist() -> None:
+    """HITL 执行恢复与 UNKNOWN 处置字段应存在于 ORM 表定义中。"""
+    columns = HitlProposal.__table__.columns
+    assert columns["execution_started_at"].nullable is True
+    assert columns["status_reason"].type.length == 50
+    assert columns["resolved_by_user_id"].foreign_keys
+    assert columns["resolved_at"].nullable is True
+
+
+def test_agent_session_turn_lease_columns_exist() -> None:
+    """根会话 turn 租约字段应存在于 ORM 表定义中。"""
+    columns = AgentSession.__table__.columns
+    assert columns["active_turn_token"].type.length == 36
+    assert columns["active_turn_started_at"].nullable is True

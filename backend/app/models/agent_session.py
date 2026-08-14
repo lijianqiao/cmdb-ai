@@ -1,6 +1,8 @@
 """Agent chat session — one conversation between a user and the ops agent."""
 
-from sqlalchemy import ForeignKey, Integer, String, Text
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -20,6 +22,10 @@ class AgentSession(Base, TimestampMixin):
     approval_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="ask")
     memory_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     compacted_through_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    active_turn_token: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    active_turn_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     def __repr__(self) -> str:
         return f"<AgentSession(id={self.id}, user_id={self.user_id}, status={self.status!r})>"
