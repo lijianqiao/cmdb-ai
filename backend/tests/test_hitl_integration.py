@@ -180,7 +180,7 @@ async def test_scenario_a_notify_manual_approve_end_to_end(
     assert "hitl_executed" in actions or "hitl_notify_executed" in actions
 
 
-async def test_scenario_b_unclassified_device_control_forced_hitl_and_stub_marks_unknown(
+async def test_scenario_b_unclassified_device_control_forced_hitl_and_unreachable_reverts(
     client: AsyncClient,
     db_engine: AsyncEngine,
     db_session: AsyncSession,
@@ -188,7 +188,11 @@ async def test_scenario_b_unclassified_device_control_forced_hitl_and_stub_marks
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Scenario B：ask 档位下未分类 device_control 仍强制 HITL；stub 失败标记 UNKNOWN。"""
+    """Scenario B：ask 档位下未分类 device_control 仍强制 HITL；连不上设备回退 APPROVED。
+
+    连接都没建起来说明命令确定没下发、设备状态没被改动，所以不进 UNKNOWN 人工
+    核实流程，而是回退到可直接重试的 APPROVED。
+    """
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
     asset = await cmdb_asset_crud.get(db_session, asset_id)
@@ -234,7 +238,14 @@ async def test_scenario_b_unclassified_device_control_forced_hitl_and_stub_marks
             headers=auth_headers,
         )
     assert first.status_code == 200, first.text
-    assert first.json()["data"]["status"] == "UNKNOWN"
+    assert first.json()["data"]["status"] == "APPROVED"
+
+    db_session.expire_all()
+    reverted = await hitl_proposal_crud.get(db_session, proposal_id)
+    assert reverted is not None
+    assert reverted.status_reason == "dispatch_failed_before_send"
+    assert reverted.execution_started_at is None
+    assert "ConnectionError" in str(reverted.action_payload.get("last_error"))
 
     second = await client.post(
         f"/api/v1/hitl/proposals/{proposal_id}/decide",

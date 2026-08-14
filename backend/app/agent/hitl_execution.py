@@ -335,11 +335,35 @@ async def _execute_prepared(
     raise HitlResumeError(f"不支持的 HITL 动作类型：{prepared.action_type}")
 
 
+def _describe_failure(result: ExecutionResult | None) -> str:
+    """把执行器结果压成一句可展示的失败原因（含异常类名，便于直接定位）。"""
+    if result is None:
+        return "执行器无返回"
+    error_class = result.detail.get("error_class")
+    if isinstance(error_class, str) and error_class:
+        return f"{result.message}（{error_class}）"
+    return result.message
+
+
+def _store_last_error(proposal: HitlProposal, last_error: str | None) -> None:
+    """把失败原因写进 action_payload["last_error"]，供安全摘要与前端展示。
+
+    这里只存分类信息（执行器的 message 或异常类名），不存原始异常文本。
+    """
+    if not last_error:
+        return
+    updated_payload = dict(proposal.action_payload)
+    updated_payload["last_error"] = last_error
+    if updated_payload != proposal.action_payload:
+        proposal.action_payload = updated_payload
+
+
 async def _mark_execution_unknown(
     session_factory: async_sessionmaker[AsyncSession],
     proposal_id: int,
     publisher: HitlEventPublisher | None,
     actor_user_id: int | None = None,
+    last_error: str | None = None,
 ) -> ProposalSafeSummary:
     """将 EXECUTING 提案标记为 UNKNOWN 并发布安全事件。
 
@@ -348,6 +372,7 @@ async def _mark_execution_unknown(
         proposal_id: 提案 ID。
         publisher: 可选安全事件发布器。
         actor_user_id: 触发执行的用户 ID，用于审计。
+        last_error: 失败分类信息，写入 action_payload 供审批卡片展示。
 
     Returns:
         UNKNOWN 状态的安全摘要。
@@ -358,17 +383,65 @@ async def _mark_execution_unknown(
             proposal_id,
             reason="dispatch_outcome_unknown",
         )
+        _store_last_error(unknown, last_error)
+        await db.flush()
         await log_audit(
             db,
             actor_user_id,
             "hitl_execution_unknown",
             target=f"hitl_proposal:{unknown.id}",
+            # 审计 detail 刻意不带异常文本（见 test_unknown_execution_writes_audit）；
+            # 失败原因走 action_payload["last_error"] 与服务端日志两条通道。
             detail=f"动作类型：{unknown.action_type}",
         )
         await db.commit()
 
     await _publish(publisher, proposal=unknown, event_type="hitl_execution_failed")
     return _summary(unknown)
+
+
+async def _mark_execution_unexecuted(
+    session_factory: async_sessionmaker[AsyncSession],
+    proposal_id: int,
+    publisher: HitlEventPublisher | None,
+    actor_user_id: int | None = None,
+    last_error: str | None = None,
+) -> ProposalSafeSummary:
+    """确定命令未下发：把 EXECUTING 回退成 APPROVED 并发布安全事件。
+
+    与 _mark_execution_unknown 的区别是执行器已确认没碰到设备（连接都没建起来），
+    设备状态未被改动，所以不进 UNKNOWN 人工核实流程，直接回到可重试的 APPROVED。
+
+    Args:
+        session_factory: 独立短会话工厂。
+        proposal_id: 提案 ID。
+        publisher: 可选安全事件发布器。
+        actor_user_id: 触发执行的用户 ID，用于审计。
+        last_error: 失败分类信息，写入 action_payload 供审批卡片展示。
+
+    Returns:
+        回退到 APPROVED 后的安全摘要。
+    """
+    async with session_factory() as db:
+        reverted = await hitl_proposal_crud.revert_unexecuted(
+            db,
+            proposal_id,
+            reason="dispatch_failed_before_send",
+        )
+        _store_last_error(reverted, last_error)
+        await db.flush()
+        await log_audit(
+            db,
+            actor_user_id,
+            "hitl_execution_not_dispatched",
+            target=f"hitl_proposal:{reverted.id}",
+            # 与 UNKNOWN 路径一致：审计 detail 不带异常文本。
+            detail=f"动作类型：{reverted.action_type}",
+        )
+        await db.commit()
+
+    await _publish(publisher, proposal=reverted, event_type="hitl_execution_failed")
+    return _summary(reverted)
 
 
 async def _publish_execution_summary(
@@ -433,22 +506,42 @@ async def execute_approved_proposal(
                 await execution_db.rollback()
     except asyncio.CancelledError:
         await _mark_execution_unknown(
-            session_factory, proposal_id, publisher, actor_user_id=actor_user_id
+            session_factory,
+            proposal_id,
+            publisher,
+            actor_user_id=actor_user_id,
+            last_error="执行被取消",
         )
         raise
     except Exception as exc:
-        logger.warning(
-            "HITL 执行异常 proposal_id=%s exc_type=%s",
-            proposal_id,
-            type(exc).__name__,
-        )
+        # 这里的异常发生在执行器之外（事务/驱动等），无法判断命令是否已下发，
+        # 保守按 UNKNOWN 处理；真实堆栈进服务端日志。
+        logger.exception("HITL 执行异常 proposal_id=%s", proposal_id)
         return await _mark_execution_unknown(
-            session_factory, proposal_id, publisher, actor_user_id=actor_user_id
+            session_factory,
+            proposal_id,
+            publisher,
+            actor_user_id=actor_user_id,
+            last_error=type(exc).__name__,
         )
 
     if result is None or not result.ok:
+        last_error = _describe_failure(result)
+        if result is not None and not result.dispatched:
+            # 执行器确认命令没发出去：设备没被碰过，回退到 APPROVED 可直接重试。
+            return await _mark_execution_unexecuted(
+                session_factory,
+                proposal_id,
+                publisher,
+                actor_user_id=actor_user_id,
+                last_error=last_error,
+            )
         return await _mark_execution_unknown(
-            session_factory, proposal_id, publisher, actor_user_id=actor_user_id
+            session_factory,
+            proposal_id,
+            publisher,
+            actor_user_id=actor_user_id,
+            last_error=last_error,
         )
 
     try:

@@ -756,10 +756,14 @@ async def test_concurrent_resume_executes_successful_action_once(
     assert first_summary.status == "EXECUTED"
 
 
-async def test_device_control_real_execution_failure_marks_unknown(
+async def test_device_control_connection_failure_reverts_to_approved(
     db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未分类命令批准后，若真实设备连接失败，必须标记为 UNKNOWN（不伪造 EXECUTED）。"""
+    """未分类命令批准后，若连接都没建起来，回退 APPROVED 可重试（绝不伪造 EXECUTED）。
+
+    连接失败说明命令确定没下发、设备状态没被改动，因此不需要 UNKNOWN 的人工核实；
+    但同样绝不能被当成执行成功。
+    """
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     ciphertext = encrypt_credential_password("whatever")
@@ -800,9 +804,11 @@ async def test_device_control_real_execution_failure_marks_unknown(
 
     stored = await hitl_proposal_crud.get(db_session, proposal.proposal_id)
     assert stored is not None
-    assert summary.status == "UNKNOWN"
-    assert stored.status_reason == "dispatch_outcome_unknown"
+    assert summary.status == "APPROVED"
+    assert stored.status_reason == "dispatch_failed_before_send"
     assert stored.executed_at is None
+    assert stored.execution_started_at is None
+    assert "ConnectionError" in str(stored.action_payload.get("last_error"))
     assert [event[1] for event in publisher.events] == ["hitl_execution_failed"]
 
 
@@ -840,7 +846,10 @@ async def test_resume_retry_after_unknown_requires_allow_retry(
 
     from unittest.mock import AsyncMock, patch
 
-    with patch("app.agent.executors._open_scrapli_connection", side_effect=ConnectionError("unreachable")):
+    # 连接已建立、命令下发途中断开：无法确定命令是否已生效，必须走 UNKNOWN 人工核实。
+    broken_connection = AsyncMock()
+    broken_connection.send_command = AsyncMock(side_effect=ConnectionError("dropped mid-command"))
+    with patch("app.agent.executors._open_scrapli_connection", return_value=broken_connection):
         failed = await resume_proposal(db_session, proposal_id=proposal_id, actor_user_id=user_id)
     assert failed.status == "UNKNOWN"
 

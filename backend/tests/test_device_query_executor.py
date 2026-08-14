@@ -179,6 +179,64 @@ async def test_vendor_unsupported_command_gives_specific_message(
 
     assert result.ok is False
     assert result.message == "该设备厂商不支持这个命令"
+    assert result.dispatched is False
+
+
+async def test_connect_failure_reports_not_dispatched(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """连接建不起来时必须报告 dispatched=False，让上层能安全回退重试。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    ciphertext = encrypt_credential_password("pw")
+    asset_id = await _make_asset(
+        db_session,
+        credential_type="static",
+        credential_username="admin",
+        credential_password_encrypted=ciphertext,
+    )
+    asset = await cmdb_asset_crud.get(db_session, asset_id)
+    assert asset is not None
+
+    executor = DeviceQueryExecutor()
+    with patch(
+        "app.agent.executors._open_scrapli_connection",
+        side_effect=ConnectionError("unreachable"),
+    ):
+        result = await executor.execute(
+            db_session, asset=asset, command_name="show_version", dynamic_password=None
+        )
+
+    assert result.ok is False
+    assert result.dispatched is False
+    assert result.detail["error_class"] == "ConnectionError"
+
+
+async def test_send_failure_after_connect_reports_dispatched(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """连接已建立后失败必须报告 dispatched=True，上层只能走 UNKNOWN 人工核实。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    ciphertext = encrypt_credential_password("pw")
+    asset_id = await _make_asset(
+        db_session,
+        credential_type="static",
+        credential_username="admin",
+        credential_password_encrypted=ciphertext,
+    )
+    asset = await cmdb_asset_crud.get(db_session, asset_id)
+    assert asset is not None
+
+    broken = AsyncMock()
+    broken.send_command = AsyncMock(side_effect=ConnectionError("dropped mid-command"))
+    executor = DeviceQueryExecutor()
+    with patch("app.agent.executors._open_scrapli_connection", return_value=broken):
+        result = await executor.execute(
+            db_session, asset=asset, command_name="show_version", dynamic_password=None
+        )
+
+    assert result.ok is False
+    assert result.dispatched is True
+    assert result.detail["error_class"] == "ConnectionError"
 
 
 def _generate_fernet_key() -> str:

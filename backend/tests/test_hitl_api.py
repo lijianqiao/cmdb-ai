@@ -271,8 +271,9 @@ async def test_approve_device_control_stays_approved_second_decide_conflicts(
             headers=auth_headers,
         )
     assert first.status_code == 200, first.text
-    assert first.json()["data"]["status"] == "UNKNOWN"
-    assert first.json()["data"]["status_reason"] == "dispatch_outcome_unknown"
+    # 连接没建起来 = 命令确定未下发：回退到可重试的 APPROVED，而不是 UNKNOWN。
+    assert first.json()["data"]["status"] == "APPROVED"
+    assert first.json()["data"]["status_reason"] == "dispatch_failed_before_send"
 
     second = await client.post(
         f"/api/v1/hitl/proposals/{proposal_id}/decide",
@@ -411,9 +412,12 @@ async def test_retry_approved_device_control_executes(
     await db_session.commit()
     proposal_id = summary.proposal_id
 
+    # 连接已建立但下发途中断开：结果不确定，走 UNKNOWN 人工核实流程。
+    broken_connection = AsyncMock()
+    broken_connection.send_command = AsyncMock(side_effect=ConnectionError("dropped mid-command"))
     with patch(
         "app.agent.executors._open_scrapli_connection",
-        side_effect=ConnectionError("unreachable"),
+        return_value=broken_connection,
     ):
         failed = await client.post(
             f"/api/v1/hitl/proposals/{proposal_id}/decide",
@@ -422,6 +426,7 @@ async def test_retry_approved_device_control_executes(
         )
     assert failed.status_code == 200, failed.text
     assert failed.json()["data"]["status"] == "UNKNOWN"
+    assert "last_error" in failed.json()["data"]["action_payload"]
 
     authorized = await client.post(
         f"/api/v1/hitl/proposals/{proposal_id}/resolve-unknown",

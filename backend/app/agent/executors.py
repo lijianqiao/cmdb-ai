@@ -10,8 +10,14 @@
 2. NotifyExecutor 从 payload 读取 message，校验非空后调用 log_audit(action=hitl_notify_executed)。
 3. DeviceQueryExecutor 同时服务只读诊断与变更管控：按目录分派 send_command、
    send_interactive（reboot/shutdown 确认）或 send_configs（接口启停）。
+4. ExecutionResult.dispatched 回答"这次失败有没有可能已经把命令发到设备上"：
+   连接建立之前的任何失败都是 False（确定没下发，上层可安全回退重试），连接一旦
+   建立就置 True（之后失败无法确定命令是否已生效，上层必须走 UNKNOWN 人工核实）。
+5. 失败时把真实异常堆栈写进服务端日志（logger.exception），只把异常类名放进
+   detail["error_class"] 供上层展示——既能定位问题，又不把原始异常文本泄漏给模型。
 """
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -34,14 +40,25 @@ from app.core.config import settings
 from app.models.cmdb_asset import CmdbAsset
 from app.utils.audit import log_audit
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionResult:
-    """HITL 执行器统一返回结构。"""
+    """HITL 执行器统一返回结构。
+
+    Attributes:
+        ok: 执行是否成功。
+        message: 面向人的分类结论，不含原始异常文本。
+        detail: 成功时含 output/truncated；失败时可含 error_class。
+        dispatched: 失败时命令是否可能已下发到设备。默认 False（确定没下发），
+            只有真正建立连接之后才置 True，保证默认取值永远偏保守可回退的一侧。
+    """
 
     ok: bool
     message: str
     detail: dict[str, object] = field(default_factory=dict)
+    dispatched: bool = False
 
 
 class NotifyExecutor:
@@ -108,13 +125,19 @@ def _scrapli_driver_class_for_vendor(vendor: str) -> type[Any]:
 async def _open_scrapli_connection(
     *, host: str, vendor: str, username: str, password: str, timeout_seconds: float
 ) -> Any:
-    """建立一个已认证的 Scrapli 异步连接；抽成独立函数方便测试打桩。"""
+    """建立一个已认证的 Scrapli 异步连接；抽成独立函数方便测试打桩。
+
+    必须显式指定 transport="asyncssh"：Scrapli 默认的 system transport 要调用
+    本机 /bin/ssh，在 Windows 上会在**构造驱动时**就抛 ScrapliUnsupportedPlatform，
+    连 TCP 都不会建立。asyncssh 是纯 Python 实现，各平台行为一致，开发与生产同路径。
+    """
     driver_class = _scrapli_driver_class_for_vendor(vendor)
     connection = driver_class(
         host=host,
         auth_username=username,
         auth_password=password,
         auth_strict_key=False,
+        transport="asyncssh",
         timeout_socket=timeout_seconds,
         timeout_transport=timeout_seconds,
     )
@@ -175,6 +198,7 @@ class DeviceQueryExecutor:
 
         vendor = cast(VendorName, asset.vendor)
         connection = None
+        dispatched = False
         try:
             connection = await _open_scrapli_connection(
                 host=asset.ip_address,
@@ -183,6 +207,8 @@ class DeviceQueryExecutor:
                 password=password,
                 timeout_seconds=settings.DEVICE_COMMAND_TIMEOUT_SECONDS,
             )
+            # 连接已建立：从这里开始，任何异常都无法确定命令是否已经下发到设备。
+            dispatched = True
 
             if definition.config_templates is not None and vendor in definition.config_templates:
                 rendered = [
@@ -209,10 +235,25 @@ class DeviceQueryExecutor:
                 response = await connection.send_command(template)
                 failed = getattr(response, "failed", False)
                 output = str(getattr(response, "result", ""))
-        except Exception:
+        except Exception as exc:
+            # 真实堆栈只进服务端日志：既能定位平台/驱动/认证类故障，又不外泄异常文本。
+            logger.exception(
+                "设备命令执行失败 host=%s vendor=%s command=%s dispatched=%s",
+                asset.ip_address,
+                asset.vendor,
+                command_name,
+                dispatched,
+            )
+            message = (
+                "连接或执行命令失败；如果是重启/关机类命令，设备可能已经生效，请人工核实"
+                if dispatched
+                else "无法建立设备连接，命令未下发"
+            )
             return ExecutionResult(
                 ok=False,
-                message="连接或执行命令失败；如果是重启/关机类命令，设备可能已经生效，请人工核实",
+                message=message,
+                detail={"error_class": type(exc).__name__},
+                dispatched=dispatched,
             )
         finally:
             if connection is not None:
@@ -222,7 +263,8 @@ class DeviceQueryExecutor:
                     pass
 
         if failed:
-            return ExecutionResult(ok=False, message="设备返回命令执行失败")
+            # 命令确实发到设备了，只是设备侧回了失败，属于"已下发"。
+            return ExecutionResult(ok=False, message="设备返回命令执行失败", dispatched=True)
 
         rendered_output, truncated = _truncate_output(output)
         return ExecutionResult(

@@ -45,6 +45,13 @@ def _pending_result(summary: ProposalSafeSummary, tool_name: str) -> ToolResult:
     )
 
 
+def _reason_suffix(summary: ProposalSafeSummary) -> str:
+    """把失败原因拼成一句附加说明，让模型能把具体原因转述给用户而不是只说"失败"。"""
+    if not summary.last_error:
+        return ""
+    return f"失败原因：{summary.last_error}。"
+
+
 def _tool_result_from_summary(summary: ProposalSafeSummary, tool_name: str) -> ToolResult:
     """将执行服务返回的安全摘要映射为工具结果。"""
     label = _PENDING_MESSAGES.get(tool_name, "提案")
@@ -67,6 +74,7 @@ def _tool_result_from_summary(summary: ProposalSafeSummary, tool_name: str) -> T
             control="failed",
             content=(
                 f"{label} {proposal_id} 执行结果不确定，已标记为待人工核实。"
+                f"{_reason_suffix(summary)}"
                 "请管理员在审批卡片上确认是否已执行或授权重试。"
             ),
         )
@@ -81,7 +89,8 @@ def _tool_result_from_summary(summary: ProposalSafeSummary, tool_name: str) -> T
         return ToolResult(
             control="failed",
             content=(
-                f"{label} {proposal_id} 已批准但未能开始执行，"
+                f"{label} {proposal_id} 已批准但未能开始执行（命令未下发到设备）。"
+                f"{_reason_suffix(summary)}"
                 "请检查命令、凭据或设备配置后由管理员重试。"
             ),
         )

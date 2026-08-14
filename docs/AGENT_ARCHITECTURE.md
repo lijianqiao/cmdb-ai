@@ -400,6 +400,7 @@ sequenceDiagram
 PENDING ──approve──> APPROVED ──claim──> EXECUTING ──success──> EXECUTED
    └────reject───> REJECTED                      └─failure/crash──> UNKNOWN
 APPROVED ──preflight: policy_blacklisted──> REJECTED
+EXECUTING ──dispatch_failed_before_send──> APPROVED（确定未下发，可直接重试）
 UNKNOWN ──confirm_executed──> EXECUTED（人工确认）
 UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 ```
@@ -410,6 +411,8 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 - **策略在每次认领执行前复检**：`execute_approved_proposal` 经 `_preflight_and_claim` 在同一短事务内复检命令策略与凭据，通过后才认领 `EXECUTING`；命令不存在或动态凭据缺失时不认领，提案保持 `APPROVED`；当前策略已黑名单时原子转 `REJECTED` 并写 `status_reason=policy_blacklisted`
 - **`EXECUTING` 先提交**：认领 `EXECUTING` 的事务提交后，外部执行器（Scrapli / notify）才启动；执行器内可观测已提交的 `EXECUTING` 状态
 - **`UNKNOWN` 不自动重试**：执行失败、进程崩溃或启动恢复（`reconcile_executing_proposals` 将遗留 `EXECUTING` 批量转 `UNKNOWN`）后，系统不会自动再次执行；须管理员人工处置（见 [guide.md §5.3.1](./guide.md#531-管理员处置-unknown-提案本项目)）
+- **`UNKNOWN` 只留给真正不确定的失败**：执行器用 `ExecutionResult.dispatched` 区分两类失败——连接尚未建立就失败（平台/驱动不支持、认证失败、主机不可达）说明命令确定没下发、设备状态未被改动，原子转回 `APPROVED` 并写 `status_reason=dispatch_failed_before_send`，管理员修好前置条件即可直接重试；连接建立之后的任何失败都无法确定命令是否已生效，仍走 `UNKNOWN` 人工核实
+- **失败原因可追**：分类原因（含异常类名）写入 `action_payload.last_error`，经安全摘要透出到审批卡片与 Agent 上下文；完整异常堆栈只进服务端日志，不外泄。审计日志 `detail` 刻意不含异常文本
 - 待审批期间，`action_payload` 中的敏感字段不通过 WebSocket 回传给发起对话的 Agent 上下文，Agent 只收到"提案已创建，等待审批"的摘要
 - 新增权限码 `agent:hitl_approve`，只有持有该权限的用户能操作 `PENDING → APPROVED/REJECTED`、`UNKNOWN` 人工处置，以及 `POST /api/v1/hitl/proposals/{id}/retry`（复用现有 RBAC，不新建权限体系）
 

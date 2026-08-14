@@ -3,7 +3,10 @@
 State machine (docs/guide.md §5.3): PENDING -[approve]-> APPROVED -[claim]->
 EXECUTING -[success]-> EXECUTED; PENDING -[reject]-> REJECTED; APPROVED
 -[policy]-> REJECTED; EXECUTING -[uncertain]-> UNKNOWN; UNKNOWN -[manual]->
-EXECUTED or APPROVED.
+EXECUTED or APPROVED; EXECUTING -[never dispatched]-> APPROVED.
+
+最后一条边（revert_unexecuted）只在执行器确认命令根本没发出去时使用：设备状态
+未被改动，所以不需要 UNKNOWN 的人工核实流程，直接回到可重试的 APPROVED。
 """
 
 import asyncio
@@ -20,6 +23,7 @@ from app.models.hitl_proposal import HitlProposal
 _DECISION_LOCKS: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
 _UNKNOWN_REASON_CODES = frozenset({"dispatch_outcome_unknown"})
+_UNEXECUTED_REASON_CODES = frozenset({"dispatch_failed_before_send"})
 
 
 def _decision_lock(proposal_id: int) -> asyncio.Lock:
@@ -142,6 +146,41 @@ class CRUDHitlProposal:
             raise InvalidHitlTransitionError(current.status, "EXECUTING")
         await db.flush()
         return claimed
+
+    async def revert_unexecuted(
+        self,
+        db: AsyncSession,
+        proposal_id: int,
+        *,
+        reason: str,
+    ) -> HitlProposal:
+        """确定命令未下发时把 EXECUTING 回退成 APPROVED，原因仅允许固定安全代码。
+
+        只有执行器明确报告"没碰到设备"（连接都没建起来）才允许走这条边：此时
+        设备状态没被改动，回到 APPROVED 让管理员修好前置条件后直接重试即可，
+        不必像 UNKNOWN 那样先人工核实设备实际状态。
+        """
+        if reason not in _UNEXECUTED_REASON_CODES:
+            raise ValueError(f"unsupported HITL unexecuted reason code: {reason!r}")
+
+        stmt = (
+            update(HitlProposal)
+            .where(HitlProposal.id == proposal_id, HitlProposal.status == "EXECUTING")
+            .values(
+                status="APPROVED",
+                status_reason=reason,
+                execution_started_at=None,
+            )
+            .returning(HitlProposal)
+        )
+        reverted = (await db.execute(stmt)).scalar_one_or_none()
+        if reverted is None:
+            current = await self.get(db, proposal_id)
+            if current is None:
+                raise ValueError(f"HITL proposal {proposal_id} not found")
+            raise InvalidHitlTransitionError(current.status, "APPROVED")
+        await db.flush()
+        return reverted
 
     async def reject_for_policy(self, db: AsyncSession, proposal_id: int) -> HitlProposal:
         """策略复检拒绝：将 APPROVED 提案转为 REJECTED(policy_blacklisted)。"""

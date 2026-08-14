@@ -21,6 +21,7 @@ dependencies = [
     "cryptography>=50.0.0",
     "scrapli>=2026.2.20",
     "scrapli-community>=2025.1.30",
+    "asyncssh>=2.24.0",
 ]
 
 [dependency-groups]
