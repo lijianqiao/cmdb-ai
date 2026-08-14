@@ -34,7 +34,8 @@ from app.agent.orchestration import (
     classify_documents,
     investigate_root_cause,
 )
-from app.agent.spawn import SpawnManager
+from app.agent.budget import Budget
+from app.agent.spawn import ChildReceipt, ChildRunResult, SpawnManager
 from app.core.llm import ChatMessage, ChatResult, LlmRequestError
 from app.crud.agent_message import agent_message_crud
 from app.crud.agent_registry import agent_registry_crud
@@ -408,3 +409,33 @@ async def test_root_cause_partial_failure_and_idempotent_close(
     )
     await manager.wait_agent(extra.child_id)
     await manager.close_agent(extra.child_id)
+
+
+async def test_spawn_tool_dispatcher_hides_internal_receipt_fields(
+    integration_db: IntegrationDatabase,
+) -> None:
+    """Spawn 工具回执不得向根 Agent 泄露预算、工具白名单或 artifacts。"""
+    from app.agent.spawn_tools import build_spawn_tool_dispatcher
+
+    manager = SpawnManager(integration_db.session_factory, child_runner=_completed_runner)
+    dispatch = build_spawn_tool_dispatcher(manager, session_id=integration_db.session_id)
+    result = await dispatch(
+        "spawn_agent",
+        {"role": "ops_explorer", "task_brief": "检查资产 42 监控状态"},
+    )
+    assert result.control == "ok"
+    assert "tools_allowlist" not in result.content
+    assert "budget" not in result.content
+    assert "model" not in result.content
+    assert "trace_id" not in result.content
+    assert "检查资产 42 监控状态" in result.content
+    child_id = re.search(r"child_id:\s*(\S+)", result.content).group(1)
+    await dispatch("close_agent", {"child_id": child_id})
+
+
+async def _completed_runner(
+    _db: AsyncSession,
+    _receipt: ChildReceipt,
+    _budget: Budget,
+) -> ChildRunResult:
+    return ChildRunResult(status="COMPLETED", result_summary="integration-done")

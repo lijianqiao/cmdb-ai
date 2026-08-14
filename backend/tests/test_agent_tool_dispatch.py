@@ -260,3 +260,28 @@ async def test_child_dispatcher_rejects_get_device_query_result(
 
     assert result.control == "rejected"
     assert "未知工具" in result.content
+
+
+def test_root_tool_schemas_exclude_spawn_tools() -> None:
+    """root_tool_schemas 不包含 Spawn 工具；Spawn 由 spawn_tools 单独提供。"""
+    from app.agent.spawn_tools import SPAWN_TOOL_NAMES
+    from app.agent.tool_dispatch import root_tool_schemas
+
+    names = {item["function"]["name"] for item in root_tool_schemas()}
+    for spawn_name in SPAWN_TOOL_NAMES:
+        assert spawn_name not in names
+
+
+def test_child_schemas_exclude_spawn_and_hitl_tools() -> None:
+    """子角色白名单 schema 不得包含 Spawn、HITL 或设备变更工具。"""
+    from app.agent.spawn_tools import SPAWN_TOOL_NAMES
+
+    names = {item["function"]["name"] for item in tool_schemas_for(("kb_read", "query_cmdb"))}
+    forbidden = set(SPAWN_TOOL_NAMES) | {
+        "notify",
+        "device_control",
+        "query_device_command",
+        "get_device_query_result",
+        "list_device_commands",
+    }
+    assert names.isdisjoint(forbidden)

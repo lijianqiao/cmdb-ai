@@ -24,6 +24,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.hitl_gate import HitlGateHook
 from app.agent.loop import ChatFn, LoopOutcome, ToolDispatcher, ToolResult, run_loop
+from app.agent.spawn import spawn_manager
+from app.agent.spawn_tools import (
+    SPAWN_TOOL_NAMES,
+    build_spawn_tool_dispatcher,
+    spawn_tool_schemas,
+)
 from app.agent.tool_dispatch import build_root_tool_dispatcher, root_tool_schemas
 from app.agent.ws_hub import AgentWsHub, WsHitlEventPublisher, hub
 from app.core.llm import ChatResult, chat
@@ -51,7 +57,12 @@ port_enable/port_disable 必须提供 interface_name。
 已执行完成就不要编造已经查到的内容。
 工具报错或被拒绝时，先根据错误提示修正参数重试（如换命令名）；无法解决时，
 用中文向用户解释具体原因和下一步建议（如去 CMDB 补充厂商/凭据信息）。
-回答简洁、可操作；涉及风险操作时明确说明需要审批。"""
+回答简洁、可操作；涉及风险操作时明确说明需要审批。
+简单查询（单设备在线状态、单次 CMDB/知识检索）由你直接调用只读工具，不要 Spawn。
+只有两个及以上彼此独立的调查任务时，才用 spawn_agent 创建只读子 Agent 并行取证；
+子 Agent 不得执行 HITL、设备变更或再次 Spawn。创建后必须 wait_agent 等待终态，
+再 close_agent 释放槽位，并把各子任务安全摘要汇总进最终回答。
+任何会改变设备状态的操作只能由你通过 device_control 经 HITL 发起，不得委派子 Agent。"""
 
 # settings 无专用 Agent 模型键；MODELS 默认 chat 登记键为 local-chat
 _DEFAULT_MODEL_KEY = "local-chat"
@@ -92,6 +103,7 @@ async def run_chat_turn(
     )
 
     gate_hook: HitlGateHook | None = None
+    spawn_dispatch: ToolDispatcher | None = None
     if dispatch_tool is None:
         gate_hook = HitlGateHook(
             db,
@@ -106,12 +118,17 @@ async def run_chat_turn(
             publisher=active_publisher,
             gate_hook=gate_hook,
         )
+        spawn_dispatch = build_spawn_tool_dispatcher(spawn_manager, session_id=session_id)
     else:
         base_dispatch = dispatch_tool
 
     resolved_chat: ChatFn = chat_fn if chat_fn is not None else chat
     resolved_model = model_key or _DEFAULT_MODEL_KEY
-    tools = root_tool_schemas()
+    tools = (
+        root_tool_schemas() + spawn_tool_schemas()
+        if spawn_dispatch is not None
+        else root_tool_schemas()
+    )
 
     async def wrapped_chat(
         mk: str,
@@ -179,7 +196,9 @@ async def run_chat_turn(
         return result
 
     async def wrapped_dispatch(name: str, arguments: dict[str, Any]) -> ToolResult:
-        """透传工具调度；HITL 事件由 dispatcher 内 publisher 负责。"""
+        """根工具与 Spawn 工具分流；HITL 事件由 dispatcher 内 publisher 负责。"""
+        if spawn_dispatch is not None and name in SPAWN_TOOL_NAMES:
+            return await spawn_dispatch(name, arguments)
         return await base_dispatch(name, arguments)
 
     try:

@@ -9,10 +9,12 @@
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import json
+
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.agent.loop import ToolResult
 from app.agent.session import append_user_message
@@ -36,6 +38,16 @@ async def test_root_ops_system_prompt_uses_execution_tool_names() -> None:
     assert "device_control" in ROOT_OPS_SYSTEM_PROMPT
     assert "propose_remediation" not in ROOT_OPS_SYSTEM_PROMPT
     assert "propose_device_control" not in ROOT_OPS_SYSTEM_PROMPT
+
+
+async def test_root_ops_system_prompt_mentions_spawn_policy() -> None:
+    """ROOT_OPS_SYSTEM_PROMPT 应说明何时 Spawn、子 Agent 只读与 wait 汇总。"""
+    from app.agent.chat_turn import ROOT_OPS_SYSTEM_PROMPT
+
+    assert "spawn_agent" in ROOT_OPS_SYSTEM_PROMPT
+    assert "wait_agent" in ROOT_OPS_SYSTEM_PROMPT
+    assert "不要 Spawn" in ROOT_OPS_SYSTEM_PROMPT
+    assert "device_control" in ROOT_OPS_SYSTEM_PROMPT
 
 _SENSITIVE_KEYS = frozenset({"message", "command", "command_name", "password", "credential"})
 
@@ -544,3 +556,149 @@ async def test_chat_turn_injected_chat_fn_does_not_receive_db(
     await db_session.commit()
 
     assert outcome.reason == "final_answer"
+
+
+async def test_chat_turn_spawn_parallel_children_summarizes_safely(
+    db_session: AsyncSession,
+    db_engine: AsyncEngine,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """假 LLM：两轮 Spawn/wait 后汇总；子 transcript 隔离且工具回执不含内部配置。"""
+    from app.agent.chat_turn import run_chat_turn
+    from app.agent.spawn import ChildReceipt, ChildRunResult, SpawnManager
+    from app.crud.agent_message import agent_message_crud
+
+    session_factory = async_sessionmaker(
+        db_engine,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+
+    async def instant_runner(
+        _db: AsyncSession,
+        receipt: ChildReceipt,
+        _budget: object,
+    ) -> ChildRunResult:
+        return ChildRunResult(
+            status="COMPLETED",
+            result_summary=f"摘要-{receipt.role}-{receipt.task_brief}",
+        )
+
+    spawn_mgr = SpawnManager(session_factory, child_runner=instant_runner)
+    monkeypatch.setattr("app.agent.chat_turn.spawn_manager", spawn_mgr)
+
+    session_id = await _make_session(db_session, test_user.id)
+    test_hub = AgentWsHub()
+    ws = FakeWebSocket()
+    await test_hub.connect(session_id, ws)  # type: ignore[arg-type]
+
+    brief_a = "调查资产 11 监控状态"
+    brief_b = "调查资产 22 CMDB 拓扑"
+    summary_a = f"摘要-ops_explorer-{brief_a}"
+    summary_b = f"摘要-investigator-{brief_b}"
+    round_no = {"n": 0}
+
+    async def spawn_chat(
+        model_key: str,
+        messages: list[ChatMessage],
+        **kwargs: Any,
+    ) -> ChatResult:
+        round_no["n"] += 1
+        if round_no["n"] == 1:
+            return ChatResult(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="spawn_a",
+                        name="spawn_agent",
+                        arguments=json.dumps(
+                            {"role": "ops_explorer", "task_brief": brief_a},
+                            ensure_ascii=False,
+                        ),
+                    ),
+                    ToolCall(
+                        id="spawn_b",
+                        name="spawn_agent",
+                        arguments=json.dumps(
+                            {"role": "investigator", "task_brief": brief_b},
+                            ensure_ascii=False,
+                        ),
+                    ),
+                ],
+                finish_reason="tool_calls",
+                prompt_tokens=8,
+                completion_tokens=6,
+            )
+        if round_no["n"] == 2:
+            receipts = await spawn_mgr.list_agents(session_id)
+            child_ids = [receipt.child_id for receipt in receipts]
+            assert len(child_ids) == 2
+            return ChatResult(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="wait_a",
+                        name="wait_agent",
+                        arguments=json.dumps(
+                            {"child_id": child_ids[0], "timeout_ms": 5000}
+                        ),
+                    ),
+                    ToolCall(
+                        id="wait_b",
+                        name="wait_agent",
+                        arguments=json.dumps(
+                            {"child_id": child_ids[1], "timeout_ms": 5000}
+                        ),
+                    ),
+                ],
+                finish_reason="tool_calls",
+                prompt_tokens=8,
+                completion_tokens=6,
+            )
+        return ChatResult(
+            content=f"并行调查完成：{summary_a}；{summary_b}",
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=6,
+            completion_tokens=10,
+        )
+
+    await append_user_message(db_session, session_id, "并行调查两台资产")
+    outcome = await run_chat_turn(
+        db_session,
+        session_id=session_id,
+        actor_user_id=test_user.id,
+        chat_fn=spawn_chat,
+        hub_instance=test_hub,
+    )
+    await db_session.commit()
+
+    assert outcome.reason == "final_answer"
+    assert summary_a in outcome.final_answer
+    assert summary_b in outcome.final_answer
+    assert brief_a in outcome.final_answer
+    assert brief_b in outcome.final_answer
+    assert "tools_allowlist" not in outcome.final_answer
+    assert "budget" not in outcome.final_answer
+
+    root_messages = await agent_message_crud.list_for_agent(
+        db_session, session_id, agent_id=None
+    )
+    root_tool_messages = [m for m in root_messages if m.role == "tool"]
+    assert len(root_tool_messages) >= 2
+    assert all(message.tool_call_id is not None for message in root_tool_messages)
+
+    receipts = await spawn_mgr.list_agents(session_id)
+    assert len(receipts) == 2
+    briefs = {receipt.task_brief for receipt in receipts}
+    assert briefs == {brief_a, brief_b}
+    for receipt in receipts:
+        child_messages = await agent_message_crud.list_for_agent(
+            db_session, session_id, agent_id=receipt.child_id
+        )
+        child_text = "\n".join(message.content for message in child_messages)
+        assert receipt.task_brief in child_text
+        for sibling in receipts:
+            if sibling.child_id != receipt.child_id:
+                assert sibling.task_brief not in child_text

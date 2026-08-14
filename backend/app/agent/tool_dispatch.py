@@ -296,6 +296,9 @@ def _inline_command_name_enum(parameters: dict[str, Any]) -> dict[str, Any]:
 def root_tool_schemas() -> list[dict[str, Any]]:
     """返回根 Agent 的只读工具、执行类工具与设备命令辅助工具 Schema。
 
+    Spawn 工具（spawn_agent 等）由 spawn_tools.spawn_tool_schemas 单独提供，
+    chat_turn 在运行时与本文案合并，子 Agent 白名单不包含 Spawn/HITL/设备变更。
+
     Returns:
         OpenAI 兼容的十二个严格函数工具定义。
     """
