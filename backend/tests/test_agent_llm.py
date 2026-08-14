@@ -133,6 +133,31 @@ async def test_chat_returns_error_result_on_non_200() -> None:
     assert result.content is not None and len(result.content) <= 400
 
 
+async def test_chat_redacts_authorization_from_http_error_body() -> None:
+    """HTTP 错误正文若回显 Authorization/Bearer，不得泄露到 ChatResult.content。"""
+    error_body = (
+        "upstream failed; Authorization: Bearer secret-token; "
+        "also Bearer abc in logs"
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(500, text=error_body)
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://fake") as fake_client:
+        result = await chat(
+            "local-chat",
+            [ChatMessage(role="user", content="hi")],
+            client=fake_client,
+        )
+
+    content = result.content or ""
+    assert result.finish_reason == "error"
+    assert "HTTP 500" in content
+    assert "secret-token" not in content
+    assert "Bearer" not in content
+    assert "Authorization" not in content
+    assert "abc" not in content
+
+
 @pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ReadTimeout])
 async def test_chat_returns_error_result_on_transport_failure(
     error_type: type[httpx.RequestError],

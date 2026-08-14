@@ -9,6 +9,7 @@ should construct an HTTP client to a model provider directly.
 """
 
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any, Literal
@@ -104,11 +105,23 @@ def _error_result(reason: str) -> ChatResult:
     )
 
 
+_SENSITIVE_AUTH_RE = re.compile(
+    r"authorization\s*:\s*(?:bearer\s+\S+|\S+)|bearer\s+\S+",
+    re.IGNORECASE,
+)
+
+
+def _redact_sensitive_auth(text: str) -> str:
+    """脱敏 HTTP 错误正文中的 Authorization / Bearer 凭证片段。"""
+    return _SENSITIVE_AUTH_RE.sub("[已脱敏]", text)
+
+
 def _http_error_reason(status_code: int, body: str) -> str:
-    """HTTP 非 200 时的中文短因；正文最多截断 200 字符。"""
+    """HTTP 非 200 时的中文短因；正文最多截断 200 字符并脱敏凭证。"""
     truncated = body[:200] if body else ""
     if truncated:
-        return f"HTTP {status_code}：{truncated}"
+        sanitized = _redact_sensitive_auth(truncated)
+        return f"HTTP {status_code}：{sanitized}"
     return f"HTTP {status_code}"
 
 
