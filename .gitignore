@@ -34,6 +34,7 @@ build/
 .superpowers/
 AGENTS.md
 CLAUDE.md
+pi/
 
 # ===== 系统文件 =====
 .DS_Store
