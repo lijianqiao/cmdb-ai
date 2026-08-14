@@ -44,6 +44,20 @@ describe("parseAgentWsMessage", () => {
     expect(msg).toEqual({ type: "turn_done", payload: {} })
   })
 
+  it("解析 child_status 实时状态帧", () => {
+    const msg = parseAgentWsMessage(
+      JSON.stringify({
+        type: "child_status",
+        payload: { child_id: "child-1", role: "reviewer", status: "RUNNING" },
+      }),
+    )
+
+    expect(msg).toEqual({
+      type: "child_status",
+      payload: { child_id: "child-1", role: "reviewer", status: "RUNNING" },
+    })
+  })
+
   it("非法 JSON / 未知 type / 非对象返回 null", () => {
     expect(parseAgentWsMessage("not-json")).toBeNull()
     expect(parseAgentWsMessage(JSON.stringify({ type: "unknown" }))).toBeNull()
