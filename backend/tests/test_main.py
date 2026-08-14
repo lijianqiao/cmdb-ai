@@ -25,10 +25,22 @@ from fastapi import FastAPI
 
 import app.main as main_module
 from app.agent.spawn import SpawnManager
+from app.main import validate_single_worker_environment
 
-pytestmark = pytest.mark.asyncio
+
+@pytest.mark.parametrize("key", ["WEB_CONCURRENCY", "UVICORN_WORKERS"])
+def test_rejects_multiple_workers(key: str) -> None:
+    with pytest.raises(RuntimeError, match="只支持 1 个 Uvicorn worker"):
+        validate_single_worker_environment({key: "2"})
 
 
+def test_allows_default_and_one_worker() -> None:
+    validate_single_worker_environment({})
+    validate_single_worker_environment({"WEB_CONCURRENCY": "1"})
+    validate_single_worker_environment({"UVICORN_WORKERS": "1"})
+
+
+@pytest.mark.asyncio
 async def test_lifespan_orders_reconcile_background_tasks_and_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -49,6 +61,15 @@ async def test_lifespan_orders_reconcile_background_tasks_and_shutdown(
     async def fake_reconcile() -> tuple[object, ...]:
         events.append("reconcile")
         return ()
+
+    async def fake_hitl_reconcile(_session_factory: object) -> None:
+        events.append("hitl-reconcile")
+
+    async def fake_recover_turns(_db: object) -> None:
+        events.append("recover-turns")
+
+    def fake_validate_workers(_environment: object) -> None:
+        events.append("validate-workers")
 
     async def fake_shutdown() -> None:
         events.append("spawn-shutdown")
@@ -81,10 +102,25 @@ async def test_lifespan_orders_reconcile_background_tasks_and_shutdown(
         async def dispose(self) -> None:
             events.append("engine-dispose")
 
+    class _FakeDbSession:
+        async def commit(self) -> None:
+            events.append("recover-commit")
+
+    class _FakeSessionContext:
+        async def __aenter__(self) -> _FakeDbSession:
+            return _FakeDbSession()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
     monkeypatch.setattr(asyncio, "create_task", tracking_create_task)
     monkeypatch.setattr(main_module, "run_monitor_sweep_loop", fake_monitor_loop)
     monkeypatch.setattr(main_module, "run_cmdb_diff_loop", fake_diff_loop)
     monkeypatch.setattr(main_module, "run_receipt_gc_loop", fake_gc_loop)
+    monkeypatch.setattr(main_module, "validate_single_worker_environment", fake_validate_workers)
+    monkeypatch.setattr(main_module, "reconcile_executing_proposals", fake_hitl_reconcile)
+    monkeypatch.setattr(main_module, "AsyncSessionLocal", _FakeSessionContext)
+    monkeypatch.setattr(main_module.agent_session_crud, "recover_active_turns", fake_recover_turns)
     monkeypatch.setattr(main_module.spawn_manager, "reconcile_startup", fake_reconcile)
     monkeypatch.setattr(main_module.spawn_manager, "shutdown", fake_shutdown)
     monkeypatch.setattr(main_module, "engine", _FakeEngine())
@@ -100,6 +136,9 @@ async def test_lifespan_orders_reconcile_background_tasks_and_shutdown(
                 monitor_started.wait(), diff_started.wait(), gc_started.wait()
             )
 
+    assert events.index("validate-workers") < events.index("hitl-reconcile")
+    assert events.index("hitl-reconcile") < events.index("recover-turns")
+    assert events.index("recover-turns") < events.index("reconcile")
     assert events.index("reconcile") < events.index("yielded")
     assert events.index("gc-cancelled") < events.index("spawn-shutdown")
     assert events.index("spawn-shutdown") < events.index("engine-dispose")

@@ -2,7 +2,8 @@
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+import os
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, suppress
 from typing import Any
 
@@ -61,6 +62,23 @@ def _error_content(
     return {"code": status_code, "data": data, "message": message}
 
 
+def validate_single_worker_environment(environment: Mapping[str, str]) -> None:
+    """拒绝已知的多 worker 环境配置，确保 Agent Spawn 只在单进程内运行。"""
+    for name in ("WEB_CONCURRENCY", "UVICORN_WORKERS"):
+        raw = environment.get(name)
+        if raw is None:
+            continue
+        try:
+            workers = int(raw)
+        except ValueError as exc:
+            raise RuntimeError(f"{name} 必须是整数 1") from exc
+        if workers != 1:
+            raise RuntimeError(
+                "当前 Agent Spawn 运行时只支持 1 个 Uvicorn worker；"
+                f"检测到 {name}={raw}"
+            )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Reconcile crashed child-agent state, run background jobs, then release resources.
@@ -70,6 +88,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     loops. Shutdown order: cancel and await all three loops, close every
     child this process still owns, then dispose the database engine last.
     """
+    validate_single_worker_environment(os.environ)
     await reconcile_executing_proposals(AsyncSessionLocal)
     async with AsyncSessionLocal() as recover_db:
         await agent_session_crud.recover_active_turns(recover_db)

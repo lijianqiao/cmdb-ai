@@ -4,6 +4,21 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings
+from app.main import validate_single_worker_environment
+
+
+@pytest.mark.parametrize("key", ["WEB_CONCURRENCY", "UVICORN_WORKERS"])
+@pytest.mark.parametrize("raw", ["0", "-1", "-3"])
+def test_rejects_non_positive_worker_counts(key: str, raw: str) -> None:
+    with pytest.raises(RuntimeError, match="只支持 1 个 Uvicorn worker"):
+        validate_single_worker_environment({key: raw})
+
+
+@pytest.mark.parametrize("key", ["WEB_CONCURRENCY", "UVICORN_WORKERS"])
+@pytest.mark.parametrize("raw", ["abc", "1.5", ""])
+def test_rejects_non_integer_worker_values(key: str, raw: str) -> None:
+    with pytest.raises(RuntimeError, match="必须是整数 1"):
+        validate_single_worker_environment({key: raw})
 
 
 def _production_config(**overrides: object) -> dict[str, object]:
