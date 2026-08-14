@@ -26,6 +26,16 @@ pytestmark = pytest.mark.asyncio
 
 type Headers = dict[str, str]
 
+
+async def test_root_ops_system_prompt_uses_execution_tool_names() -> None:
+    """ROOT_OPS_SYSTEM_PROMPT 应指导模型调用 notify/device_control，而非旧 propose_* 工具名。"""
+    from app.agent.chat_turn import ROOT_OPS_SYSTEM_PROMPT
+
+    assert "notify" in ROOT_OPS_SYSTEM_PROMPT
+    assert "device_control" in ROOT_OPS_SYSTEM_PROMPT
+    assert "propose_remediation" not in ROOT_OPS_SYSTEM_PROMPT
+    assert "propose_device_control" not in ROOT_OPS_SYSTEM_PROMPT
+
 _SENSITIVE_KEYS = frozenset({"message", "command", "command_name", "password", "credential"})
 
 

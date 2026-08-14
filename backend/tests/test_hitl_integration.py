@@ -6,11 +6,11 @@
 @Docs: T10 HITL 跨组件验收：根调度器提案 → HTTP 审批 → 审计与子角色隔离。
 
 实现流程：
-1. 通过 CMDB CRUD 准备真实资产，再用 build_root_tool_dispatcher 走 propose_remediation。
+1. 通过 CMDB CRUD 准备真实资产，再用 build_root_tool_dispatcher 走 notify。
 2. 校验工具结果仅含安全摘要（pending_approval），不含原始载荷秘密。
 3. 授予 agent:hitl_approve 后经 HTTP decide 完成审批，断言状态机与审计动作。
 4. 未分类 device_control 在通知自动批准开启时仍强制 HITL；stub 失败保持 APPROVED 且二次审批 409。
-5. 子角色调度器即使白名单污染也拒绝 propose_remediation，保证写路径仅根 Agent 可走。
+5. 子角色调度器即使白名单污染也拒绝 notify，保证写路径仅根 Agent 可走。
 """
 
 import re

@@ -6,9 +6,9 @@
 @Docs: HITL 提案编排：校验动作、复用状态机、调度执行器并发布安全事件。
 
 实现流程：
-1. propose_action 先合并顶层 asset_id，再用严格 Pydantic 模型校验动作载荷并检查 CMDB 资产。
+1. gate_action（propose_action 别名）先合并顶层 asset_id，再用严格 Pydantic 模型校验动作载荷并检查 CMDB 资产。
 2. 载荷校验失败只回传固定中文原因与字段名，绝不拼接 ValidationError / 原始 input_value。
-3. 合法提案始终先以 PENDING 追加；assist/full 档位下按策略表自动批准并继续执行。
+3. 合法提案始终先以 PENDING 追加；assist/full 档位下按策略表自动批准，但不执行——门控钩子调度薄工具，attach_execution_result 回写结果。
 4. decide_proposal 只复用 CRUD 的审批状态机，不隐式恢复执行，避免人工 API 路径重复执行。
 5. resume_proposal 仅执行 APPROVED 提案；EXECUTED 返回幂等摘要，其他状态明确拒绝。
 6. 对 Agent 和事件发布器只暴露安全摘要，不返回原始 payload，避免设备凭据或未知字段泄露。
