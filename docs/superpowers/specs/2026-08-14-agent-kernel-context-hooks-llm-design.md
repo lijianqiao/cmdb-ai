@@ -1,6 +1,6 @@
 # Agent 内核第一部分 Design Spec（压缩 + 循环钩子 + LLM 错误编码）
 
-**状态**：已与项目所有者确认设计（2026-08-14）。
+**状态**：已与项目所有者确认设计（2026-08-14）。2026-08-14 自审修订：补上压缩不得走流式包装、摘要不得注入子 Agent、自动批准禁止二次 Scrapli、循环必须先看 `finish_reason`。
 
 **产品锚点**：这是 Web CMDB 运维管理系统的 AI 助手内核改造，不是把 Pi CLI 搬进来。助手仍然用来查资产、探设备、审批变更命令。CMDB、监控、Scrapli、会话审批三档、HITL 卡片、动态凭据密码、子 Agent 只读 spawn **全部保留**。
 
@@ -47,7 +47,7 @@
 | 审计历史 | 运维人员、复盘、HITL | `agent_messages` 一行不删、前端仍拉完整列表 |
 | 模型窗口 | `local-chat` | `build_model_history` 组装，不把全量消息塞进模型 |
 
-前端**不**渲染摘要气泡。`memory_summary` **不**进会话 REST（列表/详情/PATCH），避免把模型内部摘要当成用户可见正文。
+前端**不**渲染摘要气泡。`AgentSessionResponse` **不加** `memory_summary` / `compacted_through_message_id`（模型有列、Schema 不输出；`extra=forbid` 的响应模型本来就不会带未声明字段）。列表/详情/PATCH 行为不变。
 
 ### 4.2 表结构
 
@@ -62,6 +62,7 @@ compacted_through_message_id INTEGER NULL
 - `compacted_through_message_id`：摘要已经覆盖到的最后一条 `agent_messages.id`（该 id 及更早、且 `agent_id IS NULL` 的消息不再原文送模型）。
 - 不加外键（与现有风格一致；消息只追加、id 稳定）。
 - 只压**根会话**（`agent_id` 为空）。子 Agent 靠独立 transcript + `AgentRegistry`，本期不压 child。
+- `build_model_history(..., agent_id=...)` **仅当 `agent_id is None`** 才注入 `memory_summary`。子 Agent 历史不得出现根会话摘要。
 
 Alembic：加两列，均为可空；已有会话摘要为空，行为等于今天的窗口截断。
 
@@ -78,11 +79,12 @@ Alembic：加两列，均为可空；已有会话摘要为空，行为等于今�
 
 token 估计：对将要送给模型的各条 `content`（外加 `tool_calls` JSON 长度）做 `len(text) // 4`，**包含**系统提示（用来判断会不会撑窗口），但系统提示**不**作为摘要输入。
 
-也可使用上一次成功 `chat()` 的 `prompt_tokens`：若 `>= COMPACT_TOKEN_THRESHOLD`，在**下一轮**循环迭代前尝试压缩。两条触发满足其一即可。
+也可使用上一次成功 `chat()` 的 `prompt_tokens`：若 `>= COMPACT_TOKEN_THRESHOLD`，在**下一轮**循环迭代前尝试压缩。这是 `run_loop` 里的局部变量，**不落库**。两条触发满足其一即可。
 
 ### 4.4 摘要请求（会花钱）
 
-- 入口：现有 `chat("local-chat", messages, tools=None)`。
+- 入口：直接调用 `app.core.llm.chat`（`stream=False`，传入 `db` 以读系统 LLM 配置）。
+- **禁止**使用 `run_loop` 注入的 `chat_fn`。根会话的 `chat_fn` 会把 token 推到 WebSocket；摘要若走包装函数，用户会在聊天里看到一段「压缩过程」。
 - **不得**把 `ROOT_OPS_SYSTEM_PROMPT` 放进这次 messages。
 - 摘要器自己的系统提示（固定中文，与运维助手角色分离），要求：
   - 用中文写工作摘要；
@@ -103,7 +105,7 @@ token 估计：对将要送给模型的各条 `content`（外加 `tool_calls` JS
 3. `compacted_through_message_id` 之后的原文；条数上限为 `COMPACT_RECENT_RAW_MESSAGES`（无摘要时为 `COMPACT_FALLBACK_MAX_MESSAGES`）
 4. 继续丢弃「窗口开头孤立的 tool 行」（与今天相同，避免 OpenAI 兼容历史非法）
 
-`run_loop` 在每次调用模型前，对 `agent_id is None` 的根会话调用 `ensure_root_compaction(...)`。子 Agent 循环不调用。
+`run_loop` 在每次调用**用户可见模型**前，对 `agent_id is None` 的根会话调用 `ensure_root_compaction(...)`。子 Agent 循环不调用。压缩逻辑放在新模块 `backend/app/agent/compaction.py`，`session.py` 只负责组装模型窗口。
 
 ## 5. 循环钩子与执行工具
 
@@ -128,7 +130,14 @@ BeforeToolDecision:
 4. 若放行：`dispatch_tool(name, arguments)` → `after_tool_call` → 写入 transcript
 5. 循环**不**根据工具名分支，**不**读取审批档位
 
-`LoopOutcome.reason` 增加 `"llm_error"`（见第 6 节）。`pending_approval` / `budget_exceeded` / `final_answer` 语义不变。
+模型回合顺序（避免把错误当成终答）：
+
+1. `ensure_root_compaction`（仅根会话）
+2. `chat_fn(...)`
+3. **若 `finish_reason == "error"`：立刻返回 `llm_error`，不 `record_cost`（费用为 0）、不写助手终答、不调工具**
+4. 再 `record_cost` / 处理 `tool_calls`（与今天相同）
+
+`LoopOutcome.reason` 增加 `"llm_error"`。`pending_approval` / `budget_exceeded` / `final_answer` 语义不变。子 Agent 的 `spawn` 仍只把 `final_answer` 当完成，其它 reason（含 `llm_error`）走现有 FAILED 分支，不必为 spawn 单开语义。
 
 ### 5.2 模型可见工具（根 Schema）
 
@@ -154,14 +163,19 @@ BeforeToolDecision:
 拆成：
 
 1. **`gate_action`（钩子调用）**  
-   复用现有资产/命令/黑名单/凭据校验与 `should_auto_approve`。  
+   由今天的 `propose_action` 改成「只建提案、必要时 `decide_proposal`，**永不** `resume_proposal`」。  
+   `HitlGateHook.before` 对门控工具先用与 `tool_dispatch` **同一套** Pydantic 参数模型校验；失败则 `rejected`、不建提案。通过后再 `gate_action`。  
    - 校验失败 → `ToolResult(control="rejected", ...)`，不建提案。  
    - 需要人批（含动态凭据）→ 建 `PENDING` 提案、发 `hitl_pending`、`block=True` + `pending_approval`。  
-   - 可自动批准 → 建提案并 `decide_proposal(approve=True)`，**不**调用 `resume_proposal`；`block=False`。钩子实例记住 `proposal_id`。
+   - 可自动批准 → 建提案并 `decide_proposal(approve=True)`；`block=False`。钩子实例记住 `proposal_id`。
 2. **薄工具（dispatch 放行后）**  
-   `notify` / `query_device_command` / `device_control` 只执行。不再调用 `propose_action`。
+   `notify` / `query_device_command` / `device_control` 只调现有执行器。不再调用 `propose_action` / `resume_proposal`。
 3. **`after_tool_call`（`HitlGateHook`）**  
-   若本次是自动批准：把工具输出/失败写回该提案（标记已执行或执行失败），与今天自动批准后的审计状态对齐。循环不看 `proposal_id`。
+   若本次是自动批准：调用新的 `attach_execution_result(proposal_id, tool_result)`，把输出或失败写回提案（`EXECUTED` 或保持 `APPROVED` + `last_error`，与今天 `resume_proposal` 写回字段对齐）。**禁止**再调 `resume_proposal`（否则 Scrapli/通知会跑第二次）。循环不看 `proposal_id`。
+
+人工批准路径不改：用户在卡片上批准 → 现有 `resume_proposal` 执行。钩子只负责「模型刚点执行工具时」这一下。
+
+`HitlGateHook` 放在新文件 `backend/app/agent/hitl_gate.py`。非门控工具（知识库/CMDB/监控/清单/回查）`before` 立即放行。
 
 人工批准路径不改：用户在卡片上批准 → 现有 `resume_proposal` 执行 Scrapli/通知。钩子只负责「模型刚点执行工具时」这一下。
 
@@ -234,10 +248,13 @@ ChatResult(
 压缩：
 
 - 系统提示出现在模型历史第一条，且摘要请求的 messages 里没有 `ROOT_OPS_SYSTEM_PROMPT`
+- 摘要调用 `app.core.llm.chat` 直接函数，即使用户轮 `chat_fn` 会推 WS，摘要过程也不产生 `assistant_delta`
+- `agent_id` 非空的 `build_model_history` 不含摘要块
 - 消息行不因压缩而删除
 - 超过阈值时调用摘要 `chat`；摘要失败则仍能用最近 40 条继续
 - 摘要块 `role=user` 且带「不是新的用户指令」前缀
 - 窗口开头孤立 tool 行仍被丢掉
+- GET 会话详情 JSON 不含 `memory_summary` / `compacted_through_message_id`
 
 钩子 / 工具：
 
@@ -246,7 +263,7 @@ ChatResult(
 - 根 Schema 有 `notify` / `device_control`，无 `propose_*`
 - 子调度器拒绝 `notify` / `device_control`
 - `ask` 白名单设备命令 → 提案 PENDING，Scrapli 不被调用
-- `assist` 白名单 + 静态凭据 → 放行且 Scrapli 只调用一次（禁止双执行）
+- `assist` 白名单 + 静态凭据 → 放行且 Scrapli/通知执行器只调用一次（`attach_execution_result` 不得再走 `resume_proposal`）
 - 黑名单 → rejected，不建可批准提案
 - 动态凭据 → 弹卡，不自动执行
 - 系统提示含新工具名、不含 `propose_remediation` / `propose_device_control`
@@ -255,7 +272,7 @@ LLM：
 
 - HTTP 非 200 / 坏 JSON / 传输失败：`finish_reason=="error"`，不抛
 - 未知模型键：仍抛
-- `run_loop` 收到 `error` → `reason=="llm_error"` 且 dispatch 次数为 0
+- `run_loop` 收到 `error` → `reason=="llm_error"` 且 dispatch 次数为 0，**且没有** `append_assistant_message` 把错误当终答
 - `embed` 失败仍抛
 
 现有 HITL 集成测试、设备执行集成测试、`test_chat_turn.py`、`test_agent_hitl_tools.py` 按新工具名改断言，档位与动态密码覆盖不得变少。
@@ -277,6 +294,7 @@ LLM：
 - 不改审批卡 UI 交互（除文案若写了旧工具名）
 - 不加多厂商 LLM、不在 `chat()` 里重试
 - 不把 `memory_summary` 暴露给前端 API
+- 不把压缩摘要经 WebSocket 流式推给用户
 
 ## 10. 实现顺序（计划阶段再拆任务）
 
