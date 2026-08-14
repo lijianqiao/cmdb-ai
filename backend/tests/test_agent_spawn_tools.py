@@ -7,11 +7,12 @@
 """
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from sqlalchemy.ext.asyncio import (
@@ -30,6 +31,8 @@ from app.agent.spawn import (
     SpawnRejectedError,
 )
 from app.agent.spawn_tools import (
+    ORCHESTRATION_TOOL_NAMES,
+    SPAWN_PRIMITIVE_TOOL_NAMES,
     SPAWN_TOOL_NAMES,
     build_spawn_tool_dispatcher,
     spawn_tool_schemas,
@@ -80,10 +83,21 @@ def _make_receipt(
 
 
 @dataclass
+class _ChildScript:
+    """按 spawn 顺序脚本化每个 child 的终态输出。"""
+
+    result_summary: str | None = None
+    status: Literal["COMPLETED", "FAILED"] = "COMPLETED"
+
+
+@dataclass
 class FakeSpawnManager:
     """记录 spawn 参数并脚本化子 Agent 生命周期。"""
 
+    max_concurrent_children: int = 5
+    scripts: list[_ChildScript] = field(default_factory=list)
     spawn_kwargs: dict[str, Any] = field(default_factory=dict)
+    spawn_kwargs_history: list[dict[str, Any]] = field(default_factory=list)
     sent_inputs: list[tuple[str, str]] = field(default_factory=list)
     _receipts: dict[str, ChildReceipt] = field(default_factory=dict)
     _session_receipts: dict[int, list[str]] = field(default_factory=dict)
@@ -115,6 +129,7 @@ class FakeSpawnManager:
             "budget": budget,
             "fork_mode": fork_mode,
         }
+        self.spawn_kwargs_history.append(dict(self.spawn_kwargs))
         if self.spawn_raises is not None:
             raise self.spawn_raises
         child_id = f"child-{self._next_index}"
@@ -139,13 +154,19 @@ class FakeSpawnManager:
         if self.wait_raises is not None:
             raise self.wait_raises
         receipt = self._receipts[child_id]
+        index = int(child_id.removeprefix("child-"))
+        script = (
+            self.scripts[index]
+            if index < len(self.scripts)
+            else _ChildScript(result_summary="子任务完成摘要")
+        )
         completed = _make_receipt(
             child_id=child_id,
             session_id=receipt.session_id,
             role=receipt.role,
             task_brief=receipt.task_brief,
-            status="COMPLETED",
-            result_summary="子任务完成摘要",
+            status=script.status,
+            result_summary=script.result_summary,
         )
         self._receipts[child_id] = completed
         return completed
@@ -200,6 +221,115 @@ def test_spawn_schema_exposes_only_server_controlled_arguments() -> None:
 def test_spawn_tool_names_match_schemas() -> None:
     names = {item["function"]["name"] for item in spawn_tool_schemas()}
     assert names == set(SPAWN_TOOL_NAMES)
+
+
+def test_spawn_primitives_and_orchestration_tools_are_exposed_separately() -> None:
+    """五原语与两编排工作流应分别登记并合并为七工具全集。"""
+    assert SPAWN_PRIMITIVE_TOOL_NAMES == {
+        "spawn_agent",
+        "wait_agent",
+        "send_input",
+        "list_agents",
+        "close_agent",
+    }
+    assert ORCHESTRATION_TOOL_NAMES == {
+        "classify_documents",
+        "investigate_root_cause",
+    }
+    assert SPAWN_TOOL_NAMES == SPAWN_PRIMITIVE_TOOL_NAMES | ORCHESTRATION_TOOL_NAMES
+    assert {item["function"]["name"] for item in spawn_tool_schemas()} == SPAWN_TOOL_NAMES
+
+
+def test_orchestration_tool_schemas_use_strict_workflow_arguments() -> None:
+    """编排工具 schema 不得暴露 session_id、模型或预算等服务端字段。"""
+    schemas = {item["function"]["name"]: item for item in spawn_tool_schemas()}
+    classify_params = schemas["classify_documents"]["function"]["parameters"]
+    root_cause_params = schemas["investigate_root_cause"]["function"]["parameters"]
+    assert classify_params["properties"]["documents"]["minItems"] == 2
+    assert root_cause_params["properties"]["incident_context"]["minLength"] == 1
+    forbidden = {"session_id", "model", "budget", "tools_allowlist"}
+    for tool_name in ORCHESTRATION_TOOL_NAMES:
+        parameters = schemas[tool_name]["function"]["parameters"]
+        assert forbidden.isdisjoint(parameters.get("properties", {}))
+
+
+def _classification_json(
+    document_id: int,
+    *,
+    confidence: float = 0.95,
+    needs_review: bool = False,
+    category: str = "网络",
+) -> str:
+    return (
+        f'{{"document_id":{document_id},"recommended_category":"{category}",'
+        f'"confidence":{confidence},"needs_review":{str(needs_review).lower()},"reason":"证据充分"}}'
+    )
+
+
+def _finding_json(branch: str) -> str:
+    return (
+        f'{{"branch":"{branch}","hypothesis":"网络抖动","confidence":0.6,'
+        '"evidence":["探测记录"],"gaps":["缺少变更日志"],"next_checks":["复查拓扑"]}'
+    )
+
+
+def _synthesis_json() -> str:
+    return (
+        '{"summary":"综合结论","likely_causes":["网络抖动"],'
+        '"evidence_gaps":["变更日志"],"recommended_next_steps":["观察"]}'
+    )
+
+
+async def test_spawn_dispatcher_runs_classify_documents_workflow(
+    fake_spawn_manager: FakeSpawnManager,
+) -> None:
+    """classify_documents 应走真实编排并返回 JSON outcome。"""
+    fake_spawn_manager.scripts = [
+        _ChildScript(result_summary=_classification_json(1, category="网络")),
+        _ChildScript(result_summary=_classification_json(2, category="数据库", confidence=0.9)),
+    ]
+    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=9)
+    result = await dispatch(
+        "classify_documents",
+        {
+            "documents": [
+                {"document_id": 1, "title": "交换机", "file_path": "network/a.md"},
+                {"document_id": 2, "title": "数据库", "file_path": "db/b.md"},
+            ],
+            "allowed_categories": ["网络", "数据库"],
+        },
+    )
+    payload = json.loads(result.content)
+    assert result.control == "ok"
+    assert [item["document_id"] for item in payload["suggestions"]] == [1, 2]
+    assert fake_spawn_manager.spawn_kwargs_history[0]["session_id"] == 9
+
+
+async def test_spawn_dispatcher_runs_investigate_root_cause_workflow(
+    fake_spawn_manager: FakeSpawnManager,
+) -> None:
+    """investigate_root_cause 应走真实编排并返回 findings 与 synthesis。"""
+    fake_spawn_manager.scripts = [
+        _ChildScript(result_summary=_finding_json("branch-a")),
+        _ChildScript(result_summary=_finding_json("branch-b")),
+        _ChildScript(result_summary=_synthesis_json()),
+    ]
+    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=3)
+    result = await dispatch(
+        "investigate_root_cause",
+        {
+            "incident_context": "核心交换机抖动",
+            "branches": [
+                {"name": "branch-a", "objective": "核查监控历史"},
+                {"name": "branch-b", "objective": "核查拓扑依赖"},
+            ],
+        },
+    )
+    payload = json.loads(result.content)
+    assert result.control == "ok"
+    assert len(payload["findings"]) == 2
+    assert payload["review"] is not None
+    assert payload["review"]["summary"] == "综合结论"
 
 
 def test_root_and_child_schemas_exclude_spawn_tools() -> None:

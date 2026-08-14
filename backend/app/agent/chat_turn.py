@@ -59,9 +59,12 @@ port_enable/port_disable 必须提供 interface_name。
 用中文向用户解释具体原因和下一步建议（如去 CMDB 补充厂商/凭据信息）。
 回答简洁、可操作；涉及风险操作时明确说明需要审批。
 简单查询（单设备在线状态、单次 CMDB/知识检索）由你直接调用只读工具，不要 Spawn。
-只有两个及以上彼此独立的调查任务时，才用 spawn_agent 创建只读子 Agent 并行取证；
-子 Agent 不得执行 HITL、设备变更或再次 Spawn。创建后必须 wait_agent 等待终态，
-再 close_agent 释放槽位，并把各子任务安全摘要汇总进最终回答。
+批量文档分类（至少 2 份）优先调用 classify_documents；多分支根因排查优先调用
+investigate_root_cause。单份文档归类或单分支排查禁止调用上述批量工作流。
+只有两个及以上彼此独立、且不满足上述工作流前置条件的并行调查任务时，
+才用 spawn_agent 创建只读子 Agent 并行取证；子 Agent 不得执行 HITL、设备变更或
+再次 Spawn。创建后必须 wait_agent 等待终态，再 close_agent 释放槽位，并把各子
+任务安全摘要汇总进最终回答。
 任何会改变设备状态的操作只能由你通过 device_control 经 HITL 发起，不得委派子 Agent。"""
 
 # settings 无专用 Agent 模型键；MODELS 默认 chat 登记键为 local-chat

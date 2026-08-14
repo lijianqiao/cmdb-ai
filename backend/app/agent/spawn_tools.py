@@ -6,17 +6,27 @@
 @Docs: 根 Agent 专用 Spawn 工具 schema 与安全 dispatcher。
 
 实现流程：
-1. 仅向根 Agent 暴露 spawn_agent、wait_agent、send_input、list_agents、close_agent 五个服务端受控工具。
-2. 模型只能指定角色与 task_brief；模型、工具白名单、预算由 SpawnManager 与角色目录决定。
-3. dispatcher 校验参数后调用 SpawnManager，回执文本只包含安全字段，不含凭据或内部配置。
+1. 向根 Agent 暴露五个 Spawn 原语与两个确定性编排工作流，共七个服务端受控工具。
+2. 模型只能指定角色、任务摘要或工作流领域参数；session_id、模型、工具白名单、
+   预算由 SpawnManager 与角色目录决定，不得由模型覆盖。
+3. dispatcher 校验参数后调用 SpawnManager 或 orchestration 工作流，回执只含安全字段。
 4. 与 tool_dispatch 分离，避免 spawn.py 与 tool_dispatch 形成循环导入。
 """
 
-from typing import Any
+from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from app.agent.loop import ToolDispatcher, ToolResult
+from app.agent.orchestration import (
+    DEFAULT_ROOT_CAUSE_BRANCHES,
+    BatchClassificationOutcome,
+    ClassificationDocument,
+    RootCauseBranch,
+    RootCauseOutcome,
+    classify_documents,
+    investigate_root_cause,
+)
 from app.agent.roles import RoleName
 from app.agent.spawn import (
     ChildNotFoundError,
@@ -32,7 +42,13 @@ SPAWN_TOOL_SCHEMA_VERSION = "t10-v1"
 SPAWN_PRIMITIVE_TOOL_NAMES: frozenset[str] = frozenset(
     {"spawn_agent", "wait_agent", "send_input", "list_agents", "close_agent"}
 )
-SPAWN_TOOL_NAMES: frozenset[str] = SPAWN_PRIMITIVE_TOOL_NAMES
+ORCHESTRATION_TOOL_NAMES: frozenset[str] = frozenset(
+    {"classify_documents", "investigate_root_cause"}
+)
+SPAWN_TOOL_NAMES: frozenset[str] = SPAWN_PRIMITIVE_TOOL_NAMES | ORCHESTRATION_TOOL_NAMES
+_WORKFLOW_VALIDATION_REASON = "工作流输入不满足执行条件，请修正参数后重试"
+_BATCH_OUTCOME_ADAPTER = TypeAdapter(BatchClassificationOutcome)
+_ROOT_CAUSE_OUTCOME_ADAPTER = TypeAdapter(RootCauseOutcome)
 _SAFE_ERROR_CLASSES: frozenset[str] = frozenset(
     {"model", "tool", "policy_reject", "infra"}
 )
@@ -73,6 +89,50 @@ class CloseAgentArgs(_Args):
     child_id: str = Field(min_length=1, max_length=64)
 
 
+class ClassifyDocumentsArgs(_Args):
+    """classify_documents 批量文档分类工作流参数。"""
+
+    documents: list[ClassificationDocument] = Field(min_length=2, max_length=50)
+    allowed_categories: list[str] = Field(default_factory=list, max_length=50)
+
+
+class InvestigateRootCauseArgs(_Args):
+    """investigate_root_cause 多分支根因排查工作流参数。"""
+
+    incident_context: str = Field(min_length=1, max_length=8000)
+    branches: list[RootCauseBranch] | None = Field(default=None, min_length=2, max_length=10)
+
+
+def _inline_json_schema_defs(parameters: dict[str, Any]) -> dict[str, Any]:
+    """
+    把 Pydantic $defs 内联进 parameters，便于 OpenAI 工具 schema 自包含。
+
+    Args:
+        parameters: model_json_schema 产出的 parameters 字典。
+
+    Returns:
+        去掉顶层 title/$defs 且已内联引用的 parameters。
+    """
+    parameters.pop("title", None)
+    defs = parameters.pop("$defs", None)
+    if not defs:
+        return parameters
+
+    def _resolve(node: Any) -> Any:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                def_name = ref.removeprefix("#/$defs/")
+                if def_name in defs:
+                    return _resolve(defs[def_name])
+            return {key: _resolve(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [_resolve(item) for item in node]
+        return node
+
+    return cast(dict[str, Any], _resolve(parameters))
+
+
 def _safe_receipt_text(receipt: ChildReceipt) -> str:
     """
     把 child 回执格式化为模型可读文本，仅含安全字段。
@@ -101,21 +161,21 @@ def spawn_tool_schemas() -> list[dict[str, Any]]:
     返回根 Agent 可用的 Spawn 工具 JSON Schema。
 
     Returns:
-        OpenAI 兼容的五个严格函数工具定义。
+        OpenAI 兼容的七个严格函数工具定义。
     """
     spawn_parameters = SpawnAgentArgs.model_json_schema()
     spawn_parameters.pop("title", None)
     spawn_defs = spawn_parameters.pop("$defs", None)
     if spawn_defs and "RoleName" in spawn_defs:
         spawn_parameters["properties"]["role"] = spawn_defs["RoleName"]
-    wait_parameters = WaitAgentArgs.model_json_schema()
-    wait_parameters.pop("title", None)
-    send_input_parameters = SendInputArgs.model_json_schema()
-    send_input_parameters.pop("title", None)
-    list_parameters = ListAgentsArgs.model_json_schema()
-    list_parameters.pop("title", None)
-    close_parameters = CloseAgentArgs.model_json_schema()
-    close_parameters.pop("title", None)
+    wait_parameters = _inline_json_schema_defs(WaitAgentArgs.model_json_schema())
+    send_input_parameters = _inline_json_schema_defs(SendInputArgs.model_json_schema())
+    list_parameters = _inline_json_schema_defs(ListAgentsArgs.model_json_schema())
+    close_parameters = _inline_json_schema_defs(CloseAgentArgs.model_json_schema())
+    classify_parameters = _inline_json_schema_defs(ClassifyDocumentsArgs.model_json_schema())
+    root_cause_parameters = _inline_json_schema_defs(
+        InvestigateRootCauseArgs.model_json_schema()
+    )
     return [
         {
             "type": "function",
@@ -168,6 +228,28 @@ def spawn_tool_schemas() -> list[dict[str, Any]]:
                     f"[{SPAWN_TOOL_SCHEMA_VERSION}] 关闭本会话内一个子 Agent 并释放并发槽。"
                 ),
                 "parameters": close_parameters,
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "classify_documents",
+                "description": (
+                    f"[{SPAWN_TOOL_SCHEMA_VERSION}] 批量文档分类（至少 2 份）；"
+                    "服务端负责分波并发、结果解析、复核与清理，仅返回只读建议。"
+                ),
+                "parameters": classify_parameters,
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "investigate_root_cause",
+                "description": (
+                    f"[{SPAWN_TOOL_SCHEMA_VERSION}] 多分支根因排查（至少 2 个分支）；"
+                    "服务端负责并行调查、复核与清理，仅返回只读建议。"
+                ),
+                "parameters": root_cause_parameters,
             },
         },
     ]
@@ -245,6 +327,37 @@ def build_spawn_tool_dispatcher(
                     send_args.message,
                 )
                 return ToolResult(control="ok", content=_safe_receipt_text(receipt))
+            if name == "classify_documents":
+                classify_args = ClassifyDocumentsArgs.model_validate(arguments)
+                batch_outcome = await classify_documents(
+                    manager,
+                    session_id=session_id,
+                    documents=classify_args.documents,
+                    allowed_categories=classify_args.allowed_categories,
+                )
+                return ToolResult(
+                    control="ok",
+                    content=_BATCH_OUTCOME_ADAPTER.dump_json(batch_outcome).decode("utf-8"),
+                )
+            if name == "investigate_root_cause":
+                root_cause_args = InvestigateRootCauseArgs.model_validate(arguments)
+                branches = (
+                    tuple(root_cause_args.branches)
+                    if root_cause_args.branches is not None
+                    else DEFAULT_ROOT_CAUSE_BRANCHES
+                )
+                root_cause_outcome = await investigate_root_cause(
+                    manager,
+                    session_id=session_id,
+                    incident_context=root_cause_args.incident_context,
+                    branches=branches,
+                )
+                return ToolResult(
+                    control="ok",
+                    content=_ROOT_CAUSE_OUTCOME_ADAPTER.dump_json(root_cause_outcome).decode(
+                        "utf-8"
+                    ),
+                )
             if name == "list_agents":
                 ListAgentsArgs.model_validate(arguments)
                 receipts = await manager.list_agents(session_id)
@@ -264,6 +377,11 @@ def build_spawn_tool_dispatcher(
             )
         except SpawnRejectedError as exc:
             return ToolResult(control="rejected", content=_spawn_rejected_message(exc))
+        except ValueError:
+            return ToolResult(
+                control="clarification",
+                content=_WORKFLOW_VALIDATION_REASON,
+            )
         except ChildNotFoundError:
             return ToolResult(
                 control="failed",

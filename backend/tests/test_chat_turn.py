@@ -45,8 +45,52 @@ async def test_root_ops_system_prompt_mentions_spawn_policy() -> None:
 
     assert "spawn_agent" in ROOT_OPS_SYSTEM_PROMPT
     assert "wait_agent" in ROOT_OPS_SYSTEM_PROMPT
+    assert "classify_documents" in ROOT_OPS_SYSTEM_PROMPT
+    assert "investigate_root_cause" in ROOT_OPS_SYSTEM_PROMPT
     assert "不要 Spawn" in ROOT_OPS_SYSTEM_PROMPT
     assert "device_control" in ROOT_OPS_SYSTEM_PROMPT
+
+
+async def test_chat_turn_passes_orchestration_tools_in_production_schema(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """生产 chat_turn 首次模型请求应携带编排与 send_input 工具 schema。"""
+    from app.agent.chat_turn import run_chat_turn
+
+    session_id = await _make_session(db_session, test_user.id)
+    test_hub = AgentWsHub()
+    ws = FakeWebSocket()
+    await test_hub.connect(session_id, ws)  # type: ignore[arg-type]
+
+    captured_tools: list[dict[str, Any]] = []
+
+    async def fake_chat(model_key: str, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        if not captured_tools:
+            captured_tools.extend(kwargs.get("tools") or [])
+        return ChatResult(
+            content="好的",
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    await append_user_message(db_session, session_id, "你好")
+    outcome = await run_chat_turn(
+        db_session,
+        session_id=session_id,
+        actor_user_id=test_user.id,
+        chat_fn=fake_chat,
+        hub_instance=test_hub,
+    )
+    await db_session.commit()
+
+    assert outcome.reason == "final_answer"
+    tool_names = {item["function"]["name"] for item in captured_tools}
+    assert "classify_documents" in tool_names
+    assert "investigate_root_cause" in tool_names
+    assert "send_input" in tool_names
 
 _SENSITIVE_KEYS = frozenset({"message", "command", "command_name", "password", "credential"})
 
