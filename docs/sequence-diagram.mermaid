@@ -206,3 +206,67 @@ sequenceDiagram
     API->>AL: log(db, current_user.id, "create_user", "user:{id}", "创建用户: {username}", ip)
     AL->>DB: INSERT INTO audit_logs
     API-->>C: 201 {user}
+
+%% ===== 6. Agent 会话快照恢复 + WebSocket 实时加速 =====
+sequenceDiagram
+    participant C as Client
+    participant API as AgentSessionsAPI
+    participant WS as AgentWsHub
+    participant DB as Database
+
+    C->>API: GET /api/v1/agent/sessions/{id}/snapshot
+    API->>DB: 根消息 cursor 分页 + 非终态 HITL + 子 Agent 摘要
+    DB-->>API: AgentSessionSnapshot
+    API-->>C: 200 snapshot（刷新/重连恢复来源）
+    C->>WS: WS /api/v1/ws/agent/{id}（鉴权后）
+    Note over C,WS: 快照加载完成后再连 WS；WS 只加速增量
+    WS-->>C: assistant_delta / tool_call / hitl_* / spawn_* / turn_done
+
+%% ===== 7. HITL 执行与 UNKNOWN 恢复 =====
+sequenceDiagram
+    participant U as User
+    participant API as HitlAPI
+    participant Exec as HitlExecutionService
+    participant DB as Database
+    participant Dev as DeviceExecutor
+
+    U->>API: POST /hitl/proposals/{id}/decide {approve}
+    API->>DB: PENDING → APPROVED; COMMIT
+    API->>Exec: execute_approved_proposal
+    Exec->>DB: 策略复检 + 认领 EXECUTING; COMMIT
+    Exec->>Dev: 外部执行（已提交 EXECUTING 后）
+    alt 执行成功
+        Dev-->>Exec: 结果
+        Exec->>DB: EXECUTING → EXECUTED
+    else 失败或进程崩溃
+        Exec->>DB: EXECUTING → UNKNOWN
+        Note over U: 不自动重试；管理员先查真实设备状态
+        U->>API: POST /resolve-unknown {confirm_executed|allow_retry}
+        alt confirm_executed
+            API->>DB: UNKNOWN → EXECUTED
+        else allow_retry
+            API->>DB: UNKNOWN → APPROVED
+            U->>API: POST /retry
+            API->>Exec: 再次 execute_approved_proposal
+        end
+    end
+
+%% ===== 8. 根 Agent 自动 Spawn 编排 =====
+sequenceDiagram
+    participant U as User
+    participant Root as Root Agent
+    participant SM as SpawnManager
+    participant C1 as 子 Agent(只读)
+    participant C2 as 子 Agent(只读)
+
+    U->>Root: 多数据源并行取证需求
+    Root->>SM: spawn_agent(investigator, task_brief#1)
+    Root->>SM: spawn_agent(investigator, task_brief#2)
+    par 只读工具并行
+        SM->>C1: 角色目录 allowlist（无 HITL/写操作）
+        SM->>C2: 角色目录 allowlist（无 HITL/写操作）
+    end
+    Root->>SM: wait_agent(全部)
+    SM-->>Root: 各 ChildReceipt.result_summary
+    Root->>SM: close_agent(全部)
+    Root-->>U: 汇总摘要

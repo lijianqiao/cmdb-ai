@@ -383,20 +383,35 @@ sequenceDiagram
     Root-->>U: 根因假设 + 建议(可能带 notify)
 ```
 
+**根 Agent 自动编排**（`ROOT_OPS_SYSTEM_PROMPT` + `chat_turn.py`）：当根循环判断存在两个及以上彼此独立的调查任务时，自动执行 `spawn_agent → wait_agent → 汇总 → close_agent`；简单查询由根 Agent 直接调用只读工具，不 spawn。子 Agent **仅持有角色目录中的只读工具**（`kb_explorer` / `ops_explorer` / `investigator` / `reviewer` 等），不得执行 HITL、设备变更或再次 spawn。
+
 **反模式红线**（照抄 [guide.md 7.8](./guide.md#78-反模式)，本项目额外强调）：单个文档分类、单个设备状态查询、告警文案生成——这些是单次动作，禁止 spawn；只有批量并行或多数据源独立取证才允许。
 
 ### 6. HITL 状态机
 
 ```text
-PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次）
-   └────reject───> REJECTED
+PENDING ──approve──> APPROVED ──claim──> EXECUTING ──success──> EXECUTED
+   └────reject───> REJECTED                      └─failure/crash──> UNKNOWN
+UNKNOWN ──confirm_executed──> EXECUTED（人工确认）
+UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 ```
 
-对应 `HitlProposal.status`，硬规则照抄 [guide.md 5.3](./guide.md#53-hitl-状态机)：
+对应 `HitlProposal.status`，硬规则：
 
-- 只有 `PENDING` 可决定；`APPROVED` 只执行一次（幂等键 = `proposal.id`）
+- 只有 `PENDING` 可审批决定；`REJECTED` / `EXECUTED` 为终态
+- **策略在每次认领执行前复检**：`execute_approved_proposal` 经 `_preflight_and_claim` 在同一短事务内复检命令策略与凭据，通过后才认领 `EXECUTING`；预检失败（命令不存在、动态凭据缺失）不认领，提案保持 `APPROVED`
+- **`EXECUTING` 先提交**：认领 `EXECUTING` 的事务提交后，外部执行器（Scrapli / notify）才启动；执行器内可观测已提交的 `EXECUTING` 状态
+- **`UNKNOWN` 不自动重试**：执行失败、进程崩溃或启动恢复（`reconcile_executing_proposals` 将遗留 `EXECUTING` 批量转 `UNKNOWN`）后，系统不会自动再次执行；须管理员人工处置（见 [guide.md §5.3.1](./guide.md#531-管理员处置-unknown-提案本项目)）
 - 待审批期间，`action_payload` 中的敏感字段不通过 WebSocket 回传给发起对话的 Agent 上下文，Agent 只收到"提案已创建，等待审批"的摘要
-- 新增权限码 `agent:hitl_approve`，只有持有该权限的用户能操作 `PENDING → APPROVED/REJECTED` 的状态转移（复用现有 RBAC，不新建权限体系）
+- 新增权限码 `agent:hitl_approve`，只有持有该权限的用户能操作 `PENDING → APPROVED/REJECTED`、`UNKNOWN` 人工处置，以及 `POST /api/v1/hitl/proposals/{id}/retry`（复用现有 RBAC，不新建权限体系）
+
+**API 路径**（与代码一致）：
+
+| 操作 | 方法 | 路径 |
+| :--- | :--- | :--- |
+| 审批决定 | `POST` | `/api/v1/hitl/proposals/{id}/decide` |
+| 重试执行（`APPROVED`） | `POST` | `/api/v1/hitl/proposals/{id}/retry` |
+| 处置 `UNKNOWN` | `POST` | `/api/v1/hitl/proposals/{id}/resolve-unknown` |
 
 **执行器分两类**（对应 `action_type`）：
 
@@ -423,15 +438,26 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 
 **Session 最小模型**直接对应 [guide.md 6.1](./guide.md#61-session-最小模型)：`AgentSession` + `AgentMessage` 承担 `messages[]`（完整审计历史，不删除）；`meta` 中的"授权集合/预算/子 Agent 注册表"不塞进 JSON 字段，而是用独立的 `AgentRegistry` 表——这样查询和 GC 更容易，也符合 guide.md"注册表不依赖对话正文"的要求（防止压缩后对话文本里丢了 `child_id`，注册表仍占槽）。
 
+**Turn token 串行化**：`AgentSession.active_turn_token` 保证同一会话同一时刻只有一个活跃 turn。`POST /api/v1/agent/sessions/{session_id}/messages` 在短事务内认领 token 后才启动 `run_chat_turn`；进程启动时 `recover_active_turns` 清空遗留 token，避免崩溃后永久锁死。
+
+**快照恢复 vs WebSocket 加速**：
+
+- **快照是刷新/重连的恢复来源**：`GET /api/v1/agent/sessions/{session_id}/snapshot` 返回根消息 cursor 分页、非终态 HITL 提案摘要、子 Agent 注册表摘要；前端在选中会话、页面刷新或 WebSocket 重连前先拉快照，再建立 WS 接收增量
+- **WebSocket 是实时加速**：`WS /api/v1/ws/agent/{session_id}` 推送 `assistant_delta`、`tool_call`、`hitl_*`、`spawn_*`、`turn_done` 等事件，不替代快照的权威状态
+
 **压缩策略**（已实现于 `app/agent/compaction.py`）：**审计历史与模型窗口分离**——`agent_messages` 表保留全量原文，不删除；送入模型的窗口由 `build_model_history` 组装。根会话（`agent_id is None`）在每次用户可见模型调用前，`run_loop` 调用 `ensure_root_compaction`：估计 token 超阈值（`COMPACT_TOKEN_THRESHOLD`）时，把窗口外旧消息送独立摘要器（直接 `llm.chat`，不走 WebSocket 的 `chat_fn`）；摘要写入 `AgentSession.memory_summary`，原文从 `compacted_through_message_id` 之后截取最近 `COMPACT_RECENT_RAW_MESSAGES` 条；无摘要时 fallback 最近 `COMPACT_FALLBACK_MAX_MESSAGES` 条。运维根指令（`ROOT_OPS_SYSTEM_PROMPT`）每轮由 `build_model_history` 从代码注入，永不进入摘要请求；子 Agent 循环不压缩。压缩失败或超预算则跳过，本轮继续用 fallback 窗口。对应 [guide.md 6.3](./guide.md#63-compaction-规范对齐-claude--openai)"System / 根指令永不被摘要吞掉"。
+
+**assistant/tool 完整消息单元与工具感知压缩边界**：`_message_units` 将 `assistant`（含 `tool_calls`）与其全部 `tool` 结果绑定为一个不可分割单元；`_safe_compaction_cut_index` 只在单元边界截断，禁止把孤立的 `tool` 结果留在窗口开头（`build_model_history` 亦会丢弃窗口开头无对应 `assistant` 的 `tool` 行）。
 
 **WebSocket 契约**：单一端点 `/api/v1/ws/agent/{session_id}`，鉴权复用现有 `access_token`（首帧校验）。消息用判别式 JSON：
 
 ```text
-{"type": "assistant_delta" | "tool_call" | "hitl_pending" | "hitl_resolved" | "monitor_alert" | "error", "payload": {...}}
+{"type": "assistant_delta" | "tool_call" | "hitl_pending" | "hitl_resolved" | "hitl_execution_failed" | "spawn_child" | "spawn_resolved" | "monitor_alert" | "turn_done" | "error", "payload": {...}}
 ```
 
-前端一条 WebSocket 连接承载 chat 流式输出、HITL 状态变化、监控告警三类事件，不额外开连接。
+前端一条 WebSocket 连接承载 chat 流式输出、HITL 状态变化、子 Agent 生命周期、监控告警等事件，不额外开连接。
+
+**每连接 queue/writer 隔离慢客户端**（`app/agent/ws_hub.py`）：每个 WebSocket 连接拥有独立有界发送队列与 writer 任务；`broadcast` 只做 `put_nowait`，不串行等待网络。队列满或单次发送超时时仅清理该慢连接，不影响同会话其他 peer。
 
 **前端页面**：`OpsAssistantPage.tsx`，组件划分沿用现有 `frontend/src/components/{module}/` 惯例：
 

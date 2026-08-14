@@ -165,6 +165,14 @@ Windows 必须通过 `main.py` 启动，以使用与异步 psycopg 兼容的 Sel
 
 单实例保持一个异步 worker，使应用内账户/IP 限流全局一致。需要多进程或多实例时，必须先在共享 API 网关/Redis 层配置等价认证限流。
 
+```text
+当前进程内 SpawnManager 只支持单 Uvicorn worker 和单应用实例。
+配置 WEB_CONCURRENCY>1 或 UVICORN_WORKERS>1 时应用拒绝启动。
+多实例部署需要未来引入分布式任务所有权，本版本不支持。
+```
+
+应用启动时 `validate_single_worker_environment` 会检查 `WEB_CONCURRENCY` 与 `UVICORN_WORKERS` 环境变量；任一值大于 1 即抛出 `RuntimeError` 并拒绝启动。Gunicorn 部署时同样须保持 `--workers 1`。
+
 **定时清理 refresh 历史（建议每小时）：**
 
 ```bash

@@ -243,6 +243,17 @@ PENDING ──approve──> APPROVED ──resume──> EXECUTED（仅一次�
 
 硬规则：只有 PENDING 可决定；APPROVED 只执行一次；待审批时敏感结果**不回传模型**；落盘原子写。
 
+#### 5.3.1 管理员处置 UNKNOWN 提案（本项目）
+
+当 HITL 提案进入 `UNKNOWN`（执行中断、外部通道超时或进程崩溃后启动恢复），系统**不会自动重试**。持有 `agent:hitl_approve` 权限的管理员须在运维助手消息流中的 `HitlApprovalCard` 或 API 人工处置：
+
+1. **先核实真实设备/通知状态**（必做）：登录目标设备或查阅监控系统，确认该提案对应的操作（重启、端口变更、通知发送等）在物理世界是否已生效。**在未完成此检查前，禁止点击「确认已执行」。**
+2. **若操作已在设备上生效**：调用 `POST /api/v1/hitl/proposals/{id}/resolve-unknown`，body `{"resolution": "confirm_executed"}`（或前端「确认已执行」）。系统将提案标记为 `EXECUTED` 并写入 `executed_at`，仅做状态对齐，不会再次下发命令。
+3. **若操作未生效且策略仍允许执行**：调用同一接口，body `{"resolution": "allow_retry"}`（或前端「允许重试」）。提案回到 `APPROVED`；管理员或 Agent 再调用 `POST /api/v1/hitl/proposals/{id}/retry` 触发重新执行（动态凭据资产须附带本次密码）。
+4. **若策略已变更或不应再执行**：保持 `UNKNOWN` 或走业务流程关闭会话；不要误点「确认已执行」。
+
+`UNKNOWN` 状态下 Agent 循环收到 `HitlResumeError`，不会静默重试；用户侧应看到明确的中文状态说明。
+
 ### 5.4 沙箱选型（Anthropic）
 
 | 方案 | 隔离强度 | 适用 |
