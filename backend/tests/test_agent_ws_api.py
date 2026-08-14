@@ -8,6 +8,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from unittest.mock import AsyncMock
 
 import pytest
@@ -35,8 +36,16 @@ type Headers = dict[str, str]
 @pytest_asyncio.fixture(autouse=True)
 async def _clear_ws_hub() -> AsyncIterator[None]:
     """每个用例前后清空进程内 Hub，避免跨测串扰。"""
+    for peers in hub._connections.values():
+        for peer in peers.values():
+            peer.writer_task.cancel()
     hub._connections.clear()
     yield
+    for peers in list(hub._connections.values()):
+        for peer in peers.values():
+            peer.writer_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await peer.writer_task
     hub._connections.clear()
 
 

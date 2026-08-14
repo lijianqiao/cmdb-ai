@@ -6,6 +6,8 @@
 @Docs: 验证 Agent WebSocket Hub 按会话隔离广播，以及 HITL 发布器只推安全摘要。
 """
 
+import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -41,6 +43,16 @@ _SAFE_SUMMARY_KEYS = frozenset(
 _SENSITIVE_KEYS = frozenset({"message", "command", "command_name", "password"})
 
 
+async def wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> None:
+    """轮询直到谓词为真或超时。"""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("wait_until 超时")
+
+
 class FakeWebSocket:
     """记录 send_json 调用的假 WebSocket，供 Hub 单测使用。"""
 
@@ -50,6 +62,20 @@ class FakeWebSocket:
 
     async def send_json(self, data: dict[str, Any]) -> None:
         """保存一份快照，避免后续对象变化影响断言。"""
+        self.sent.append(dict(data))
+
+
+class BlockingWebSocket:
+    """send_json 永久阻塞的假 WebSocket，用于模拟慢连接。"""
+
+    def __init__(self) -> None:
+        """初始化阻塞门闩与空发送记录。"""
+        self._gate = asyncio.Event()
+        self.sent: list[dict[str, Any]] = []
+
+    async def send_json(self, data: dict[str, Any]) -> None:
+        """等待门闩（默认永不打开），模拟网络发送卡住。"""
+        await self._gate.wait()
         self.sent.append(dict(data))
 
 
@@ -71,6 +97,7 @@ async def test_broadcast_only_reaches_same_session() -> None:
     await hub.broadcast(1, message)
 
     expected = {"type": "assistant_delta", "payload": {"text": "你好", "done": False}}
+    await wait_until(lambda: len(ws_a1.sent) == 1 and len(ws_a2.sent) == 1)
     assert ws_a1.sent == [expected]
     assert ws_a2.sent == [expected]
     assert ws_b.sent == []
@@ -113,7 +140,7 @@ async def test_ws_hitl_publisher_maps_hitl_pending_with_safe_payload() -> None:
         },
     )
 
-    assert len(ws.sent) == 1
+    await wait_until(lambda: len(ws.sent) == 1)
     envelope = ws.sent[0]
     assert envelope["type"] == "hitl_pending"
     payload = envelope["payload"]
@@ -147,7 +174,7 @@ async def test_ws_hitl_publisher_maps_all_hitl_event_types() -> None:
                 "command_name": "port_disable",
             },
         )
-        assert len(ws.sent) == 1
+        await wait_until(lambda: len(ws.sent) == 1)
         assert ws.sent[0]["type"] == event_type
         assert "command" not in ws.sent[0]["payload"]
         assert "command_name" not in ws.sent[0]["payload"]
@@ -193,7 +220,7 @@ async def test_ws_hitl_publisher_allows_recovery_fields() -> None:
         },
     )
 
-    assert len(ws.sent) == 1
+    await wait_until(lambda: len(ws.sent) == 1)
     payload = ws.sent[0]["payload"]
     assert payload["status_reason"] == "retry_authorized"
     assert payload["execution_started_at"] == "2026-08-14T04:00:00+00:00"
@@ -235,6 +262,7 @@ async def test_buffered_publisher_defers_events_until_flush() -> None:
     assert ws.sent == []
 
     await publisher.flush()
+    await wait_until(lambda: len(ws.sent) == 2)
     assert [item["type"] for item in ws.sent] == ["hitl_pending", "hitl_execution_failed"]
     # 事件仍要过安全键过滤
     assert all(set(item["payload"].keys()) <= _SAFE_SUMMARY_KEYS for item in ws.sent)
@@ -279,7 +307,7 @@ async def test_ws_spawn_publisher_whitelists_child_receipt() -> None:
 
     await publisher.publish_child_status(receipt)
 
-    assert len(websocket.sent) == 1
+    await wait_until(lambda: len(websocket.sent) == 1)
     envelope = websocket.sent[0]
     assert envelope["type"] == "child_status"
     payload = envelope["payload"]
@@ -296,3 +324,50 @@ async def test_ws_spawn_publisher_whitelists_child_receipt() -> None:
     assert "budget" not in payload
     assert "artifacts" not in payload
     assert payload["child_id"] == "child-secret"
+
+
+async def test_slow_peer_does_not_block_fast_peer() -> None:
+    """慢连接阻塞发送时不应拖住 broadcast，快连接仍能及时收到消息。"""
+    hub = AgentWsHub(queue_size=2, send_timeout_seconds=0.05)
+    slow = BlockingWebSocket()
+    fast = FakeWebSocket()
+    await hub.connect(1, slow)  # type: ignore[arg-type]
+    await hub.connect(1, fast)  # type: ignore[arg-type]
+
+    await asyncio.wait_for(
+        hub.broadcast(
+            1,
+            AgentWsServerMessage(
+                type="assistant_delta",
+                payload={"text": "x", "done": False},
+            ),
+        ),
+        timeout=0.01,
+    )
+    await wait_until(lambda: len(fast.sent) == 1)
+    assert fast.sent[0]["payload"]["text"] == "x"
+
+
+async def test_full_queue_disconnects_slow_peer_and_disconnect_is_idempotent() -> None:
+    """队列满时移除慢连接，快连接继续收消息；重复 disconnect 不抛异常。"""
+    hub = AgentWsHub(queue_size=1, send_timeout_seconds=10.0)
+    slow = BlockingWebSocket()
+    fast = FakeWebSocket()
+    await hub.connect(1, slow)  # type: ignore[arg-type]
+    await hub.connect(1, fast)  # type: ignore[arg-type]
+    slow_peer = hub._connections[1][slow]  # type: ignore[index]
+
+    message = AgentWsServerMessage(
+        type="assistant_delta",
+        payload={"text": "a", "done": False},
+    )
+    for _ in range(3):
+        await hub.broadcast(1, message)
+        await asyncio.sleep(0)  # 让给 writer，快连接排空队列避免误触 QueueFull
+
+    await wait_until(lambda: slow not in hub._connections.get(1, {}))
+    await wait_until(lambda: len(fast.sent) == 3)
+    await wait_until(lambda: slow_peer.writer_task.done())
+
+    await hub.disconnect(1, slow)  # type: ignore[arg-type]
+    await hub.disconnect(1, slow)  # type: ignore[arg-type]

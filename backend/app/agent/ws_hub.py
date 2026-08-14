@@ -7,14 +7,18 @@
 
 实现流程：
 1. AgentWsHub 用 session_id → WebSocket 集合管理连接；broadcast 只发给同一会话的连接。
-2. 发送失败或已断开的连接从集合中剔除，避免断线后反复报错（路由层仍应主动 disconnect）。
-3. WsHitlEventPublisher 实现 T10 HitlEventPublisher Protocol：只接受 hitl_* 事件类型，
+2. 每个连接有独立有界发送队列与 writer 任务；broadcast 只做 put_nowait，不串行等待网络。
+3. 队列满或单次发送超时时只清理慢连接，不影响同会话其他 peer。
+4. WsHitlEventPublisher 实现 T10 HitlEventPublisher Protocol：只接受 hitl_* 事件类型，
    并把 payload 过滤到 ProposalSafeSummary 白名单后再 broadcast。
-4. 模块级 hub 单例供后续 API / chat_turn / HITL 注入，本任务不挂 HTTP/WS 路由。
+5. 模块级 hub 单例供后续 API / chat_turn / HITL 注入，本任务不挂 HTTP/WS 路由。
 """
 
+import asyncio
 from collections import defaultdict
 from collections.abc import Mapping
+from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
 
@@ -52,6 +56,14 @@ _CHILD_SAFE_KEYS = frozenset(
 )
 
 
+@dataclass(slots=True)
+class _Peer:
+    """单个 WebSocket 连接的发送队列与 writer 任务。"""
+
+    queue: asyncio.Queue[AgentWsServerMessage]
+    writer_task: asyncio.Task[None]
+
+
 def _child_safe_payload(receipt: ChildReceipt) -> dict[str, Any]:
     """从 ChildReceipt 提取 WS 白名单字段。"""
 
@@ -72,60 +84,110 @@ def _child_safe_payload(receipt: ChildReceipt) -> dict[str, Any]:
 class AgentWsHub:
     """进程内按会话隔离的 WebSocket 连接表与广播器。"""
 
-    def __init__(self) -> None:
-        """初始化空连接表。"""
-        self._connections: dict[int, set[WebSocket]] = defaultdict(set)
+    def __init__(
+        self,
+        queue_size: int = 128,
+        send_timeout_seconds: float = 5.0,
+    ) -> None:
+        """
+        初始化空连接表与发送参数。
+
+        Args:
+            queue_size: 每连接有界队列容量，默认 128
+            send_timeout_seconds: 单次 send_json 超时秒数，默认 5
+        """
+        self._queue_size = queue_size
+        self._send_timeout_seconds = send_timeout_seconds
+        self._connections: dict[int, dict[WebSocket, _Peer]] = defaultdict(dict)
 
     async def connect(self, session_id: int, websocket: WebSocket) -> None:
         """
-        将 WebSocket 注册到指定会话。
+        将 WebSocket 注册到指定会话并启动 writer 任务。
 
         Args:
             session_id: Agent 会话主键
             websocket: 已接受的 WebSocket 连接
         """
-        self._connections[session_id].add(websocket)
+        queue: asyncio.Queue[AgentWsServerMessage] = asyncio.Queue(maxsize=self._queue_size)
+        writer_task = asyncio.create_task(self._writer(session_id, websocket, queue))
+        self._connections[session_id][websocket] = _Peer(queue=queue, writer_task=writer_task)
 
-    async def disconnect(self, session_id: int, websocket: WebSocket) -> None:
+    async def disconnect(
+        self,
+        session_id: int,
+        websocket: WebSocket,
+        *,
+        from_writer: bool = False,
+    ) -> None:
         """
-        从指定会话注销 WebSocket；集合为空时清理键。
+        从指定会话注销 WebSocket 并结束 writer 任务。
 
         Args:
             session_id: Agent 会话主键
             websocket: 要移除的连接
+            from_writer: writer 任务自行触发清理时为 True，避免 cancel/await 自身
         """
         peers = self._connections.get(session_id)
         if peers is None:
             return
-        peers.discard(websocket)
+        peer = peers.pop(websocket, None)
         if not peers:
             self._connections.pop(session_id, None)
+        if peer is None:
+            return
+        if not from_writer:
+            peer.writer_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await peer.writer_task
 
     async def broadcast(self, session_id: int, message: AgentWsServerMessage) -> None:
         """
-        向同一 session_id 下的全部连接推送 JSON 信封。
+        向同一 session_id 下的全部连接入队 JSON 信封，不等待网络发送完成。
 
         Args:
             session_id: 目标会话
             message: 判别式服务端消息
         """
-        peers = list(self._connections.get(session_id, ()))
+        peers = self._connections.get(session_id)
         if not peers:
             return
-        data = message.model_dump()
-        stale: list[WebSocket] = []
-        for websocket in peers:
+        for websocket, peer in list(peers.items()):
             try:
-                # 测试替身可能没有 client_state；缺省视为仍可发送
                 state = getattr(websocket, "client_state", WebSocketState.CONNECTED)
                 if state != WebSocketState.CONNECTED:
-                    stale.append(websocket)
+                    asyncio.create_task(self.disconnect(session_id, websocket))
                     continue
-                await websocket.send_json(data)
+                peer.queue.put_nowait(message)
+            except asyncio.QueueFull:
+                asyncio.create_task(self.disconnect(session_id, websocket))
             except Exception:
-                stale.append(websocket)
-        for websocket in stale:
-            await self.disconnect(session_id, websocket)
+                asyncio.create_task(self.disconnect(session_id, websocket))
+
+    async def _writer(
+        self,
+        session_id: int,
+        websocket: WebSocket,
+        queue: asyncio.Queue[AgentWsServerMessage],
+    ) -> None:
+        """
+        从队列取出消息并发送到 WebSocket；失败时清理本连接。
+
+        Args:
+            session_id: 所属会话
+            websocket: 目标连接
+            queue: 有界发送队列
+        """
+        try:
+            while True:
+                message = await queue.get()
+                await asyncio.wait_for(
+                    websocket.send_json(message.model_dump(mode="json")),
+                    timeout=self._send_timeout_seconds,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await self.disconnect(session_id, websocket, from_writer=True)
 
 
 class WsHitlEventPublisher:
