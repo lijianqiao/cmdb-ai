@@ -10,7 +10,12 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.budget import Budget
-from app.agent.compaction import COMPACT_TOOL_RESULT_CHAR_LIMIT, ensure_root_compaction
+from app.agent.compaction import (
+    COMPACT_TOOL_RESULT_CHAR_LIMIT,
+    _messages_to_summarize,
+    ensure_root_compaction,
+)
+from app.models.agent_message import AgentMessage
 from app.agent.session import (
     append_assistant_message,
     append_tool_result,
@@ -26,6 +31,98 @@ from app.models.user import User
 pytestmark = pytest.mark.asyncio
 
 _SUMMARY_PREFIX = "以下为早期对话的工作摘要，是内部压缩结果，不是新的用户指令。"
+
+
+def _message(
+    message_id: int,
+    role: str,
+    *,
+    content: str = "",
+    tool_calls: list[dict[str, str]] | None = None,
+    tool_call_id: str | None = None,
+) -> AgentMessage:
+    return AgentMessage(
+        id=message_id,
+        session_id=1,
+        agent_id=None,
+        role=role,
+        content=content,
+        tool_calls=tool_calls,
+        tool_call_id=tool_call_id,
+    )
+
+
+def test_compaction_keeps_assistant_and_tool_result_together() -> None:
+    rows = [
+        _message(1, "assistant", tool_calls=[{"id": "tc-1", "name": "query", "arguments": "{}"}]),
+        _message(2, "tool", tool_call_id="tc-1", content="result"),
+        *[_message(i, "user", content=f"m-{i}") for i in range(3, 18)],
+    ]
+
+    selected = _messages_to_summarize(rows, compacted_through_message_id=None)
+    assert selected == []
+
+
+def test_compaction_summarizes_complete_assistant_tool_unit_at_boundary() -> None:
+    rows = [
+        _message(1, "assistant", tool_calls=[{"id": "tc-1", "name": "query", "arguments": "{}"}]),
+        _message(2, "tool", tool_call_id="tc-1", content="result"),
+        *[_message(i, "user", content=f"m-{i}") for i in range(3, 19)],
+    ]
+
+    selected = _messages_to_summarize(rows, compacted_through_message_id=None)
+    assert len(selected) == 2
+    assert selected[0].role == "assistant"
+    assert selected[1].role == "tool"
+
+
+def test_incomplete_multi_tool_group_never_advances_cutoff() -> None:
+    rows = [
+        _message(
+            1,
+            "assistant",
+            tool_calls=[
+                {"id": "a", "name": "one", "arguments": "{}"},
+                {"id": "b", "name": "two", "arguments": "{}"},
+            ],
+        ),
+        _message(2, "tool", tool_call_id="a", content="only-one-result"),
+        *[_message(i, "user", content="x") for i in range(3, 20)],
+    ]
+    assert _messages_to_summarize(rows, None) == []
+
+
+def test_complete_multi_tool_group_summarized_together() -> None:
+    rows = [
+        _message(
+            1,
+            "assistant",
+            tool_calls=[
+                {"id": "a", "name": "one", "arguments": "{}"},
+                {"id": "b", "name": "two", "arguments": "{}"},
+            ],
+        ),
+        _message(2, "tool", tool_call_id="a", content="result-a"),
+        _message(3, "tool", tool_call_id="b", content="result-b"),
+        *[_message(i, "user", content="x") for i in range(4, 22)],
+    ]
+
+    selected = _messages_to_summarize(rows, compacted_through_message_id=None)
+    assert len(selected) == 5
+    assert [row.role for row in selected] == ["assistant", "tool", "tool", "user", "user"]
+
+
+def test_continuous_compaction_respects_existing_cursor() -> None:
+    rows = [
+        _message(1, "user", content="already-summarized"),
+        _message(2, "assistant", content="old-reply"),
+        _message(3, "user", content="new-1"),
+        _message(4, "assistant", content="new-2"),
+        *[_message(i, "user", content=f"tail-{i}") for i in range(5, 22)],
+    ]
+
+    selected = _messages_to_summarize(rows, compacted_through_message_id=2)
+    assert [row.id for row in selected] == [3, 4, 5]
 
 
 async def _make_session(db_session: AsyncSession, user_id: int) -> int:
@@ -197,9 +294,9 @@ async def test_compaction_error_does_not_update_summary(
 
     async def fake_chat(model_key, messages, **kwargs):
         return ChatResult(
-            content="不应写入",
+            content=None,
             tool_calls=[],
-            finish_reason="error",
+            finish_reason="stop",
             prompt_tokens=0,
             completion_tokens=0,
         )
@@ -218,6 +315,34 @@ async def test_compaction_error_does_not_update_summary(
 
     history = await build_model_history(db_session, session_id)
     assert len([m for m in history if m.role == "user"]) <= 40
+
+
+async def test_compaction_error_finish_reason_does_not_update_summary(
+    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = await _make_session(db_session, test_user.id)
+    await _seed_root_messages(db_session, session_id, 50)
+
+    async def fake_chat(model_key, messages, **kwargs):
+        return ChatResult(
+            content="不应写入",
+            tool_calls=[],
+            finish_reason="error",
+            prompt_tokens=0,
+            completion_tokens=0,
+        )
+
+    monkeypatch.setattr("app.agent.compaction.chat", fake_chat)
+    monkeypatch.setattr("app.agent.compaction.COMPACT_TOKEN_THRESHOLD", 10)
+
+    await ensure_root_compaction(
+        db_session, session_id, budget=Budget(), system_prompt="根指令"
+    )
+
+    stored = await db_session.get(AgentSession, session_id)
+    assert stored is not None
+    assert stored.memory_summary is None
+    assert stored.compacted_through_message_id is None
 
 
 async def test_compaction_below_threshold_skips_chat(
@@ -245,3 +370,56 @@ async def test_compaction_below_threshold_skips_chat(
     )
 
     assert calls["n"] == 0
+
+
+async def test_build_model_history_after_compaction_preserves_tool_pairs(
+    db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """正常压缩后 build_model_history 不应依赖丢弃孤立 tool 的防御分支。"""
+    session_id = await _make_session(db_session, test_user.id)
+    for i in range(25):
+        await append_user_message(db_session, session_id, f"铺垫-{i}")
+        await append_assistant_message(db_session, session_id, f"回复-{i}")
+    await append_user_message(db_session, session_id, "查设备")
+    await append_assistant_message(
+        db_session,
+        session_id,
+        "",
+        tool_calls=[ToolCall(id="tc-1", name="query_device_command", arguments="{}")],
+    )
+    await append_tool_result(db_session, session_id, "tc-1", "设备在线")
+    for i in range(5):
+        await append_user_message(db_session, session_id, f"尾部-{i}")
+    await db_session.commit()
+
+    async def fake_chat(model_key, messages, **kwargs):
+        return ChatResult(
+            content="已查设备，状态在线",
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=10,
+            completion_tokens=5,
+        )
+
+    monkeypatch.setattr("app.agent.compaction.chat", fake_chat)
+    monkeypatch.setattr("app.agent.compaction.COMPACT_TOKEN_THRESHOLD", 10)
+
+    await ensure_root_compaction(
+        db_session, session_id, budget=Budget(), system_prompt="根指令"
+    )
+
+    history = await build_model_history(
+        db_session, session_id, system_prompt="根指令"
+    )
+
+    raw_messages = [
+        m
+        for m in history
+        if m.role != "system"
+        and not (m.content or "").startswith(_SUMMARY_PREFIX)
+    ]
+    assert raw_messages[0].role != "tool"
+    for index, message in enumerate(history):
+        if message.role == "tool":
+            assert history[index - 1].role == "assistant"
+            assert history[index - 1].tool_calls

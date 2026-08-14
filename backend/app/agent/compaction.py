@@ -94,16 +94,70 @@ def _row_to_chat_message(row: AgentMessage, *, for_summarizer: bool) -> ChatMess
     )
 
 
+def _message_units(rows: list[AgentMessage]) -> list[tuple[int, int]]:
+    """
+    将消息列表解析为完整单元，索引区间为左闭右开。
+
+    assistant+tool_calls 与其全部 tool 结果组成一个单元；不完整单元会截断后续解析。
+    """
+    units: list[tuple[int, int]] = []
+    index = 0
+    while index < len(rows):
+        row = rows[index]
+        if row.role != "assistant" or not row.tool_calls:
+            units.append((index, index + 1))
+            index += 1
+            continue
+
+        expected = {call["id"] for call in row.tool_calls}
+        found: set[str] = set()
+        end = index + 1
+        while end < len(rows) and rows[end].role == "tool":
+            tool_call_id = rows[end].tool_call_id
+            if tool_call_id is not None and tool_call_id in expected:
+                found.add(tool_call_id)
+            end += 1
+        if found != expected:
+            break
+        units.append((index, end))
+        index = end
+    return units
+
+
+def _safe_compaction_cut_index(rows: list[AgentMessage], recent_raw_count: int) -> int:
+    """
+    计算安全压缩切点：只推进到最后一个完整单元末尾。
+
+    Args:
+        rows: 按时间排序的全部消息。
+        recent_raw_count: 保留的最近原始消息条数。
+
+    Returns:
+        左闭右开切点索引；为 0 表示当前不能安全压缩。
+    """
+    if len(rows) <= recent_raw_count:
+        return 0
+    raw_target = len(rows) - recent_raw_count
+    cut = 0
+    for _unit_start, unit_end in _message_units(rows):
+        if unit_end <= raw_target:
+            cut = unit_end
+        else:
+            break
+    return cut
+
+
 def _messages_to_summarize(
     all_messages: list[AgentMessage],
     compacted_through_message_id: int | None,
 ) -> list[AgentMessage]:
-    if len(all_messages) <= COMPACT_RECENT_RAW_MESSAGES:
+    cut_index = _safe_compaction_cut_index(all_messages, COMPACT_RECENT_RAW_MESSAGES)
+    if cut_index == 0:
         return []
-    outside_recent = all_messages[:-COMPACT_RECENT_RAW_MESSAGES]
+    candidate = all_messages[:cut_index]
     return [
         row
-        for row in outside_recent
+        for row in candidate
         if compacted_through_message_id is None or row.id > compacted_through_message_id
     ]
 
@@ -176,7 +230,8 @@ async def ensure_root_compaction(
     summarizer_messages = _build_summarizer_messages(session, to_summarize)
     result = await chat("local-chat", summarizer_messages, stream=False, db=db)
 
-    if result.finish_reason == "error" or not (result.content or "").strip():
+    summary = result.content
+    if result.finish_reason == "error" or summary is None or not summary.strip():
         return
 
     if budget.cost_used_usd + result.cost_usd > budget.max_cost_usd:
@@ -187,6 +242,6 @@ async def ensure_root_compaction(
     except BudgetExceededError:
         return
 
-    session.memory_summary = result.content.strip()
+    session.memory_summary = summary.strip()
     session.compacted_through_message_id = to_summarize[-1].id
     await db.flush()

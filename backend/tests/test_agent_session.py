@@ -11,6 +11,7 @@ from app.agent.session import (
 )
 from app.core.llm import ToolCall
 from app.crud.agent_session import agent_session_crud
+from app.models.agent_session import AgentSession
 from app.models.user import User
 
 pytestmark = pytest.mark.asyncio
@@ -158,3 +159,44 @@ async def test_build_model_history_scopes_child_and_prepends_system_prompt(
         ("user", "child task"),
         ("assistant", "child answer"),
     ]
+
+
+async def test_build_model_history_compacted_window_avoids_orphan_tool(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    """compacted 游标之后的 recent 窗口首条不应是孤立 tool。"""
+    session_id = await _make_session(db_session, test_user.id)
+    await append_user_message(db_session, session_id, "旧对话")
+    await append_assistant_message(db_session, session_id, "旧回复")
+    await append_user_message(db_session, session_id, "查设备")
+    await append_assistant_message(
+        db_session,
+        session_id,
+        "",
+        tool_calls=[ToolCall(id="c1", name="query_monitor_status", arguments="{}")],
+    )
+    await append_tool_result(db_session, session_id, "c1", "设备在线")
+    await append_user_message(db_session, session_id, "新问题")
+    await db_session.commit()
+
+    stored = await db_session.get(AgentSession, session_id)
+    assert stored is not None
+    stored.memory_summary = "已处理旧对话"
+    stored.compacted_through_message_id = 2
+    await db_session.commit()
+
+    history = await build_model_history(
+        db_session, session_id, system_prompt="根系统提示"
+    )
+
+    raw_messages = [
+        message
+        for message in history
+        if message.role != "system"
+        and "工作摘要" not in (message.content or "")
+    ]
+    assert raw_messages[0].role != "tool"
+    for index, message in enumerate(history):
+        if message.role == "tool":
+            assert history[index - 1].role == "assistant"
+            assert history[index - 1].tool_calls
