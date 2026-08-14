@@ -50,7 +50,7 @@ _WORKFLOW_VALIDATION_REASON = "工作流输入不满足执行条件，请修正�
 _BATCH_OUTCOME_ADAPTER = TypeAdapter(BatchClassificationOutcome)
 _ROOT_CAUSE_OUTCOME_ADAPTER = TypeAdapter(RootCauseOutcome)
 _SAFE_ERROR_CLASSES: frozenset[str] = frozenset(
-    {"model", "tool", "policy_reject", "infra"}
+    {"model", "tool", "policy_reject", "infra", "budget_exceeded"}
 )
 
 

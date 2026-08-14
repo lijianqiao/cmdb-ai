@@ -38,11 +38,13 @@ from app.models.agent_session import AgentSession
 logger = logging.getLogger(__name__)
 
 type ChildTerminalStatus = Literal["COMPLETED", "FAILED"]
-type ChildErrorClass = Literal["model", "tool", "policy_reject", "infra"]
+type ChildErrorClass = Literal["model", "tool", "policy_reject", "infra", "budget_exceeded"]
 
 _ACTIVE_STATUSES = frozenset({"REQUESTED", "SPAWNING", "RUNNING"})
 _TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED", "CLOSED"})
-_SAFE_ERROR_CLASSES = frozenset({"model", "tool", "policy_reject", "infra"})
+_SAFE_ERROR_CLASSES = frozenset(
+    {"model", "tool", "policy_reject", "infra", "budget_exceeded"}
+)
 # AgentTraceEvent.step uses PostgreSQL's signed 32-bit Integer; close adds one.
 _MAX_CHILD_STEP = 2_147_483_646
 
@@ -779,7 +781,7 @@ class SpawnManager:
                 active_budget=active_budget,
                 status="FAILED",
                 error_class=(
-                    "policy_reject"
+                    "budget_exceeded"
                     if wall_timeout is not None and wall_timeout.expired()
                     else "infra"
                 ),
@@ -916,10 +918,17 @@ class SpawnManager:
             return ChildRunResult(
                 status="COMPLETED", result_summary=outcome.final_answer
             )
+        match outcome.reason:
+            case "budget_exceeded":
+                error_class: ChildErrorClass = "budget_exceeded"
+            case "llm_error":
+                error_class = "model"
+            case "early_exit":
+                error_class = "policy_reject"
         return ChildRunResult(
             status="FAILED",
             result_summary=None,
-            error_class="policy_reject",
+            error_class=error_class,
         )
 
     async def _persist_terminal(

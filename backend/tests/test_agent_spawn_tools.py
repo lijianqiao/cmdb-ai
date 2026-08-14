@@ -27,6 +27,7 @@ from app.agent.spawn import (
     ChildBudgetSnapshot,
     ChildReceipt,
     ChildRunResult,
+    ChildRuntimeUnavailableError,
     SpawnManager,
     SpawnRejectedError,
 )
@@ -534,6 +535,23 @@ async def test_spawn_dispatcher_maps_spawn_rejected_to_safe_message(
     assert result.control == "rejected"
     assert "max_concurrent_children" in result.content
     assert "secret" not in result.content.lower()
+
+
+async def test_spawn_dispatcher_passes_budget_exceeded_safe_reason(
+    fake_spawn_manager: FakeSpawnManager,
+) -> None:
+    fake_spawn_manager.wait_raises = ChildRuntimeUnavailableError(
+        "child-0",
+        reason="budget_exceeded",
+    )
+    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=1)
+    await dispatch(
+        "spawn_agent",
+        {"role": "ops_explorer", "task_brief": "预算终止"},
+    )
+    result = await dispatch("wait_agent", {"child_id": "child-0"})
+    assert result.control == "failed"
+    assert result.content == "工具 'wait_agent' 执行失败: budget_exceeded"
 
 
 async def test_safe_receipt_text_excludes_sensitive_fields(

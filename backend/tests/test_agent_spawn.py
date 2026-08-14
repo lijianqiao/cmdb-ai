@@ -1497,7 +1497,7 @@ async def test_runner_result_maps_terminal_status_budget_and_safe_trace(
     await manager.close_agent(child.child_id)
 
 
-async def test_wall_timeout_persists_failed_policy_reject(
+async def test_wall_timeout_persists_failed_budget_exceeded(
     spawn_db: SpawnDatabase,
 ) -> None:
     started = asyncio.Event()
@@ -1527,11 +1527,11 @@ async def test_wall_timeout_persists_failed_policy_reject(
     async with spawn_db.session_factory() as db:
         events = await agent_trace_event_crud.list_for_trace(db, child.trace_id)
     assert events[-1].control == "FAILED"
-    assert events[-1].error_class == "policy_reject"
+    assert events[-1].error_class == "budget_exceeded"
     await manager.close_agent(child.child_id)
 
 
-async def test_wall_timeout_wins_when_runner_swallows_cancellation(
+async def test_wall_timeout_wins_with_budget_exceeded_when_runner_swallows_cancellation(
     spawn_db: SpawnDatabase,
 ) -> None:
     async def swallows_wall_cancellation(
@@ -1565,9 +1565,101 @@ async def test_wall_timeout_wins_when_runner_swallows_cancellation(
         assert terminal.result_summary is None
         async with spawn_db.session_factory() as db:
             events = await agent_trace_event_crud.list_for_trace(db, child.trace_id)
-        assert events[-1].error_class == "policy_reject"
+        assert events[-1].error_class == "budget_exceeded"
     finally:
         await manager.close_agent(child.child_id)
+
+
+async def test_default_runner_maps_budget_exceeded_to_failed_budget_exceeded(
+    spawn_db: SpawnDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dispatched = False
+
+    async def expensive_tool_chat(
+        _model_key: str,
+        _messages: list[ChatMessage],
+        *,
+        tools: list[dict[str, object]] | None = None,
+    ) -> ChatResult:
+        del tools
+        return ChatResult(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="read-1",
+                    name="kb_read",
+                    arguments='{"path":"network.md"}',
+                )
+            ],
+            finish_reason="tool_calls",
+            prompt_tokens=1,
+            completion_tokens=1,
+            cost_usd=0.60,
+        )
+
+    async def must_not_dispatch(
+        _path: str,
+        *,
+        offset: int = 0,
+        limit: int | None = 4000,
+    ) -> ToolResult:
+        nonlocal dispatched
+        dispatched = True
+        del offset, limit
+        return ToolResult(control="ok", content="unexpected")
+
+    monkeypatch.setattr("app.agent.tool_dispatch.kb_read", must_not_dispatch)
+    manager = SpawnManager(spawn_db.session_factory, chat_fn=expensive_tool_chat)
+    child = await manager.spawn_agent(
+        session_id=spawn_db.session_id,
+        role="kb_explorer",
+        task_brief="超预算",
+        budget=ChildBudgetSnapshot(5, 0.50, 30.0),
+    )
+
+    terminal = await manager.wait_agent(child.child_id)
+
+    assert terminal.status == "FAILED"
+    assert terminal.result_summary is None
+    assert dispatched is False
+    async with spawn_db.session_factory() as db:
+        events = await agent_trace_event_crud.list_for_trace(db, child.trace_id)
+    budget_event = events[-1]
+    assert budget_event.control == "FAILED"
+    assert budget_event.error_class == "budget_exceeded"
+    await manager.close_agent(child.child_id)
+
+
+async def test_default_runner_maps_llm_error_to_failed_model(
+    spawn_db: SpawnDatabase,
+) -> None:
+    async def llm_error_chat(
+        _model_key: str,
+        _messages: list[ChatMessage],
+        *,
+        tools: list[dict[str, object]] | None = None,
+    ) -> ChatResult:
+        del tools
+        raise LlmRequestError("token=do-not-persist")
+
+    manager = SpawnManager(spawn_db.session_factory, chat_fn=llm_error_chat)
+    child = await manager.spawn_agent(
+        session_id=spawn_db.session_id,
+        role="kb_explorer",
+        task_brief="模型失败",
+    )
+
+    terminal = await manager.wait_agent(child.child_id)
+
+    assert terminal.status == "FAILED"
+    assert terminal.result_summary is None
+    async with spawn_db.session_factory() as db:
+        events = await agent_trace_event_crud.list_for_trace(db, child.trace_id)
+    llm_event = events[-1]
+    assert llm_event.control == "FAILED"
+    assert llm_event.error_class == "model"
+    await manager.close_agent(child.child_id)
 
 
 @pytest.mark.parametrize(
@@ -2448,7 +2540,7 @@ async def test_cascade_close_rejects_nested_spawn_after_descendant_snapshot(
     }
 
 
-async def test_inner_timeout_error_is_infra_not_wall_policy(
+async def test_inner_timeout_error_is_infra_not_wall_timeout(
     spawn_db: SpawnDatabase,
 ) -> None:
     async def inner_timeout(
