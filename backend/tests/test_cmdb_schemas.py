@@ -96,3 +96,10 @@ def test_create_requires_valid_vendor() -> None:
 def test_create_accepts_catalog_vendor() -> None:
     payload = CmdbAssetCreate.model_validate(_base_create_kwargs(vendor="huawei_vrp"))
     assert payload.vendor == "huawei_vrp"
+
+
+def test_create_accepts_cisco_small_business_vendor() -> None:
+    payload = CmdbAssetCreate.model_validate(
+        _base_create_kwargs(vendor="cisco_small_business")
+    )
+    assert payload.vendor == "cisco_small_business"

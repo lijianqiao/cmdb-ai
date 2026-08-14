@@ -116,7 +116,13 @@ def test_shutdown_only_supports_linux_generic() -> None:
 def test_reboot_has_confirmation_for_network_vendors() -> None:
     reboot = get_device_command("reboot")
     assert reboot.confirmation is not None
-    for vendor in ("cisco_iosxe", "huawei_vrp", "hp_comware", "juniper_junos"):
+    for vendor in (
+        "cisco_iosxe",
+        "cisco_small_business",
+        "huawei_vrp",
+        "hp_comware",
+        "juniper_junos",
+    ):
         assert vendor in reboot.confirmation
 
 
@@ -131,7 +137,12 @@ def test_port_commands_config_templates_exclude_generic_driver_vendors() -> None
     """hp_comware/linux/generic 未登记配置模式模板，不提供端口启停命令。"""
     port_disable = get_device_command("port_disable")
     assert port_disable.config_templates is not None
-    assert set(port_disable.config_templates) == {"cisco_iosxe", "huawei_vrp", "juniper_junos"}
+    assert set(port_disable.config_templates) == {
+        "cisco_iosxe",
+        "cisco_small_business",
+        "huawei_vrp",
+        "juniper_junos",
+    }
     assert "hp_comware" not in port_disable.config_templates
     assert "linux" not in port_disable.config_templates
 
@@ -173,6 +184,40 @@ def test_get_command_template_rejects_config_mode_only_commands() -> None:
     """port 命令 templates={}，get_command_template 必须 fail-closed。"""
     with pytest.raises(UnsupportedVendorError):
         get_command_template("port_disable", "cisco_iosxe")
+
+
+def test_cisco_small_business_uses_sg350x_commands() -> None:
+    assert get_command_template("show_version", "cisco_small_business") == "show version"
+    assert (
+        get_command_template("show_running_config", "cisco_small_business")
+        == "show running-config"
+    )
+    assert (
+        get_command_template("show_interfaces", "cisco_small_business")
+        == "show interfaces status"
+    )
+    assert get_command_template("ping", "cisco_small_business") == "ping ip 1.1.1.1"
+
+    reboot = get_device_command("reboot")
+    assert reboot.templates["cisco_small_business"] == "reload"
+    assert reboot.confirmation is not None
+    confirmation = reboot.confirmation["cisco_small_business"]
+    assert confirmation.prompt_pattern == r"\([Yy]/[Nn]\)"
+    assert confirmation.response == "y"
+
+    port_enable = get_device_command("port_enable")
+    assert port_enable.config_templates is not None
+    assert port_enable.config_templates["cisco_small_business"] == (
+        "interface {interface}",
+        "no shutdown",
+    )
+    port_disable = get_device_command("port_disable")
+    assert port_disable.config_templates is not None
+    assert port_disable.config_templates["cisco_small_business"] == (
+        "interface {interface}",
+        "shutdown",
+    )
+    assert command_supports_vendor("shutdown", "cisco_small_business") is False
 
 
 @pytest.mark.parametrize(

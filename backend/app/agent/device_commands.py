@@ -20,6 +20,7 @@ from typing import Literal
 
 type VendorName = Literal[
     "cisco_iosxe",
+    "cisco_small_business",
     "huawei_vrp",
     "hp_comware",
     "juniper_junos",
@@ -93,6 +94,7 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
             "generic": "cat /etc/os-release && uname -a",
             "linux": "cat /etc/os-release && uname -a",
             "cisco_iosxe": "show version",
+            "cisco_small_business": "show version",
             "huawei_vrp": "display version",
             "hp_comware": "display version",
             "juniper_junos": "show version",
@@ -105,6 +107,7 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
         command_type="read_only",
         templates={
             "cisco_iosxe": "show running-config",
+            "cisco_small_business": "show running-config",
             "huawei_vrp": "display current-configuration",
             "hp_comware": "display current-configuration",
             "juniper_junos": "show configuration",
@@ -117,6 +120,7 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
         command_type="read_only",
         templates={
             "cisco_iosxe": "show interfaces status",
+            "cisco_small_business": "show interfaces status",
             "huawei_vrp": "display interface brief",
             "hp_comware": "display interface brief",
             "juniper_junos": "show interfaces terse",
@@ -137,6 +141,7 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
             # 网络设备 CLI 无法在单条命令里可靠解析默认网关；v1 用固定公网探测地址，
             # 禁止 <placeholder> 原样下发（见 test_templates_have_no_angle_bracket_placeholders）。
             "cisco_iosxe": "ping 1.1.1.1",
+            "cisco_small_business": "ping ip 1.1.1.1",
             "huawei_vrp": "ping 1.1.1.1",
             "hp_comware": "ping 1.1.1.1",
             # Junos ping 默认不停止，必须显式 count。
@@ -152,12 +157,16 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
             "generic": "sudo reboot",
             "linux": "sudo reboot",
             "cisco_iosxe": "reload",
+            "cisco_small_business": "reload",
             "huawei_vrp": "reboot",
             "hp_comware": "reboot",
             "juniper_junos": "request system reboot",
         },
         confirmation={
             "cisco_iosxe": CommandConfirmation(prompt_pattern=r"[Cc]onfirm", response="\n"),
+            "cisco_small_business": CommandConfirmation(
+                prompt_pattern=r"\([Yy]/[Nn]\)", response="y"
+            ),
             "huawei_vrp": CommandConfirmation(prompt_pattern=r"[Yy]/[Nn]", response="y"),
             "hp_comware": CommandConfirmation(prompt_pattern=r"[Yy]/[Nn]", response="y"),
             "juniper_junos": CommandConfirmation(prompt_pattern=r"yes,no", response="yes"),
@@ -185,6 +194,7 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
         requires_argument="interface_name",
         config_templates={
             "cisco_iosxe": ("interface {interface}", "no shutdown"),
+            "cisco_small_business": ("interface {interface}", "no shutdown"),
             "huawei_vrp": ("interface {interface}", "undo shutdown"),
             "juniper_junos": ("delete interfaces {interface} disable", "commit"),
         },
@@ -198,6 +208,7 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
         requires_argument="interface_name",
         config_templates={
             "cisco_iosxe": ("interface {interface}", "shutdown"),
+            "cisco_small_business": ("interface {interface}", "shutdown"),
             "huawei_vrp": ("interface {interface}", "shutdown"),
             "juniper_junos": ("set interfaces {interface} disable", "commit"),
         },
