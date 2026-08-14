@@ -17,7 +17,18 @@ pytestmark = pytest.mark.asyncio
 
 # 与 ProposalSafeSummary 对齐的白名单字段
 _SAFE_SUMMARY_KEYS = frozenset(
-    {"proposal_id", "action_type", "status", "reason", "asset_id", "result_excerpt", "last_error"}
+    {
+        "proposal_id",
+        "action_type",
+        "status",
+        "status_reason",
+        "reason",
+        "asset_id",
+        "result_excerpt",
+        "last_error",
+        "execution_started_at",
+        "resolved_at",
+    }
 )
 # 原始动作载荷中不应出现在 WS 事件里的敏感键
 _SENSITIVE_KEYS = frozenset({"message", "command", "command_name", "password"})
@@ -149,6 +160,39 @@ async def test_ws_hitl_publisher_ignores_unknown_event_type() -> None:
         payload={"proposal_id": 1, "action_type": "notify", "status": "PENDING", "reason": "", "asset_id": None},
     )
     assert ws.sent == []
+
+
+async def test_ws_hitl_publisher_allows_recovery_fields() -> None:
+    """HITL 事件可携带 status_reason、execution_started_at 与 resolved_at。"""
+    hub = AgentWsHub()
+    ws = FakeWebSocket()
+    await hub.connect(1, ws)  # type: ignore[arg-type]
+    publisher = WsHitlEventPublisher(hub=hub)
+
+    await publisher.publish(
+        session_id=1,
+        event_type="hitl_resolved",
+        payload={
+            "proposal_id": 3,
+            "action_type": "notify",
+            "status": "APPROVED",
+            "status_reason": "retry_authorized",
+            "reason": "通知运维",
+            "asset_id": None,
+            "execution_started_at": "2026-08-14T04:00:00+00:00",
+            "resolved_at": "2026-08-14T04:05:00+00:00",
+            "message": "不应透传",
+            "password": "secret",
+        },
+    )
+
+    assert len(ws.sent) == 1
+    payload = ws.sent[0]["payload"]
+    assert payload["status_reason"] == "retry_authorized"
+    assert payload["execution_started_at"] == "2026-08-14T04:00:00+00:00"
+    assert payload["resolved_at"] == "2026-08-14T04:05:00+00:00"
+    assert set(payload.keys()) <= _SAFE_SUMMARY_KEYS
+    assert _SENSITIVE_KEYS.isdisjoint(payload.keys())
 
 
 async def test_buffered_publisher_defers_events_until_flush() -> None:

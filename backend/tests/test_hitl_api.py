@@ -9,6 +9,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import pytest_asyncio
 from cryptography.fernet import Fernet
 from httpx import AsyncClient
 from pydantic import SecretStr
@@ -22,6 +23,7 @@ from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
 from app.models.audit_log import AuditLog
+from app.models.hitl_proposal import HitlProposal
 from app.models.permission import Permission
 from app.models.user import User, user_roles
 
@@ -225,7 +227,7 @@ async def test_approve_device_control_stays_approved_second_decide_conflicts(
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """未分类 device_control 批准后连接失败应保持 APPROVED；再次审批返回 409。"""
+    """device_control 批准后连接失败应进入 UNKNOWN；再次审批返回 409。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     await _grant_hitl_approve(db_session, test_user)
     ciphertext = encrypt_credential_password("whatever")
@@ -269,9 +271,8 @@ async def test_approve_device_control_stays_approved_second_decide_conflicts(
             headers=auth_headers,
         )
     assert first.status_code == 200, first.text
-    assert first.json()["data"]["status"] == "APPROVED"
-    last_error = first.json()["data"]["action_payload"].get("last_error")
-    assert isinstance(last_error, str) and last_error
+    assert first.json()["data"]["status"] == "UNKNOWN"
+    assert first.json()["data"]["status_reason"] == "dispatch_outcome_unknown"
 
     second = await client.post(
         f"/api/v1/hitl/proposals/{proposal_id}/decide",
@@ -376,7 +377,7 @@ async def test_retry_approved_device_control_executes(
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """APPROVED 且上次执行失败的提案可通过 /retry 再次执行。"""
+    """UNKNOWN 经 allow_retry 回到 APPROVED 后可通过 /retry 再次执行。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     await _grant_hitl_approve(db_session, test_user)
     ciphertext = encrypt_credential_password("whatever")
@@ -420,7 +421,15 @@ async def test_retry_approved_device_control_executes(
             headers=auth_headers,
         )
     assert failed.status_code == 200, failed.text
-    assert failed.json()["data"]["status"] == "APPROVED"
+    assert failed.json()["data"]["status"] == "UNKNOWN"
+
+    authorized = await client.post(
+        f"/api/v1/hitl/proposals/{proposal_id}/resolve-unknown",
+        json={"resolution": "allow_retry"},
+        headers=auth_headers,
+    )
+    assert authorized.status_code == 200, authorized.text
+    assert authorized.json()["data"]["status"] == "APPROVED"
 
     fake_connection = AsyncMock()
     fake_connection.send_command = AsyncMock(
@@ -499,3 +508,145 @@ async def test_retry_dynamic_device_query_requires_password(
         headers=auth_headers,
     )
     assert response.status_code == 422, response.text
+
+
+@pytest_asyncio.fixture
+async def unknown_proposal(
+    db_session: AsyncSession,
+    test_user: User,
+) -> HitlProposal:
+    """创建处于 UNKNOWN 状态的提案，供 resolve-unknown 测试使用。"""
+    session = await agent_session_crud.create(
+        db_session,
+        {"user_id": test_user.id, "title": "unknown", "status": "active"},
+    )
+    proposal = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session.id,
+        proposed_by_agent_id=None,
+        action_type="notify",
+        action_payload={"message": "test", "proposal_reason": "test"},
+    )
+    await hitl_proposal_crud.decide(
+        db_session,
+        proposal.id,
+        approve=True,
+        reviewed_by_user_id=test_user.id,
+    )
+    await hitl_proposal_crud.claim_execution(db_session, proposal.id)
+    await hitl_proposal_crud.mark_unknown(
+        db_session, proposal.id, reason="dispatch_outcome_unknown"
+    )
+    await db_session.commit()
+    return proposal
+
+
+async def test_resolve_unknown_requires_permission_and_records_actor(
+    client: AsyncClient,
+    auth_headers: Headers,
+    db_session: AsyncSession,
+    unknown_proposal: HitlProposal,
+    test_user: User,
+) -> None:
+    """allow_retry 应回到 APPROVED 并记录处置人与 status_reason。"""
+    await _grant_hitl_approve(db_session, test_user)
+    proposal_id = unknown_proposal.id
+    user_id = test_user.id
+    response = await client.post(
+        f"/api/v1/hitl/proposals/{proposal_id}/resolve-unknown",
+        json={"resolution": "allow_retry"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["status"] == "APPROVED"
+
+    db_session.expire_all()
+    persisted = await hitl_proposal_crud.get(db_session, proposal_id)
+    assert persisted is not None
+    assert persisted.resolved_by_user_id == user_id
+    assert persisted.status_reason == "retry_authorized"
+
+
+async def test_resolve_unknown_invalid_resolution_returns_422(
+    client: AsyncClient,
+    auth_headers: Headers,
+    db_session: AsyncSession,
+    unknown_proposal: HitlProposal,
+    test_user: User,
+) -> None:
+    """非法 resolution 应返回 422。"""
+    await _grant_hitl_approve(db_session, test_user)
+    response = await client.post(
+        f"/api/v1/hitl/proposals/{unknown_proposal.id}/resolve-unknown",
+        json={"resolution": "not_valid"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 422, response.text
+
+
+async def test_resolve_unknown_non_unknown_returns_409(
+    client: AsyncClient,
+    auth_headers: Headers,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """非 UNKNOWN 提案调用 resolve-unknown 应返回 409。"""
+    await _grant_hitl_approve(db_session, test_user)
+    _, proposal_id = await _make_pending_proposal(
+        db_session,
+        user_id=test_user.id,
+        action_type="notify",
+        payload={"message": "仍待审批"},
+        reason="监控告警",
+    )
+    response = await client.post(
+        f"/api/v1/hitl/proposals/{proposal_id}/resolve-unknown",
+        json={"resolution": "allow_retry"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 409, response.text
+
+
+async def test_resolve_unknown_without_permission_returns_403(
+    client: AsyncClient,
+    auth_headers: Headers,
+    unknown_proposal: HitlProposal,
+) -> None:
+    """未授予 agent:hitl_approve 时 resolve-unknown 应被拒绝。"""
+    response = await client.post(
+        f"/api/v1/hitl/proposals/{unknown_proposal.id}/resolve-unknown",
+        json={"resolution": "allow_retry"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 403, response.text
+
+
+async def test_resolve_unknown_confirm_executed_writes_executed_at_and_audit(
+    client: AsyncClient,
+    auth_headers: Headers,
+    db_session: AsyncSession,
+    unknown_proposal: HitlProposal,
+    test_user: User,
+) -> None:
+    """confirm_executed 应写入 executed_at 并记录 hitl_unknown_confirmed 审计。"""
+    await _grant_hitl_approve(db_session, test_user)
+    proposal_id = unknown_proposal.id
+    response = await client.post(
+        f"/api/v1/hitl/proposals/{proposal_id}/resolve-unknown",
+        json={"resolution": "confirm_executed"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["status"] == "EXECUTED"
+    assert response.json()["data"]["executed_at"] is not None
+
+    db_session.expire_all()
+    actions = {
+        row.action
+        for row in (
+            await db_session.execute(
+                select(AuditLog).where(AuditLog.target == f"hitl_proposal:{proposal_id}")
+            )
+        ).scalars()
+    }
+    assert "hitl_unknown_confirmed" in actions

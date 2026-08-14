@@ -7,6 +7,7 @@
 """
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,6 +31,14 @@ class HitlRetryRequest(BaseModel):
     dynamic_credential_password: str | None = Field(default=None, min_length=1, max_length=256)
 
 
+class HitlUnknownResolutionRequest(BaseModel):
+    """人工处置 UNKNOWN 结果不确定提案的请求体。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolution: Literal["confirm_executed", "allow_retry"]
+
+
 class HitlProposalResponse(ApiModel):
     """审批人视角的提案详情，包含完整动作载荷。"""
 
@@ -44,6 +53,10 @@ class HitlProposalResponse(ApiModel):
     reviewed_by_user_id: int | None
     reviewed_at: datetime | None
     executed_at: datetime | None
+    execution_started_at: datetime | None = None
+    status_reason: str | None = None
+    resolved_by_user_id: int | None = None
+    resolved_at: datetime | None = None
     created_at: datetime
     result_excerpt: str | None = None
     asset_credential_type: str | None = None

@@ -31,7 +31,13 @@ from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.hitl_proposal import InvalidHitlTransitionError, hitl_proposal_crud
 from app.models.user import User
 from app.schemas.common import ResponseEnvelope, success_response
-from app.schemas.hitl import HitlDecideRequest, HitlProposalResponse, HitlRetryRequest
+from app.schemas.hitl import (
+    HitlDecideRequest,
+    HitlProposalResponse,
+    HitlRetryRequest,
+    HitlUnknownResolutionRequest,
+)
+from app.utils.audit import log_audit
 
 router = APIRouter()
 
@@ -137,6 +143,7 @@ async def decide_hitl_proposal(
             reviewed_by_user_id=current_user.id,
             publisher=publisher,
         )
+        await db.commit()
         if body.approve:
             await resume_proposal(
                 db,
@@ -169,7 +176,7 @@ async def decide_hitl_proposal(
             ) from exc
         raise
 
-    # 编排层已写入审计记录；端点只负责一次 commit，避免半提交。
+    # 编排层已写入审计记录；审批已提交，执行服务在独立短会话内完成。
     await db.commit()
     # 提交后再广播 HITL 事件，避免前端收到事件后读不到未提交的行。
     await publisher.flush()
@@ -195,7 +202,7 @@ async def retry_hitl_proposal(
     if existing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
 
-    if existing.status not in ("APPROVED", "EXECUTED"):
+    if existing.status != "APPROVED":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="只有已批准但未执行成功的提案可以重试",
@@ -232,3 +239,73 @@ async def retry_hitl_proposal(
     if proposal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
     return success_response(await _to_response(db, proposal), message="重试完成")
+
+
+@router.post(
+    "/proposals/{proposal_id}/resolve-unknown",
+    response_model=ResponseEnvelope[HitlProposalResponse],
+)
+async def resolve_unknown_proposal(
+    proposal_id: int,
+    body: HitlUnknownResolutionRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("agent:hitl_approve")),
+) -> ResponseEnvelope[HitlProposalResponse]:
+    """人工处置 UNKNOWN 提案：确认已执行或允许重试。"""
+    existing = await hitl_proposal_crud.get(db, proposal_id)
+    if existing is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
+
+    publisher = BufferedWsHitlEventPublisher()
+    try:
+        proposal = await hitl_proposal_crud.resolve_unknown(
+            db,
+            proposal_id,
+            resolution=body.resolution,
+            resolved_by_user_id=current_user.id,
+        )
+    except InvalidHitlTransitionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        message = str(exc)
+        if "not found" in message.lower() or "不存在" in message:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="HITL 提案不存在",
+            ) from exc
+        raise
+
+    await log_audit(
+        db,
+        user_id=current_user.id,
+        action="hitl_unknown_confirmed"
+        if body.resolution == "confirm_executed"
+        else "hitl_unknown_retry_authorized",
+        target=f"hitl_proposal:{proposal_id}",
+        detail=body.resolution,
+    )
+    await db.commit()
+
+    proposal = await hitl_proposal_crud.get(db, proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
+
+    payload_dict = proposal.action_payload if isinstance(proposal.action_payload, dict) else {}
+    await publisher.publish(
+        session_id=proposal.session_id,
+        event_type="hitl_resolved",
+        payload={
+            "proposal_id": proposal.id,
+            "action_type": proposal.action_type,
+            "status": proposal.status,
+            "status_reason": proposal.status_reason,
+            "reason": str(payload_dict.get("proposal_reason", "")),
+            "asset_id": payload_dict.get("asset_id"),
+            "resolved_at": proposal.resolved_at,
+        },
+    )
+    await publisher.flush()
+    return success_response(await _to_response(db, proposal))

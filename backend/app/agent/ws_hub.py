@@ -23,7 +23,18 @@ from app.schemas.agent_ws import AgentWsEventType, AgentWsServerMessage
 
 # 与 T10 ProposalSafeSummary 字段对齐；绝不透传原始动作载荷
 _HITL_SAFE_KEYS = frozenset(
-    {"proposal_id", "action_type", "status", "reason", "asset_id", "result_excerpt", "last_error"}
+    {
+        "proposal_id",
+        "action_type",
+        "status",
+        "status_reason",
+        "reason",
+        "asset_id",
+        "result_excerpt",
+        "last_error",
+        "execution_started_at",
+        "resolved_at",
+    }
 )
 _HITL_EVENT_TYPES = frozenset({"hitl_pending", "hitl_resolved", "hitl_execution_failed"})
 

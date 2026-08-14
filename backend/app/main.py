@@ -17,9 +17,10 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.agent.spawn import run_receipt_gc_loop, spawn_manager
+from app.agent.hitl_execution import reconcile_executing_proposals
 from app.api.router import api_router
 from app.core.config import settings
-from app.core.database import engine
+from app.core.database import AsyncSessionLocal, engine
 from app.core.security import PasswordHashOverloadedError
 from app.crud.base import RelatedObjectsNotFoundError
 from app.crud.role import RoleInUseError
@@ -67,6 +68,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     loops. Shutdown order: cancel and await all three loops, close every
     child this process still owns, then dispose the database engine last.
     """
+    await reconcile_executing_proposals(AsyncSessionLocal)
     await spawn_manager.reconcile_startup()
     monitor_task = asyncio.create_task(run_monitor_sweep_loop())
     diff_task = asyncio.create_task(run_cmdb_diff_loop())

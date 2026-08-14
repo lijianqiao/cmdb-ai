@@ -31,8 +31,11 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.agent.budget import Budget
+from app.agent.hitl_execution import reconcile_executing_proposals
 from app.agent.spawn import ChildReceipt, ChildRunResult, SpawnManager, SpawnRejectedError
 from app.crud.agent_registry import agent_registry_crud
+from app.crud.agent_session import agent_session_crud
+from app.crud.hitl_proposal import hitl_proposal_crud
 from app.crud.agent_trace_event import agent_trace_event_crud
 from app.models import Base
 from app.models.agent_session import AgentSession
@@ -373,6 +376,39 @@ async def test_shutdown_cancels_and_closes_all_local_children(
         )
     assert repeated_trace_count == trace_count
     release.set()
+
+
+async def test_startup_reconciles_executing_to_unknown(
+    db_engine: AsyncEngine,
+    test_user: User,
+) -> None:
+    """启动恢复应把遗留 EXECUTING 提案转为 UNKNOWN。"""
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with session_factory() as db:
+        session = await agent_session_crud.create(
+            db,
+            {"user_id": test_user.id, "title": "recovery", "status": "active"},
+        )
+        proposal = await hitl_proposal_crud.create(
+            db,
+            session_id=session.id,
+            proposed_by_agent_id=None,
+            action_type="notify",
+            action_payload={"message": "test"},
+        )
+        await hitl_proposal_crud.decide(
+            db, proposal.id, approve=True, reviewed_by_user_id=test_user.id
+        )
+        await hitl_proposal_crud.claim_execution(db, proposal.id)
+        await db.commit()
+        proposal_id = proposal.id
+
+    changed = await reconcile_executing_proposals(session_factory)
+    assert changed == 1
+    async with session_factory() as db:
+        persisted = await hitl_proposal_crud.get(db, proposal_id)
+        assert persisted is not None
+        assert persisted.status == "UNKNOWN"
 
 
 async def test_recovery_is_idempotent(recovery_db: RecoveryDatabase) -> None:
