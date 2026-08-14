@@ -84,6 +84,7 @@ class FakeSpawnManager:
     """记录 spawn 参数并脚本化子 Agent 生命周期。"""
 
     spawn_kwargs: dict[str, Any] = field(default_factory=dict)
+    sent_inputs: list[tuple[str, str]] = field(default_factory=list)
     _receipts: dict[str, ChildReceipt] = field(default_factory=dict)
     _session_receipts: dict[int, list[str]] = field(default_factory=dict)
     _next_index: int = 0
@@ -123,7 +124,7 @@ class FakeSpawnManager:
             session_id=session_id,
             role=role,
             task_brief=task_brief,
-            status="SPAWNING",
+            status="RUNNING",
         )
         self._receipts[child_id] = receipt
         self._session_receipts.setdefault(session_id, []).append(child_id)
@@ -152,6 +153,13 @@ class FakeSpawnManager:
     async def list_agents(self, session_id: int) -> tuple[ChildReceipt, ...]:
         ids = self._session_receipts.get(session_id, [])
         return tuple(self._receipts[child_id] for child_id in ids)
+
+    async def send_input(self, child_id: str, message: str) -> ChildReceipt:
+        receipt = self._receipts[child_id]
+        if receipt.status != "RUNNING":
+            raise SpawnRejectedError("child_not_running")
+        self.sent_inputs.append((child_id, message))
+        return receipt
 
     async def close_agent(self, child_id: str) -> ChildReceipt:
         receipt = self._receipts[child_id]
@@ -266,6 +274,55 @@ async def test_spawn_dispatcher_rejects_other_session_child_id(
     result = await other_dispatch("wait_agent", {"child_id": "child-0", "timeout_ms": 1000})
     assert result.control == "failed"
     assert "ChildNotFoundError" in result.content
+
+
+def test_send_input_schema_exposes_child_and_message_only() -> None:
+    schemas = {item["function"]["name"]: item for item in spawn_tool_schemas()}
+    properties = schemas["send_input"]["function"]["parameters"]["properties"]
+    assert set(properties) == {"child_id", "message"}
+
+
+async def test_spawn_dispatcher_sends_input_to_current_session_child(
+    fake_spawn_manager: FakeSpawnManager,
+) -> None:
+    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=9)
+    await dispatch("spawn_agent", {"role": "ops_explorer", "task_brief": "检查资产"})
+    result = await dispatch(
+        "send_input", {"child_id": "child-0", "message": "再核查最近五分钟"}
+    )
+    assert result.control == "ok"
+    assert fake_spawn_manager.sent_inputs == [("child-0", "再核查最近五分钟")]
+
+
+async def test_spawn_dispatcher_rejects_other_session_send_input(
+    fake_spawn_manager: FakeSpawnManager,
+) -> None:
+    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=1)
+    await dispatch(
+        "spawn_agent",
+        {"role": "ops_explorer", "task_brief": "本会话子任务"},
+    )
+    other_dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=99)
+    result = await other_dispatch(
+        "send_input",
+        {"child_id": "child-0", "message": "跨会话补充输入"},
+    )
+    assert result.control == "failed"
+    assert "ChildNotFoundError" in result.content
+    assert fake_spawn_manager.sent_inputs == []
+
+
+async def test_spawn_dispatcher_rejects_blank_send_input_message(
+    fake_spawn_manager: FakeSpawnManager,
+) -> None:
+    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=1)
+    await dispatch(
+        "spawn_agent",
+        {"role": "ops_explorer", "task_brief": "合法 brief"},
+    )
+    result = await dispatch("send_input", {"child_id": "child-0", "message": ""})
+    assert result.control == "clarification"
+    assert "参数无效" in result.content
 
 
 async def test_spawn_dispatcher_wait_timeout_does_not_cancel_child(

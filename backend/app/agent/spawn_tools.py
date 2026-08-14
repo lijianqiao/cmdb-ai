@@ -6,7 +6,7 @@
 @Docs: 根 Agent 专用 Spawn 工具 schema 与安全 dispatcher。
 
 实现流程：
-1. 仅向根 Agent 暴露 spawn_agent、wait_agent、list_agents、close_agent 四个服务端受控工具。
+1. 仅向根 Agent 暴露 spawn_agent、wait_agent、send_input、list_agents、close_agent 五个服务端受控工具。
 2. 模型只能指定角色与 task_brief；模型、工具白名单、预算由 SpawnManager 与角色目录决定。
 3. dispatcher 校验参数后调用 SpawnManager，回执文本只包含安全字段，不含凭据或内部配置。
 4. 与 tool_dispatch 分离，避免 spawn.py 与 tool_dispatch 形成循环导入。
@@ -29,9 +29,10 @@ from app.agent.spawn import (
 from app.agent.tool_dispatch import validation_reason_for_tool
 
 SPAWN_TOOL_SCHEMA_VERSION = "t10-v1"
-SPAWN_TOOL_NAMES: frozenset[str] = frozenset(
-    {"spawn_agent", "wait_agent", "list_agents", "close_agent"}
+SPAWN_PRIMITIVE_TOOL_NAMES: frozenset[str] = frozenset(
+    {"spawn_agent", "wait_agent", "send_input", "list_agents", "close_agent"}
 )
+SPAWN_TOOL_NAMES: frozenset[str] = SPAWN_PRIMITIVE_TOOL_NAMES
 _SAFE_ERROR_CLASSES: frozenset[str] = frozenset(
     {"model", "tool", "policy_reject", "infra"}
 )
@@ -53,6 +54,13 @@ class WaitAgentArgs(_Args):
 
     child_id: str = Field(min_length=1, max_length=64)
     timeout_ms: int = Field(default=30000, ge=0, le=30000)
+
+
+class SendInputArgs(_Args):
+    """send_input 向本会话内 RUNNING 子 Agent 追加一条用户消息。"""
+
+    child_id: str = Field(min_length=1, max_length=64)
+    message: str = Field(min_length=1, max_length=4000)
 
 
 class ListAgentsArgs(_Args):
@@ -93,7 +101,7 @@ def spawn_tool_schemas() -> list[dict[str, Any]]:
     返回根 Agent 可用的 Spawn 工具 JSON Schema。
 
     Returns:
-        OpenAI 兼容的四个严格函数工具定义。
+        OpenAI 兼容的五个严格函数工具定义。
     """
     spawn_parameters = SpawnAgentArgs.model_json_schema()
     spawn_parameters.pop("title", None)
@@ -102,6 +110,8 @@ def spawn_tool_schemas() -> list[dict[str, Any]]:
         spawn_parameters["properties"]["role"] = spawn_defs["RoleName"]
     wait_parameters = WaitAgentArgs.model_json_schema()
     wait_parameters.pop("title", None)
+    send_input_parameters = SendInputArgs.model_json_schema()
+    send_input_parameters.pop("title", None)
     list_parameters = ListAgentsArgs.model_json_schema()
     list_parameters.pop("title", None)
     close_parameters = CloseAgentArgs.model_json_schema()
@@ -127,6 +137,17 @@ def spawn_tool_schemas() -> list[dict[str, Any]]:
                     "超时不取消 child，可稍后再次 wait。"
                 ),
                 "parameters": wait_parameters,
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "send_input",
+                "description": (
+                    f"[{SPAWN_TOOL_SCHEMA_VERSION}] 向本会话内 RUNNING 子 Agent "
+                    "追加一条用户补充消息；终态 child 不可重开。"
+                ),
+                "parameters": send_input_parameters,
             },
         },
         {
@@ -214,6 +235,14 @@ def build_spawn_tool_dispatcher(
                 receipt = await manager.wait_agent(
                     wait_args.child_id,
                     timeout_ms=wait_args.timeout_ms,
+                )
+                return ToolResult(control="ok", content=_safe_receipt_text(receipt))
+            if name == "send_input":
+                send_args = SendInputArgs.model_validate(arguments)
+                await _require_session_child(manager, session_id, send_args.child_id)
+                receipt = await manager.send_input(
+                    send_args.child_id,
+                    send_args.message,
                 )
                 return ToolResult(control="ok", content=_safe_receipt_text(receipt))
             if name == "list_agents":
