@@ -620,6 +620,56 @@ async def test_summary_delivery_failure_keeps_executed_query_successful(
     assert "ephemeral-password" not in route_warnings[0]
 
 
+async def test_failed_device_query_does_not_deliver_or_broadcast_summary(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """执行未成功的 device_query 不应调用总结服务或追加 assistant 消息。"""
+    summary_delivery = AsyncMock(return_value=None)
+    ws_envelopes: list[AgentWsServerMessage] = []
+
+    async def record_broadcast(
+        session_id: int,
+        message: AgentWsServerMessage,
+    ) -> None:
+        assert session_id > 0
+        ws_envelopes.append(message)
+
+    monkeypatch.setattr(
+        "app.api.v1.hitl.deliver_device_query_summary",
+        summary_delivery,
+    )
+    monkeypatch.setattr("app.agent.ws_hub.hub.broadcast", record_broadcast)
+    await _grant_hitl_approve(db_session, test_user)
+    session_id, proposal_id = await _make_pending_device_query_proposal(
+        db_session,
+        user_id=test_user.id,
+        credential_type="static",
+    )
+
+    with patch(
+        "app.agent.executors._open_netmiko_connection",
+        side_effect=AssertionError("失败前不得连接设备"),
+    ):
+        response = await client.post(
+            f"/api/v1/hitl/proposals/{proposal_id}/decide",
+            json={"approve": True},
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["status"] == "APPROVED"
+    assert response.json()["data"]["status_reason"] == "dispatch_failed_before_send"
+    summary_delivery.assert_not_awaited()
+    db_session.expire_all()
+    messages = await _root_assistant_messages(db_session, session_id=session_id)
+    assert messages == []
+    assert all(envelope.type != "assistant_delta" for envelope in ws_envelopes)
+
+
 async def test_approve_executed_device_control_does_not_deliver_query_summary(
     client: AsyncClient,
     db_session: AsyncSession,
