@@ -12,6 +12,7 @@ from app.models.base import Base
 from app.models.cmdb_asset import CmdbAsset
 from app.models.cmdb_asset_dependency import CmdbAssetDependency
 from app.models.device_command_policy import DeviceCommandPolicy
+from app.models.hitl_execution_result import HitlExecutionResult
 from app.models.hitl_proposal import HitlProposal
 from app.models.knowledge_category import KnowledgeCategory
 from app.models.knowledge_chunk import KnowledgeChunk
@@ -38,6 +39,7 @@ __all__ = [
     "AgentSession",
     "AgentMessage",
     "AgentRegistry",
+    "HitlExecutionResult",
     "HitlProposal",
     "AgentTraceEvent",
     "KnowledgeCategory",

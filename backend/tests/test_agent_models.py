@@ -7,10 +7,12 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.crud.hitl_execution_result import hitl_execution_result_crud
 from app.models.agent_message import AgentMessage
 from app.models.agent_registry import AgentRegistry
 from app.models.agent_session import AgentSession
 from app.models.agent_trace_event import AgentTraceEvent
+from app.models.hitl_execution_result import HitlExecutionResult
 from app.models.hitl_proposal import HitlProposal
 from app.models.user import User
 
@@ -154,3 +156,81 @@ def test_agent_session_turn_lease_columns_exist() -> None:
     columns = AgentSession.__table__.columns
     assert columns["active_turn_token"].type.length == 36
     assert columns["active_turn_started_at"].nullable is True
+
+
+def test_hitl_execution_result_schema() -> None:
+    columns = HitlExecutionResult.__table__.columns
+    assert columns["proposal_id"].unique is True
+    assert columns["content"].nullable is False
+    assert columns["content_length"].nullable is False
+    assert columns["summary_status"].type.length == 20
+    proposal_fk = next(iter(columns["proposal_id"].foreign_keys))
+    assert proposal_fk.target_fullname == "hitl_proposals.id"
+    assert proposal_fk.ondelete == "CASCADE"
+
+
+@pytest.mark.asyncio
+async def test_hitl_execution_result_crud_creates_once_and_calculates_content_length(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session = AgentSession(user_id=test_user.id, title="", status="active")
+    db_session.add(session)
+    await db_session.flush()
+    proposal = HitlProposal(
+        session_id=session.id,
+        proposed_by_agent_id=None,
+        action_type="query",
+        action_payload={"command": "show version"},
+    )
+    db_session.add(proposal)
+    await db_session.flush()
+
+    created = await hitl_execution_result_crud.create_for_proposal(
+        db_session,
+        proposal_id=proposal.id,
+        content="设备型号：S9300",
+    )
+    duplicate = await hitl_execution_result_crud.create_for_proposal(
+        db_session,
+        proposal_id=proposal.id,
+        content="ignored",
+    )
+
+    assert created.proposal_id == proposal.id
+    assert created.content_length == 10
+    assert created.summary_status == "pending"
+    assert duplicate is created
+    assert duplicate.content == "设备型号：S9300"
+
+
+@pytest.mark.asyncio
+async def test_hitl_execution_result_crud_returns_existing_proposal_ids(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    session = AgentSession(user_id=test_user.id, title="", status="active")
+    db_session.add(session)
+    await db_session.flush()
+    proposals = [
+        HitlProposal(
+            session_id=session.id,
+            proposed_by_agent_id=None,
+            action_type="query",
+            action_payload={"command": command},
+        )
+        for command in ("show version", "show interfaces")
+    ]
+    db_session.add_all(proposals)
+    await db_session.flush()
+    await hitl_execution_result_crud.create_for_proposal(
+        db_session,
+        proposal_id=proposals[0].id,
+        content="output",
+    )
+
+    existing = await hitl_execution_result_crud.existing_proposal_ids(
+        db_session,
+        [proposals[0].id, proposals[1].id, 999],
+    )
+
+    assert existing == {proposals[0].id}
+    assert await hitl_execution_result_crud.existing_proposal_ids(db_session, []) == set()
