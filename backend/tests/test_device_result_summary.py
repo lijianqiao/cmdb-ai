@@ -268,6 +268,44 @@ async def test_model_failures_fall_back_without_changing_executed_proposal(
     assert proposal.status == "EXECUTED"
 
 
+async def test_model_echoing_full_config_is_rejected_before_message_persistence(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    raw_config = (
+        "hostname echo-switch\n"
+        "interface Vlan10\n"
+        " ip address 10.0.10.1 255.255.255.0\n"
+    )
+    proposal_id, session_id = await _create_executed_device_result(
+        db_session,
+        test_user,
+        content=raw_config,
+    )
+
+    async def echo_chat(*args: Any, **kwargs: Any) -> ChatResult:
+        return _chat_result(raw_config)
+
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    delivery = await deliver_device_query_summary(
+        session_factory=session_factory,
+        proposal_id=proposal_id,
+        chat_fn=echo_chat,
+    )
+
+    assert delivery.summary_status == "fallback"
+    assert delivery.content == SUMMARY_FALLBACK_MESSAGE
+    db_session.expire_all()
+    result_row = await hitl_execution_result_crud.get_by_proposal(db_session, proposal_id)
+    messages = await _root_assistant_messages(db_session, session_id)
+    assert result_row is not None
+    assert result_row.summary_status == "fallback"
+    assert result_row.summary == SUMMARY_FALLBACK_MESSAGE
+    assert [message.content for message in messages] == [SUMMARY_FALLBACK_MESSAGE]
+    assert all(raw_config.strip() not in message.content for message in messages)
+
+
 async def test_message_append_failure_rolls_back_summary_finalization(
     db_engine: AsyncEngine,
     db_session: AsyncSession,
@@ -387,6 +425,64 @@ async def test_concurrent_delivery_allows_only_one_active_worker(
     delivery = await winner
     assert delivery.created_message is True
     assert call_count == 1
+    db_session.expire_all()
+    assert len(await _root_assistant_messages(db_session, session_id)) == 1
+
+
+@pytest.mark.parametrize("winner_status", ["completed", "fallback"])
+async def test_claim_loser_idempotently_returns_after_winner_already_finished(
+    winner_status: str,
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal_id, session_id = await _create_executed_device_result(
+        db_session,
+        test_user,
+        content="hostname finished-winner-switch\n",
+    )
+    loser_reached_claim = asyncio.Event()
+    release_loser_claim = asyncio.Event()
+    claim_calls = 0
+    original_claim = hitl_execution_result_crud.claim_summary
+
+    async def ordered_claim(*args: Any, **kwargs: Any):
+        nonlocal claim_calls
+        claim_calls += 1
+        if claim_calls == 1:
+            loser_reached_claim.set()
+            await release_loser_claim.wait()
+        return await original_claim(*args, **kwargs)
+
+    async def fake_chat(*args: Any, **kwargs: Any) -> ChatResult:
+        if winner_status == "fallback":
+            return _chat_result("provider failed", finish_reason="error")
+        return _chat_result("已完成赢家总结")
+
+    monkeypatch.setattr(hitl_execution_result_crud, "claim_summary", ordered_claim)
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    loser = asyncio.create_task(
+        deliver_device_query_summary(
+            session_factory=session_factory,
+            proposal_id=proposal_id,
+            chat_fn=fake_chat,
+        )
+    )
+    await loser_reached_claim.wait()
+
+    winner = await deliver_device_query_summary(
+        session_factory=session_factory,
+        proposal_id=proposal_id,
+        chat_fn=fake_chat,
+    )
+    release_loser_claim.set()
+    loser_delivery = await loser
+
+    assert winner.summary_status == winner_status
+    assert loser_delivery.content == winner.content
+    assert loser_delivery.summary_status == winner.summary_status
+    assert loser_delivery.created_message is False
     db_session.expire_all()
     assert len(await _root_assistant_messages(db_session, session_id)) == 1
 

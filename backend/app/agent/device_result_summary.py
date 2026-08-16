@@ -114,6 +114,15 @@ def split_config_lines(content: str, *, limit: int = SUMMARY_CHUNK_LIMIT) -> lis
     return chunks
 
 
+def _contains_full_config(summary: str, config: str) -> bool:
+    """Detect a verbatim full-config echo despite newline or edge-whitespace changes."""
+    normalized_config = config.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized_config:
+        return False
+    normalized_summary = summary.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return normalized_config in normalized_summary
+
+
 async def _find_summary_message_id(
     db: AsyncSession,
     *,
@@ -294,7 +303,7 @@ async def deliver_device_query_summary(
             stale_before=stale_before,
         )
         if claimed is None:
-            claim_db.expire_all()
+            claim_db.expire(result_row)
             current = await hitl_execution_result_crud.get_by_proposal(claim_db, proposal_id)
             if current is not None and current.summary_status in {"completed", "fallback"}:
                 return await _existing_delivery(claim_db, proposal=proposal, result_row=current)
@@ -315,6 +324,8 @@ async def deliver_device_query_summary(
                 db=model_db,
                 summary_input=summary_input,
             )
+            if _contains_full_config(content, summary_input.content):
+                raise _SummaryModelError("summary model echoed the full device config")
         summary_status: Literal["completed", "fallback"] = "completed"
     except Exception:
         content = SUMMARY_FALLBACK_MESSAGE
