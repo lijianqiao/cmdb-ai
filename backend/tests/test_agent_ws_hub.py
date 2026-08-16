@@ -36,6 +36,7 @@ _SAFE_SUMMARY_KEYS = frozenset(
         "asset_id",
         "result_excerpt",
         "last_error",
+        "has_full_result",
         "execution_started_at",
         "resolved_at",
     }
@@ -226,6 +227,34 @@ async def test_ws_hitl_publisher_maps_hitl_pending_with_safe_payload() -> None:
     assert payload["reason"] == "通知运维"
     assert payload["asset_id"] == 3
     assert _SENSITIVE_KEYS.isdisjoint(payload.keys())
+
+
+async def test_ws_hitl_publisher_keeps_result_flag_and_filters_full_content() -> None:
+    """结果存在标志可通知前端，但任何完整设备正文都不得进入 WebSocket。"""
+    hub = AgentWsHub()
+    ws = FakeWebSocket()
+    await hub.connect(42, ws)  # type: ignore[arg-type]
+    publisher = WsHitlEventPublisher(hub=hub)
+
+    await publisher.publish(
+        session_id=42,
+        event_type="hitl_resolved",
+        payload={
+            "proposal_id": 7,
+            "action_type": "device_query",
+            "status": "EXECUTED",
+            "reason": "查看配置",
+            "asset_id": 3,
+            "has_full_result": True,
+            "content": "secret-config",
+        },
+    )
+
+    await wait_until(lambda: len(ws.sent) == 1)
+    payload = ws.sent[0]["payload"]
+    assert payload["has_full_result"] is True
+    assert "content" not in payload
+    assert "secret-config" not in str(payload)
 
 
 async def test_ws_hitl_publisher_maps_all_hitl_event_types() -> None:

@@ -38,6 +38,7 @@ _HITL_SAFE_KEYS = frozenset(
         "asset_id",
         "result_excerpt",
         "last_error",
+        "has_full_result",
         "execution_started_at",
         "resolved_at",
     }

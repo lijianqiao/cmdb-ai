@@ -11,7 +11,7 @@
 3. 合法提案始终先以 PENDING 追加；assist/full 档位下按策略表自动批准，但不执行。
 4. decide_proposal 只复用 CRUD 的审批状态机，不隐式恢复执行，避免人工 API 路径重复执行。
 5. resume_proposal 委托独立执行服务 execute_approved_proposal，聊天与 HTTP 路径复用同一语义。
-6. 对 Agent 和事件发布器只暴露安全摘要，不返回原始 payload，避免设备凭据或未知字段泄露。
+6. 对 Agent 和事件发布器只暴露安全摘要（含全文结果存在标志），不返回原始 payload，避免设备凭据或未知字段泄露。
 """
 
 from collections.abc import Mapping
@@ -104,9 +104,10 @@ class ProposalSafeSummary:
     result_excerpt: str | None = None
     # 仅在执行失败后有值；内容是执行器的分类信息，不含原始异常/设备细节。
     last_error: str | None = None
+    has_full_result: bool = False
 
 
-def _summary(proposal: HitlProposal) -> ProposalSafeSummary:
+def _summary(proposal: HitlProposal, *, has_full_result: bool = False) -> ProposalSafeSummary:
     """从持久化对象提取白名单字段，绝不透传完整 payload。"""
     payload = proposal.action_payload
     raw_asset_id = payload.get("asset_id")
@@ -128,6 +129,7 @@ def _summary(proposal: HitlProposal) -> ProposalSafeSummary:
         asset_id=asset_id,
         result_excerpt=result_excerpt,
         last_error=last_error,
+        has_full_result=has_full_result,
     )
 
 
@@ -136,13 +138,14 @@ async def _publish(
     *,
     proposal: HitlProposal,
     event_type: str,
+    has_full_result: bool = False,
 ) -> None:
     """通过给定发布器发送安全摘要，未提供时使用空实现。"""
     event_publisher = publisher or NoopHitlEventPublisher()
     await event_publisher.publish(
         session_id=proposal.session_id,
         event_type=event_type,
-        payload=asdict(_summary(proposal)),
+        payload=asdict(_summary(proposal, has_full_result=has_full_result)),
     )
 
 

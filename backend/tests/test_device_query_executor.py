@@ -103,7 +103,7 @@ async def test_connection_failure_does_not_leak_raw_exception_text(
     assert "10.9.9.9" not in result.message
 
 
-async def test_long_output_is_truncated(
+async def test_long_output_is_returned_in_full(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
@@ -126,8 +126,8 @@ async def test_long_output_is_truncated(
             db_session, asset=asset, command_name="show_version", dynamic_password=None
         )
 
-    assert result.detail["truncated"] is True
-    assert len(result.detail["output"]) < 10_000
+    assert result.detail["truncated"] is False
+    assert result.detail["output"] == long_output
 
 
 async def test_unknown_command_name_gives_specific_message(

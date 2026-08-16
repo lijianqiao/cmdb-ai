@@ -8,7 +8,7 @@
 实现流程：
 1. execute_approved_proposal 先经 _preflight_and_claim 在同一短事务内复检策略并认领 EXECUTING。
 2. 认领提交后 _execute_prepared 调用注入或默认执行器；执行器内可观测已提交的 EXECUTING 状态。
-3. 执行成功后再开事务 mark_executed；执行失败或异常统一 mark_unknown(dispatch_outcome_unknown)。
+3. 执行成功后在同一收尾事务 mark_executed、保存安全预览，并仅为查询动作保存完整正文；执行失败或异常统一 mark_unknown(dispatch_outcome_unknown)。
 4. reconcile_executing_proposals 供启动恢复，将遗留 EXECUTING 批量转为 UNKNOWN。
 5. 预检失败（命令不存在、动态凭据缺失）不认领，提案保持 APPROVED。
 """
@@ -39,12 +39,22 @@ from app.agent.hitl import (
 )
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
+from app.crud.hitl_execution_result import hitl_execution_result_crud
 from app.crud.hitl_proposal import InvalidHitlTransitionError, hitl_proposal_crud
 from app.models.cmdb_asset import CmdbAsset
 from app.models.hitl_proposal import HitlProposal
 from app.utils.audit import log_audit
 
 logger = logging.getLogger(__name__)
+
+_OUTPUT_PREVIEW_LIMIT = 4000
+
+
+def build_result_preview(text: str, *, limit: int = _OUTPUT_PREVIEW_LIMIT) -> str:
+    """构造可进入安全摘要的设备输出预览，完整正文只保存至专用结果表。"""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…(截断)"
 
 
 class NotifyExecutorProtocol(Protocol):
@@ -89,6 +99,15 @@ class PreparedExecution:
     asset: CmdbAsset | None = None
 
 
+async def _summary_with_persisted_result(
+    db: AsyncSession,
+    proposal: HitlProposal,
+) -> ProposalSafeSummary:
+    """仅由专用结果表的持久化记录派生完整结果存在标志。"""
+    result = await hitl_execution_result_crud.get_by_proposal(db, proposal.id)
+    return _summary(proposal, has_full_result=result is not None)
+
+
 def _detach_asset(asset: CmdbAsset) -> CmdbAsset:
     """从会话中分离资产副本，供后续独立事务使用。"""
     make_transient(asset)
@@ -118,7 +137,7 @@ async def _poll_executing_terminal(
         if refreshed is None:
             raise HitlResumeError(f"HITL 提案不存在：{proposal_id}")
         if refreshed.status == "EXECUTED":
-            return _summary(refreshed)
+            return await _summary_with_persisted_result(db, refreshed)
         if refreshed.status == "APPROVED":
             return refreshed
         if refreshed.status == "UNKNOWN":
@@ -149,7 +168,7 @@ async def _handle_claim_conflict(
     if refreshed is None:
         raise HitlResumeError(f"HITL 提案不存在：{proposal_id}")
     if refreshed.status == "EXECUTED":
-        return _summary(refreshed)
+        return await _summary_with_persisted_result(db, refreshed)
     if refreshed.status == "UNKNOWN":
         raise HitlResumeError("状态 UNKNOWN 的 HITL 提案不可恢复执行")
     if refreshed.status == "EXECUTING":
@@ -185,7 +204,7 @@ async def _preflight_and_claim(
         if proposal is None:
             raise HitlResumeError(f"HITL 提案不存在：{proposal_id}")
         if proposal.status == "EXECUTED":
-            return _summary(proposal)
+            return await _summary_with_persisted_result(db, proposal)
         if proposal.status == "EXECUTING":
             polled = await _poll_executing_terminal(db, proposal_id)
             if isinstance(polled, ProposalSafeSummary):
@@ -447,9 +466,16 @@ async def _mark_execution_unexecuted(
 async def _publish_execution_summary(
     publisher: HitlEventPublisher | None,
     proposal: HitlProposal,
+    *,
+    has_full_result: bool,
 ) -> None:
     """发布执行成功后的安全摘要事件。"""
-    await _publish(publisher, proposal=proposal, event_type="hitl_resolved")
+    await _publish(
+        publisher,
+        proposal=proposal,
+        event_type="hitl_resolved",
+        has_full_result=has_full_result,
+    )
 
 
 async def execute_approved_proposal(
@@ -547,15 +573,23 @@ async def execute_approved_proposal(
     try:
         async with session_factory() as finish_db:
             finished = await hitl_proposal_crud.mark_executed(finish_db, proposal_id)
+            has_full_result = False
             if finished.action_type in ("device_query", "device_control"):
                 output = result.detail.get("output")
                 if isinstance(output, str):
                     updated_payload = dict(finished.action_payload)
-                    updated_payload["last_result_excerpt"] = output
+                    updated_payload["last_result_excerpt"] = build_result_preview(output)
                     updated_payload.pop("last_error", None)
                     if updated_payload != finished.action_payload:
                         finished.action_payload = updated_payload
                         await finish_db.flush()
+                    if finished.action_type == "device_query":
+                        await hitl_execution_result_crud.create_for_proposal(
+                            finish_db,
+                            proposal_id=finished.id,
+                            content=output,
+                        )
+                        has_full_result = True
             await log_audit(
                 finish_db,
                 actor_user_id,
@@ -579,8 +613,8 @@ async def execute_approved_proposal(
             session_factory, proposal_id, publisher, actor_user_id=actor_user_id
         )
 
-    await _publish_execution_summary(publisher, finished)
-    return _summary(finished)
+    await _publish_execution_summary(publisher, finished, has_full_result=has_full_result)
+    return _summary(finished, has_full_result=has_full_result)
 
 
 async def reconcile_executing_proposals(

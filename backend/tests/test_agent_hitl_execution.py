@@ -12,13 +12,20 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.agent import hitl_execution
 from app.agent.executors import ExecutionResult
-from app.agent.hitl import HitlResumeError, ProposalSafeSummary
-from app.agent.hitl_execution import _preflight_and_claim, execute_approved_proposal
+from app.agent.hitl import HitlResumeError, ProposalSafeSummary, resume_proposal
+from app.agent.hitl_execution import (
+    _preflight_and_claim,
+    build_result_preview,
+    execute_approved_proposal,
+)
 from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
+from app.crud.hitl_execution_result import hitl_execution_result_crud
 from app.crud.hitl_proposal import InvalidHitlTransitionError, hitl_proposal_crud
+from app.models.agent_session import AgentSession
 from app.models.audit_log import AuditLog
 from app.models.cmdb_asset import CmdbAsset
 from app.models.hitl_proposal import HitlProposal
@@ -30,6 +37,10 @@ pytestmark = pytest.mark.asyncio
 async def _approved_device_proposal(
     db: AsyncSession,
     user: User,
+    *,
+    action_type: str = "device_query",
+    command_name: str = "show_version",
+    vendor: str = "cisco_iosxe",
 ) -> tuple[HitlProposal, int]:
     session = await agent_session_crud.create(
         db,
@@ -43,7 +54,7 @@ async def _approved_device_proposal(
             "ip_address": "10.0.0.42",
             "business_system": "test",
             "subnet_cidr": "",
-            "vendor": "cisco_iosxe",
+            "vendor": vendor,
             "credential_type": "dynamic",
             "credential_username": "admin",
         },
@@ -52,10 +63,10 @@ async def _approved_device_proposal(
         db,
         session_id=session.id,
         proposed_by_agent_id=None,
-        action_type="device_query",
+        action_type=action_type,
         action_payload={
             "asset_id": asset.id,
-            "command_name": "show_version",
+            "command_name": command_name,
             "proposal_reason": "verify policy drift",
         },
     )
@@ -107,6 +118,145 @@ class RecordingDeviceExecutor:
             (asset.id, command_name, dynamic_password, interface_name)
         )
         return ExecutionResult(ok=True, message="ok")
+
+
+class OutputDeviceExecutor:
+    """返回受控假设备输出，验证执行收尾的数据分流。"""
+
+    def __init__(self, output: str) -> None:
+        self.output = output
+
+    async def execute(
+        self,
+        db: AsyncSession,
+        *,
+        asset: CmdbAsset,
+        command_name: str,
+        dynamic_password: str | None,
+        interface_name: str | None = None,
+    ) -> ExecutionResult:
+        return ExecutionResult(
+            ok=True,
+            message="ok",
+            detail={"output": self.output, "truncated": False},
+            dispatched=True,
+        )
+
+
+async def test_build_result_preview_preserves_at_limit_and_marks_long_output() -> None:
+    """预览在边界内原样返回，越界时必须附上固定截断标记。"""
+    assert build_result_preview("A" * 4000) == "A" * 4000
+    assert build_result_preview("A" * 4001) == "A" * 4000 + "…(截断)"
+
+
+async def test_device_query_persists_full_output_and_repeated_resume_is_idempotent(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """查询正文只入专用表；摘要和重复恢复都只能看到安全预览及存在标志。"""
+    raw_output = "<H3C>display current-configuration\n" + "A" * 5000
+    proposal, _ = await _approved_device_proposal(
+        db_session,
+        test_user,
+        command_name="show_running_config",
+        vendor="hp_comware",
+    )
+    proposal_id = proposal.id
+    user_id = test_user.id
+    fake_executor = OutputDeviceExecutor(raw_output)
+    monkeypatch.setattr(hitl_execution, "DeviceQueryExecutor", lambda: fake_executor)
+
+    summary = await resume_proposal(
+        db_session,
+        proposal_id=proposal_id,
+        actor_user_id=user_id,
+        dynamic_password="one-use-password",
+    )
+    repeated_summary = await resume_proposal(
+        db_session,
+        proposal_id=proposal_id,
+        actor_user_id=user_id,
+        dynamic_password="one-use-password",
+    )
+
+    expected_preview = raw_output[:4000] + "…(截断)"
+    assert summary.status == "EXECUTED"
+    assert summary.result_excerpt == expected_preview
+    assert summary.has_full_result is True
+    assert repeated_summary.has_full_result is True
+    db_session.expire_all()
+    persisted = await hitl_proposal_crud.get(db_session, proposal_id)
+    assert persisted is not None
+    assert persisted.status == "EXECUTED"
+    assert persisted.action_payload["last_result_excerpt"] == expected_preview
+    result_row = await hitl_execution_result_crud.get_by_proposal(db_session, proposal_id)
+    assert result_row is not None
+    assert result_row.content == raw_output
+    assert result_row.content_length == len(raw_output)
+
+
+async def test_device_control_only_persists_preview_without_full_result(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """会改变状态的 device_control 维持既有语义，不得写入查询正文表。"""
+    raw_output = "control completed"
+    proposal, _ = await _approved_device_proposal(
+        db_session,
+        test_user,
+        action_type="device_control",
+        command_name="reboot",
+    )
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    summary = await execute_approved_proposal(
+        session_factory=session_factory,
+        proposal_id=proposal.id,
+        actor_user_id=test_user.id,
+        dynamic_password="one-use-password",
+        device_executor=OutputDeviceExecutor(raw_output),
+    )
+
+    assert summary.result_excerpt == raw_output
+    assert summary.has_full_result is False
+    result_row = await hitl_execution_result_crud.get_by_proposal(db_session, proposal.id)
+    assert result_row is None
+
+
+async def test_execution_result_rows_cascade_when_proposal_or_session_is_deleted(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """删除提案或所属会话时，数据库外键必须删除其完整查询结果。"""
+    proposal, _ = await _approved_device_proposal(db_session, test_user)
+    await hitl_execution_result_crud.create_for_proposal(
+        db_session,
+        proposal_id=proposal.id,
+        content="proposal result",
+    )
+    await db_session.commit()
+    await db_session.delete(proposal)
+    await db_session.commit()
+    assert await hitl_execution_result_crud.get_by_proposal(db_session, proposal.id) is None
+
+    session_proposal, _ = await _approved_device_proposal(db_session, test_user)
+    await hitl_execution_result_crud.create_for_proposal(
+        db_session,
+        proposal_id=session_proposal.id,
+        content="session result",
+    )
+    await db_session.commit()
+    session = await db_session.get(AgentSession, session_proposal.session_id)
+    assert session is not None
+    await db_session.delete(session)
+    await db_session.commit()
+    assert (
+        await hitl_execution_result_crud.get_by_proposal(db_session, session_proposal.id)
+        is None
+    )
 
 
 async def test_blacklist_added_after_approval_blocks_execution(

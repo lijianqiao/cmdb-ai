@@ -184,6 +184,7 @@ async def test_propose_merges_matching_asset_id_and_returns_safe_summary(
         "asset_id",
         "result_excerpt",
         "last_error",
+        "has_full_result",
     }
     assert [event[1] for event in publisher.events] == ["hitl_pending"]
     assert set(publisher.events[0][2]) == {
@@ -194,6 +195,7 @@ async def test_propose_merges_matching_asset_id_and_returns_safe_summary(
         "asset_id",
         "result_excerpt",
         "last_error",
+        "has_full_result",
     }
 
 

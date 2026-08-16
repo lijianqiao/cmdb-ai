@@ -13,6 +13,8 @@ from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent import executors
+from app.agent.device_commands import get_device_command
 from app.agent.executors import DeviceQueryExecutor, NotifyExecutor
 from app.core.cmdb_credential import encrypt_credential_password
 from app.core.config import settings
@@ -52,6 +54,32 @@ def _generate_fernet_key() -> str:
     from cryptography.fernet import Fernet
 
     return Fernet.generate_key().decode()
+
+
+async def test_run_device_command_returns_full_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """设备查询执行器必须原样返回输出，不能在进入 HITL 收尾前永久截断。"""
+    output = "A" * 5000
+    connection = MagicMock()
+    connection.send_command.return_value = output
+    monkeypatch.setattr(executors, "_open_netmiko_connection", lambda **_: connection)
+
+    result = executors._run_device_command(
+        host="10.11.210.67",
+        vendor="hp_comware",
+        username="admin",
+        password="one-use-password",
+        command_name="show_running_config",
+        definition=get_device_command("show_running_config"),
+        interface_name=None,
+        conn_timeout=5,
+        read_timeout=30,
+    )
+
+    assert result.ok is True
+    assert result.detail["output"] == output
+    assert result.detail["truncated"] is False
 
 
 async def test_device_query_executor_reboot_sends_timing_confirmation(

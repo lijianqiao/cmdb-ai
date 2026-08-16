@@ -112,15 +112,6 @@ class NotifyExecutor:
         )
 
 
-_OUTPUT_TRUNCATE_LIMIT = 4000
-
-
-def _truncate_output(text: str, *, limit: int = _OUTPUT_TRUNCATE_LIMIT) -> tuple[str, bool]:
-    if len(text) <= limit:
-        return text, False
-    return text[:limit] + "…(截断)", True
-
-
 # CMDB 厂商字段 → Netmiko device_type。device_type 决定 Netmiko 登录后发哪条
 # "关闭分页"命令，标错厂商会导致大输出命令卡在分页提示符上读超时。cisco_s300 会启用
 # ANSI 清洗并发送 terminal datadump；cisco_xe 则使用 IOS-XE 的会话初始化。
@@ -176,7 +167,7 @@ def _run_device_command(
     conn_timeout: float,
     read_timeout: float,
 ) -> ExecutionResult:
-    """在工作线程里跑完整条 Netmiko 会话：连接 → 按类型分派 → 截断输出 → 断开。
+    """在工作线程里跑完整条 Netmiko 会话：连接 → 按类型分派 → 返回完整输出 → 断开。
 
     全程同步阻塞，由 DeviceQueryExecutor.execute 用 asyncio.to_thread 调用。
     连接建立后置 dispatched=True，之后任何异常都无法确定命令是否已生效。
@@ -249,17 +240,16 @@ def _run_device_command(
             except Exception:
                 pass
 
-    rendered_output, truncated = _truncate_output(str(output))
     return ExecutionResult(
         ok=True,
         message="命令执行完成",
-        detail={"output": rendered_output, "truncated": truncated},
+        detail={"output": str(output), "truncated": False},
         dispatched=True,
     )
 
 
 class DeviceQueryExecutor:
-    """设备诊断/管控命令执行器：解析凭据、按厂商选真实命令、跑 Netmiko、截断输出。"""
+    """设备诊断/管控命令执行器：解析凭据、按厂商选真实命令、跑 Netmiko、返回完整输出。"""
 
     async def execute(
         self,
