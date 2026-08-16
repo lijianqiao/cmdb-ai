@@ -14,6 +14,7 @@ import { ChatMessageList } from "@/components/ops-assistant/ChatMessageList"
 import { KnowledgeUploadDialog } from "@/components/ops-assistant/KnowledgeUploadDialog"
 import { MonitorAlertBanner } from "@/components/ops-assistant/MonitorAlertBanner"
 import { ConfirmDialog } from "@/components/common/ConfirmDialog"
+import { HitlApprovalDialog } from "@/components/ops-assistant/HitlApprovalDialog"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -125,9 +126,24 @@ export function OpsAssistantPage() {
     void loadSessions()
   }, [loadSessions])
 
+  const [dismissedProposalIds, setDismissedProposalIds] = useState<Set<number>>(
+    () => new Set(),
+  )
+
   useEffect(() => {
     setFullAccessTargetSessionId(null)
   }, [selectedSessionId])
+
+  const pendingHitlList = messages.filter(
+    (m): m is Extract<typeof messages[number], { kind: "hitl" }> =>
+      m.kind === "hitl" && m.status.trim().toUpperCase() === "PENDING",
+  )
+  const latestPendingHitl = pendingHitlList[pendingHitlList.length - 1] ?? null
+
+  const activeHitl =
+    latestPendingHitl && !dismissedProposalIds.has(latestPendingHitl.proposalId)
+      ? latestPendingHitl
+      : null
 
   const handleCreateSession = async (): Promise<void> => {
     if (creating) return
@@ -239,6 +255,26 @@ export function OpsAssistantPage() {
 
       <KnowledgeUploadDialog open={uploadOpen} onOpenChange={setUploadOpen} />
 
+      {activeHitl && selectedSessionId != null ? (
+        <HitlApprovalDialog
+          open={true}
+          onOpenChange={(open) => {
+            if (!open) {
+              setDismissedProposalIds(
+                (prev) => new Set([...prev, activeHitl.proposalId]),
+              )
+            }
+          }}
+          sessionId={selectedSessionId}
+          proposalId={activeHitl.proposalId}
+          actionType={activeHitl.actionType}
+          status={activeHitl.status}
+          reason={activeHitl.reason}
+          assetId={activeHitl.assetId}
+          resultExcerpt={activeHitl.resultExcerpt}
+        />
+      ) : null}
+
       <ConfirmDialog
         open={deleteTarget != null}
         onOpenChange={(open) => {
@@ -275,6 +311,7 @@ export function OpsAssistantPage() {
             <Button
               type="button"
               disabled={patchingApprovalMode}
+              className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/30"
               onClick={() => void handleFullAccessConfirm()}
             >
               {patchingApprovalMode ? <Spinner data-icon="inline-start" /> : null}

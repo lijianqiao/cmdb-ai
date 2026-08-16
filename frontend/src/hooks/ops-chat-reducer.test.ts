@@ -409,4 +409,57 @@ describe("reduceOpsChat snapshot_loaded", () => {
       streaming: false,
     })
   })
+
+  it("多轮对话快照按 createdAt 稳定排序，第一轮的 proposal 正确归属于第一轮", () => {
+    const snapshot = buildSnapshot({
+      messages: [
+        message({
+          id: 1,
+          role: "user",
+          content: "第一次提问",
+          created_at: "2026-08-14T10:00:00Z",
+        }),
+        message({
+          id: 2,
+          role: "assistant",
+          content: "第一次回答",
+          created_at: "2026-08-14T10:00:10Z",
+        }),
+        message({
+          id: 3,
+          role: "user",
+          content: "第二次提问",
+          created_at: "2026-08-14T10:05:00Z",
+        }),
+        message({
+          id: 4,
+          role: "assistant",
+          content: "第二次回答",
+          created_at: "2026-08-14T10:05:10Z",
+        }),
+      ],
+      proposals: [
+        proposal({
+          proposal_id: 101,
+          status: "EXECUTED",
+          created_at: "2026-08-14T10:00:05Z",
+        }),
+      ],
+    })
+
+    const state = reduceOpsChat(empty, {
+      type: "snapshot_loaded",
+      replace: true,
+      snapshot,
+    })
+
+    // 期望顺序：msg:1 (第一次提问) -> hitl:101 (第一次审批) -> msg:2 (第一次回答) -> msg:3 (第二次提问) -> msg:4 (第二次回答)
+    expect(state.items.map((item) => item.id)).toEqual([
+      "message:1",
+      "hitl:101",
+      "message:2",
+      "message:3",
+      "message:4",
+    ])
+  })
 })

@@ -158,4 +158,83 @@ describe("ChatMessageList scroll and pagination", () => {
       expect(mockGetDeviceQueryResult).toHaveBeenCalledWith(22, 7)
     })
   })
+
+  it("最终回答生成完成后折叠中间过程，并提供提问与回答的复制按钮", () => {
+    render(
+      <ChatMessageList
+        sessionId={10}
+        messages={[
+          { kind: "user", id: "msg:1", content: "查一下设备状态" },
+          { kind: "tool_call", id: "tc:1", toolCallId: "c1", name: "ping_target" },
+          { kind: "assistant", id: "msg:2", content: "设备在线，延迟 2ms", streaming: false },
+        ]}
+      />,
+    )
+
+    // 用户提问和模型回答渲染
+    expect(screen.getByText("查一下设备状态")).toBeInTheDocument()
+    expect(screen.getByText("设备在线，延迟 2ms")).toBeInTheDocument()
+
+    // 复制按钮存在（提问与回答各1个）
+    expect(
+      screen.getByRole("button", { name: "复制提问内容" }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole("button", { name: "复制回答内容" }),
+    ).toBeInTheDocument()
+
+    // 点击展开
+    fireEvent.click(screen.getByRole("button", { name: /思考与执行过程/ }))
+    expect(screen.getByText("工具调用 · ping_target")).toBeInTheDocument()
+  })
+
+  it("长提问（>5行）默认显示展开提示，点击气泡切换展开与收起", () => {
+    const longQuestion = "第一行\n第二行\n第三行\n第四行\n第五行\n第六行详细说明"
+    render(
+      <ChatMessageList
+        sessionId={10}
+        messages={[
+          { kind: "user", id: "msg:1", content: longQuestion },
+          { kind: "assistant", id: "msg:2", content: "已收到", streaming: false },
+        ]}
+      />,
+    )
+
+    // 默认展示“点击展开全文”
+    expect(screen.getByText("点击展开全文")).toBeInTheDocument()
+
+    // 点击气泡展开
+    const bubble = screen.getByRole("button", { name: /第一行/ })
+    fireEvent.click(bubble)
+    expect(screen.getByText("点击收起")).toBeInTheDocument()
+
+    // 再次点击收起
+    fireEvent.click(bubble)
+    expect(screen.getByText("点击展开全文")).toBeInTheDocument()
+  })
+
+  it("多步骤问答中，中间的 assistant 阶段性说明文字全部折入执行过程折叠面板", () => {
+    render(
+      <ChatMessageList
+        sessionId={10}
+        messages={[
+          { kind: "user", id: "msg:1", content: "帮我查询资产并备份" },
+          { kind: "assistant", id: "a:1", content: "第一步：正在获取资产详情...", streaming: false },
+          { kind: "tool_call", id: "tc:1", toolCallId: "c1", name: "list_assets" },
+          { kind: "assistant", id: "a:2", content: "资产查询完毕，最终备份成功！", streaming: false },
+        ]}
+      />,
+    )
+
+    // 最终回答必须展示在最外层
+    expect(screen.getByText("资产查询完毕，最终备份成功！")).toBeInTheDocument()
+
+    // 中间阶段性说明文字默认被折叠，最外层不可见
+    expect(screen.queryByText("第一步：正在获取资产详情...")).not.toBeInTheDocument()
+
+    // 点击展开后可见中间说明文字与工具调用
+    fireEvent.click(screen.getByRole("button", { name: /思考与执行过程/ }))
+    expect(screen.getByText("第一步：正在获取资产详情...")).toBeInTheDocument()
+    expect(screen.getByText("工具调用 · list_assets")).toBeInTheDocument()
+  })
 })

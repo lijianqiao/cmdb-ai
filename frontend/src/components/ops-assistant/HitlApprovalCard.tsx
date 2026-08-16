@@ -1,13 +1,10 @@
-/** HITL 审批卡片
-
- * WS 只带安全摘要；有 agent:hitl_approve 时再 HTTP 拉完整 payload。
- * 批准/拒绝走 /hitl/proposals/{id}/decide；拒绝二次确认。
- * device_control stub 失败后状态停留 APPROVED → 展示「已批准但未执行」。
- * device_query + 动态凭据：批准前需输入本次登录密码（不落库、不进审计）。
+/** HITL 审批时间线卡片
+ *
+ * 在时间线中呈现审批状态、执行结果与完整配置抽屉；
+ * 支持动态凭据 InputOTP 输入与审批决策/重试/处置操作。
  */
 
 import { useEffect, useRef, useState } from "react"
-import { isAxiosError } from "axios"
 import { toast } from "sonner"
 
 import { ConfirmDialog } from "@/components/common/ConfirmDialog"
@@ -26,11 +23,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
+import {
+  InputOTP,
+  InputOTPGroup,
+  InputOTPSlot,
+} from "@/components/ui/input-otp"
 import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
+import { Cancel01Icon, Shield02Icon, Tick02Icon } from "@/lib/icons"
 import { usePermission } from "@/hooks/use-permission"
-import { Cancel01Icon, Tick02Icon } from "@/lib/icons"
 import {
   decideHitlProposal,
   getHitlProposal,
@@ -50,8 +51,11 @@ import {
   isRetryAvailable,
   isUnknownResolutionAvailable,
   needsDynamicCredentialPassword,
+  readErrorMessage,
   readLastError,
+  readPayloadMeta,
   shouldShowResultExcerpt,
+  statusLabel,
 } from "@/components/ops-assistant/hitlApprovalCardUtils"
 
 export interface HitlApprovalCardProps {
@@ -67,86 +71,6 @@ export interface HitlApprovalCardProps {
   className?: string
 }
 
-/**
- * 将后端/WS 状态码映射为中文展示文案。
- *
- * Args:
- *   status: 提案状态（大小写不敏感）
- *
- * Returns:
- *   中文状态标签
- */
-function statusLabel(status: string): string {
-  switch (status.trim().toUpperCase()) {
-    case "PENDING":
-      return "等待审批"
-    case "REJECTED":
-      return "已拒绝"
-    case "EXECUTED":
-      return "已执行"
-    case "APPROVED":
-    case "EXECUTION_FAILED":
-      // T10：device_control stub 失败保持 APPROVED，前端统一为「已批准但未执行」
-      return "已批准但未执行"
-    case "UNKNOWN":
-      return "执行结果不确定"
-    default:
-      return status || "未知状态"
-  }
-}
-
-/**
- * 读取接口错误中的中文 message/detail。
- *
- * Args:
- *   error: 捕获的异常
- *   fallback: 默认文案
- *
- * Returns:
- *   可展示的错误字符串
- */
-function readErrorMessage(error: unknown, fallback: string): string {
-  if (!isAxiosError(error)) return fallback
-  const data = error.response?.data
-  if (data && typeof data === "object") {
-    const message = (data as { message?: unknown }).message
-    if (typeof message === "string" && message.trim()) return message
-    const detail = (data as { detail?: unknown }).detail
-    if (typeof detail === "string" && detail.trim()) return detail
-  }
-  return fallback
-}
-
-/**
- * 从完整提案中提取展示用 reason / asset_id（与安全摘要同源）。
- *
- * Args:
- *   proposal: HTTP 详情
- *
- * Returns:
- *   reason 与 assetId
- */
-function readPayloadMeta(proposal: HitlProposal): {
-  reason: string
-  assetId: number | null
-} {
-  const payload = proposal.action_payload
-  const rawReason = payload.proposal_reason
-  const reason = typeof rawReason === "string" ? rawReason : ""
-  const rawAsset = payload.asset_id
-  const assetId =
-    typeof rawAsset === "number" && Number.isInteger(rawAsset) ? rawAsset : null
-  return { reason, assetId }
-}
-
-/**
- * HITL 审批卡片：权限门控拉取完整载荷，并提供批准/拒绝。
- *
- * Args:
- *   proposalId / actionType / status / reason / assetId: WS 安全摘要字段
- *   resultExcerpt: WS 可能携带的执行结果片段
- *   className: 外层 Card class
- */
 export function HitlApprovalCard({
   sessionId,
   proposalId,
@@ -220,24 +144,14 @@ export function HitlApprovalCard({
     setDynamicPassword("")
     setDeciding(false)
     setRejectOpen(false)
-  }, [sessionId, proposalId])
 
-  useEffect(() => {
     fullResultRequestRef.current += 1
     setFullResultOpen(false)
     setFullResult(null)
     setFullResultLoading(false)
     setFullResultError(null)
     setSummaryRecovering(false)
-  }, [sessionId, proposalId])
 
-  useEffect(() => {
-    if (localStatus != null && status.trim().toUpperCase() !== "PENDING") {
-      setLocalStatus(null)
-    }
-  }, [status, localStatus])
-
-  useEffect(() => {
     if (!canApprove) return
 
     let cancelled = false
@@ -249,9 +163,9 @@ export function HitlApprovalCard({
         if (!cancelled) setDetail(proposal)
       })
       .catch((error: unknown) => {
-        if (cancelled) return
-        const message = readErrorMessage(error, "加载审批详情失败")
-        setDetailError(message)
+        if (!cancelled) {
+          setDetailError(readErrorMessage(error, "加载审批详情失败"))
+        }
       })
       .finally(() => {
         if (!cancelled) setDetailLoading(false)
@@ -262,15 +176,24 @@ export function HitlApprovalCard({
     }
   }, [canApprove, sessionId, proposalId])
 
+  useEffect(() => {
+    if (localStatus != null && status.trim().toUpperCase() !== "PENDING") {
+      setLocalStatus(null)
+    }
+  }, [status, localStatus])
+
   const handleApprove = async (): Promise<void> => {
-    if (!canApprove || !isPending || deciding || approveDisabled) return
+    if (!canApprove || !isPending || deciding) return
+    const passwordToUse = dynamicPassword.trim()
+    if (needsDynamicPassword && !passwordToUse) return
+
     setDeciding(true)
     try {
       const body: { approve: true; dynamic_credential_password?: string } = {
         approve: true,
       }
       if (needsDynamicPassword) {
-        body.dynamic_credential_password = dynamicPassword.trim()
+        body.dynamic_credential_password = passwordToUse
       }
       const updated = await decideHitlProposal(proposalId, body)
       setDetail(updated)
@@ -307,11 +230,12 @@ export function HitlApprovalCard({
 
   const handleRetry = async (): Promise<void> => {
     if (!retryAvailable || deciding) return
+    const passwordToUse = dynamicPassword.trim()
     setDeciding(true)
     try {
       const body: { dynamic_credential_password?: string } = {}
       if (needsDynamicPassword) {
-        body.dynamic_credential_password = dynamicPassword.trim()
+        body.dynamic_credential_password = passwordToUse
       }
       const updated = await retryHitlProposal(proposalId, body)
       setDetail(updated)
@@ -405,20 +329,34 @@ export function HitlApprovalCard({
 
   return (
     <>
-      <Card className={cn("bg-card", className)}>
-        <CardHeader className="gap-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={isPending ? "outline" : "secondary"}>
-              {statusLabel(displayStatus)}
-            </Badge>
-            {displayActionType ? (
-              <Badge variant="secondary">{displayActionType}</Badge>
-            ) : null}
-            <span className="text-xs text-muted-foreground">
-              #{proposalId}
-            </span>
+      <ConfirmDialog
+        open={rejectOpen}
+        onOpenChange={setRejectOpen}
+        title="确认拒绝该提案"
+        description="拒绝后当前命令或变更将不会在设备上执行，该轮次将以拒绝结果继续。"
+        confirmText="确认拒绝"
+        cancelText="取消"
+        variant="destructive"
+        onConfirm={handleRejectConfirm}
+      />
+
+      <Card className={cn("overflow-hidden border border-border/70 bg-card", className)}>
+        <CardHeader className="gap-2 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Shield02Icon className="size-4 text-primary" />
+              <CardTitle className="text-base font-semibold">人工审批</CardTitle>
+              <Badge variant={isPending ? "default" : "secondary"}>
+                {statusLabel(displayStatus)}
+              </Badge>
+              {displayActionType ? (
+                <Badge variant="outline">{displayActionType}</Badge>
+              ) : null}
+              <span className="text-xs text-muted-foreground">
+                #{proposalId}
+              </span>
+            </div>
           </div>
-          <CardTitle className="text-base">人工审批</CardTitle>
           <CardDescription>
             {canApprove
               ? "完整动作载荷仅对审批人可见。"
@@ -426,7 +364,7 @@ export function HitlApprovalCard({
           </CardDescription>
         </CardHeader>
 
-        <CardContent className="flex flex-col gap-2">
+        <CardContent className="flex flex-col gap-2 p-4 pt-0">
           {displayReason ? (
             <p className="text-sm text-foreground">{displayReason}</p>
           ) : (
@@ -459,10 +397,10 @@ export function HitlApprovalCard({
               <Collapsible
                 open={fullResultOpen}
                 onOpenChange={handleFullResultOpenChange}
-                className="flex flex-col gap-2"
+                className="flex flex-col gap-2 border-t border-border/40 pt-2"
               >
                 <CollapsibleTrigger
-                  render={<Button type="button" size="sm" variant="outline" />}
+                  render={<Button type="button" size="xs" variant="outline" />}
                 >
                   {fullResultOpen ? "收起完整配置" : "查看完整配置"}
                 </CollapsibleTrigger>
@@ -480,7 +418,7 @@ export function HitlApprovalCard({
                       {fullResult == null ? (
                         <Button
                           type="button"
-                          size="sm"
+                          size="xs"
                           variant="outline"
                           onClick={() => void loadFullResult()}
                         >
@@ -503,7 +441,7 @@ export function HitlApprovalCard({
                       {fullResult.summary_status === "pending" ? (
                         <Button
                           type="button"
-                          size="sm"
+                          size="xs"
                           variant="outline"
                           disabled={summaryRecovering}
                           onClick={() => void handleRecoverSummary()}
@@ -548,22 +486,29 @@ export function HitlApprovalCard({
         </CardContent>
 
         {canApprove && isPending ? (
-          <CardFooter className="flex flex-col items-stretch gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+          <CardFooter className="flex flex-col items-stretch gap-3 border-t border-border/40 p-4 sm:flex-row sm:flex-wrap sm:items-end">
             {needsDynamicPassword ? (
               <div className="flex min-w-[200px] flex-1 flex-col gap-1.5">
                 <Label htmlFor={`hitl-dynamic-password-${proposalId}`}>
-                  动态凭据密码
+                  动态凭据密码 (OTP)
                 </Label>
-                <Input
+                <InputOTP
                   id={`hitl-dynamic-password-${proposalId}`}
-                  type="password"
-                  autoComplete="off"
-                  placeholder="批准时输入本次登录密码"
+                  maxLength={6}
                   value={dynamicPassword}
+                  onChange={(val) => setDynamicPassword(val)}
                   disabled={deciding}
-                  onChange={(event) => setDynamicPassword(event.target.value)}
                   data-testid="hitl-dynamic-password"
-                />
+                >
+                  <InputOTPGroup>
+                    <InputOTPSlot index={0} />
+                    <InputOTPSlot index={1} />
+                    <InputOTPSlot index={2} />
+                    <InputOTPSlot index={3} />
+                    <InputOTPSlot index={4} />
+                    <InputOTPSlot index={5} />
+                  </InputOTPGroup>
+                </InputOTP>
               </div>
             ) : null}
             <div className="flex flex-wrap gap-2">
@@ -596,30 +541,38 @@ export function HitlApprovalCard({
         ) : null}
 
         {retryAvailable ? (
-          <CardFooter className="flex flex-col items-stretch gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+          <CardFooter className="flex flex-col items-stretch gap-3 border-t border-border/40 p-4 sm:flex-row sm:flex-wrap sm:items-end">
             {needsDynamicPassword ? (
               <div className="flex min-w-[200px] flex-1 flex-col gap-1.5">
                 <Label htmlFor={`hitl-retry-password-${proposalId}`}>
-                  动态凭据密码
+                  重试动态凭据密码 (OTP)
                 </Label>
-                <Input
+                <InputOTP
                   id={`hitl-retry-password-${proposalId}`}
-                  type="password"
-                  autoComplete="off"
-                  placeholder="重试时输入本次登录密码"
+                  maxLength={6}
                   value={dynamicPassword}
+                  onChange={(val) => setDynamicPassword(val)}
                   disabled={deciding}
-                  onChange={(event) => setDynamicPassword(event.target.value)}
                   data-testid="hitl-retry-password"
-                />
+                >
+                  <InputOTPGroup>
+                    <InputOTPSlot index={0} />
+                    <InputOTPSlot index={1} />
+                    <InputOTPSlot index={2} />
+                    <InputOTPSlot index={3} />
+                    <InputOTPSlot index={4} />
+                    <InputOTPSlot index={5} />
+                  </InputOTPGroup>
+                </InputOTP>
               </div>
             ) : null}
             <Button
               type="button"
               size="sm"
-              variant="outline"
               disabled={
-                deciding || (needsDynamicPassword && !dynamicPassword.trim())
+                deciding ||
+                detailLoading ||
+                (needsDynamicPassword && !dynamicPassword.trim())
               }
               onClick={() => void handleRetry()}
               data-testid="hitl-retry-button"
@@ -635,50 +588,29 @@ export function HitlApprovalCard({
         ) : null}
 
         {unknownResolutionAvailable ? (
-          <CardFooter className="flex flex-col items-stretch gap-3">
-            <p className="text-xs text-muted-foreground">
-              执行结果不确定。请先在真实设备上核实命令是否已生效，再选择下方处置方式。
-            </p>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                type="button"
-                size="sm"
-                disabled={deciding || detailLoading}
-                onClick={() => void handleResolveUnknown("confirm_executed")}
-                data-testid="hitl-confirm-executed-button"
-              >
-                {deciding ? (
-                  <Spinner data-icon="inline-start" />
-                ) : (
-                  <Tick02Icon data-icon="inline-start" />
-                )}
-                确认已执行（我已检查设备）
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={deciding || detailLoading}
-                onClick={() => void handleResolveUnknown("allow_retry")}
-                data-testid="hitl-allow-retry-button"
-              >
-                允许重试（我已检查设备）
-              </Button>
-            </div>
+          <CardFooter className="flex flex-wrap gap-2 border-t border-border/40 p-4">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={deciding}
+              onClick={() => void handleResolveUnknown("confirm_executed")}
+              data-testid="hitl-confirm-executed-button"
+            >
+              确认已执行
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              disabled={deciding}
+              onClick={() => void handleResolveUnknown("allow_retry")}
+              data-testid="hitl-allow-retry-button"
+            >
+              允许重试
+            </Button>
           </CardFooter>
         ) : null}
       </Card>
-
-      <ConfirmDialog
-        open={rejectOpen}
-        onOpenChange={setRejectOpen}
-        title="确认拒绝提案"
-        description="拒绝后该提案不可再批准，确定要继续吗？"
-        confirmText="确认拒绝"
-        cancelText="取消"
-        variant="destructive"
-        onConfirm={handleRejectConfirm}
-      />
     </>
   )
 }

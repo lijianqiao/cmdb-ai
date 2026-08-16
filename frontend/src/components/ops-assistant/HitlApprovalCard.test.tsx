@@ -22,6 +22,19 @@ afterEach(() => {
   cleanup()
 })
 
+beforeEach(() => {
+  if (typeof window !== "undefined") {
+    window.ResizeObserver = class ResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  }
+  if (typeof document !== "undefined") {
+    document.elementFromPoint = () => null
+  }
+})
+
 vi.mock("@/hooks/use-permission", () => ({
   usePermission: vi.fn(),
 }))

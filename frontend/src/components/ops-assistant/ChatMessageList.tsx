@@ -1,15 +1,21 @@
 /** 运维助手消息时间线
-
- * 渲染 useOpsChat 的 OpsChatItem：用户/助手气泡、tool_call Badge、HITL 卡片、错误行。
+ *
+ * 按对话轮次（Turn）渲染：
+ * 1. 用户提问气泡（支持折叠 5 行，点击展开全部；支持复制）
+ * 2. 中间思考与执行过程（中间文字、工具调用、子 Agent、HITL 审批；生成中展开，生成完毕自动折叠）
+ * 3. 助手最终回答（Markdown 渲染；支持粘性悬浮复制及底部复制按钮）
  */
 
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 
-import { HitlApprovalCard } from "@/components/ops-assistant/HitlApprovalCard"
-import { ChildAgentStatusCard } from "@/components/ops-assistant/ChildAgentStatusCard"
+import {
+  groupMessagesIntoTurns,
+  type ChatTurnGroup,
+} from "@/components/ops-assistant/chatMessageUtils"
+import { ExecutionProcessCollapsible } from "@/components/ops-assistant/ExecutionProcessCollapsible"
+import { CopyButton } from "@/components/ops-assistant/CopyButton"
 import { ChatMarkdown } from "@/components/ops-assistant/ChatMarkdown"
-import { BubbleChatIcon } from "@/lib/icons"
-import { Badge } from "@/components/ui/badge"
+import { BubbleChatIcon, ChevronDownIcon, ChevronUpIcon } from "@/lib/icons"
 import {
   Empty,
   EmptyDescription,
@@ -34,111 +40,154 @@ export interface ChatMessageListProps {
 }
 
 /**
- * 单条时间线渲染。
- *
- * Args:
- *   item: OpsChatItem
+ * 用户提问气泡组件（长提问最多展示 5 行，点击展开全文）
  */
-function MessageRow({
-  item,
+function UserMessageBubble({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const isLong = content.split("\n").length > 5 || content.length > 220
+
+  return (
+    <div className="group relative flex justify-end">
+      <div
+        role={isLong ? "button" : undefined}
+        tabIndex={isLong ? 0 : undefined}
+        onClick={() => {
+          if (isLong) setExpanded(!expanded)
+        }}
+        onKeyDown={(e) => {
+          if (isLong && (e.key === "Enter" || e.key === " ")) {
+            e.preventDefault()
+            setExpanded(!expanded)
+          }
+        }}
+        className={cn(
+          "relative max-w-[85%] rounded-2xl bg-muted px-3.5 py-2.5 text-sm text-foreground transition-all",
+          isLong && "cursor-pointer select-text hover:bg-muted/90",
+        )}
+      >
+        {/* 右上角粘性悬浮复制提问按钮（向下滚动时长提问复制按钮始终吸附在右上角） */}
+        <div className="sticky top-2 float-right z-10 -mr-1 -mt-1 ml-2 mb-2 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <CopyButton
+            text={content}
+            label="复制提问内容"
+            successMessage="已复制提问内容"
+            className="size-6 rounded-md bg-background/90 shadow-xs backdrop-blur-xs"
+          />
+        </div>
+
+        {/* 提问正文（超出 5 行时根据 expanded 状态截断） */}
+        <p
+          className={cn(
+            "whitespace-pre-wrap break-words",
+            isLong && !expanded && "line-clamp-5",
+          )}
+        >
+          {content}
+        </p>
+
+        {/* 长文本展开/收起提示 */}
+        {isLong ? (
+          <div className="mt-1 flex items-center justify-end gap-1 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground">
+            <span>{expanded ? "点击收起" : "点击展开全文"}</span>
+            {expanded ? (
+              <ChevronUpIcon className="size-3" />
+            ) : (
+              <ChevronDownIcon className="size-3" />
+            )}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 单个问答轮次渲染
+ */
+function TurnRow({
+  turn,
   sessionId,
+  isLastTurn,
 }: {
-  item: OpsChatItem
+  turn: ChatTurnGroup
   sessionId: number
+  isLastTurn: boolean
 }) {
-  switch (item.kind) {
-    case "user":
-      return (
-        <div className="flex justify-end">
-          <div className="max-w-[85%] rounded-2xl bg-muted px-3 py-2 text-sm text-foreground">
-            <p className="whitespace-pre-wrap break-words">{item.content}</p>
+  const isGenerating = Boolean(
+    turn.assistantMessage?.streaming ||
+      (!turn.assistantMessage && isLastTurn && turn.processItems.length > 0),
+  )
+
+  return (
+    <div className="flex flex-col gap-2.5">
+      {/* 1. 用户提问气泡（支持折叠 5 行，点击展开） */}
+      {turn.userMessage ? (
+        <UserMessageBubble content={turn.userMessage.content} />
+      ) : null}
+
+      {/* 2. 中间思考与执行过程（中间文字、工具调用、子 Agent、HITL 审批全部折叠在此） */}
+      {turn.processItems.length > 0 ? (
+        <div className="flex justify-start">
+          <div className="w-full max-w-[90%] md:max-w-2xl">
+            <ExecutionProcessCollapsible
+              sessionId={sessionId}
+              items={turn.processItems}
+              isGenerating={isGenerating}
+            />
           </div>
         </div>
-      )
+      ) : null}
 
-    case "assistant":
-      return (
-        <div className="flex justify-start">
-          <div className="max-w-[85%] rounded-2xl border bg-card px-3 py-2 text-card-foreground">
-            {item.content ? (
-              <ChatMarkdown content={item.content} />
-            ) : item.streaming ? (
+      {/* 3. 助手最终回答（全轮唯一暴露在外的最终结果） */}
+      {turn.assistantMessage ? (
+        <div className="group relative flex justify-start">
+          <div className="relative max-w-[90%] rounded-2xl border bg-card px-4 py-3 text-card-foreground shadow-xs md:max-w-3xl">
+            {/* 右上角粘性悬浮复制按钮（长回答滚动时始终吸附在右上角可视区域内） */}
+            {turn.assistantMessage.content ? (
+              <div className="sticky top-2 float-right z-10 -mr-1 -mt-1 ml-2 mb-2">
+                <CopyButton
+                  text={turn.assistantMessage.content}
+                  label="复制回答内容"
+                  successMessage="已复制回答内容 (Markdown)"
+                  className="size-7 rounded-md border border-border/50 bg-card/95 shadow-xs backdrop-blur-xs hover:bg-muted"
+                />
+              </div>
+            ) : null}
+
+            {/* Markdown 正文 */}
+            {turn.assistantMessage.content ? (
+              <div className="text-sm">
+                <ChatMarkdown content={turn.assistantMessage.content} />
+              </div>
+            ) : turn.assistantMessage.streaming ? (
               <p className="text-sm text-muted-foreground">…</p>
             ) : null}
-            {item.streaming ? (
-              <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
-                <Spinner className="size-3" />
-                <span>生成中</span>
+
+            {/* 流式生成中动画 */}
+            {turn.assistantMessage.streaming ? (
+              <div className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Spinner className="size-3.5 text-primary" />
+                <span>生成中...</span>
               </div>
             ) : null}
           </div>
         </div>
-      )
+      ) : null}
 
-    case "tool_call":
-      return (
-        <div className="flex justify-start">
-          <Badge variant="secondary">工具调用 · {item.name}</Badge>
-        </div>
-      )
-
-    case "hitl":
-      return (
-        <div className="flex justify-start">
-          <div className="w-full max-w-md">
-            <HitlApprovalCard
-              sessionId={sessionId}
-              proposalId={item.proposalId}
-              actionType={item.actionType}
-              status={item.status}
-              reason={item.reason}
-              assetId={item.assetId}
-              resultExcerpt={item.resultExcerpt}
-              hasFullResult={item.hasFullResult}
-            />
+      {/* 4. 错误信息 */}
+      {turn.errors.map((err) => (
+        <div key={err.id} className="flex justify-start">
+          <div className="max-w-[85%] rounded-2xl border border-destructive/30 bg-destructive/5 px-3.5 py-2 text-sm text-destructive">
+            {err.message}
           </div>
         </div>
-      )
-
-    case "child":
-      return (
-        <div className="flex justify-start">
-          <div className="w-full max-w-md">
-            <ChildAgentStatusCard
-              childId={item.childId}
-              role={item.role}
-              taskBrief={item.taskBrief}
-              status={item.status}
-              resultSummary={item.resultSummary}
-            />
-          </div>
-        </div>
-      )
-
-    case "error":
-      return (
-        <div className="flex justify-start">
-          <div className="max-w-[85%] rounded-2xl border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-            {item.message}
-          </div>
-        </div>
-      )
-
-    default:
-      return null
-  }
+      ))}
+    </div>
+  )
 }
 
 /**
  * 聊天消息列表（ScrollArea）；新消息到达时滚到底部，向上分页时保持滚动位置。
- *
- * Args:
- *   messages: 时间线条目
- *   isLoading: 历史加载中显示 Skeleton
- *   hasMore: 是否还有更早消息
- *   isLoadingOlder: 正在加载更早消息
- *   onLoadOlder: 触顶加载回调
- *   className: 外层布局 class
  */
 export function ChatMessageList({
   sessionId,
@@ -228,17 +277,24 @@ export function ChatMessageList({
     )
   }
 
+  const turns = groupMessagesIntoTurns(messages)
+
   return (
     <ScrollArea ref={scrollRootRef} className={cn("bg-background", className)}>
-      <div className="flex flex-col gap-3 p-4">
+      <div className="flex flex-col gap-4 p-4">
         <div ref={topSentinelRef} className="h-px w-full shrink-0" />
         {isLoadingOlder ? (
           <div className="flex justify-center py-2">
             <Spinner className="size-4 text-muted-foreground" />
           </div>
         ) : null}
-        {messages.map((item) => (
-          <MessageRow key={item.id} item={item} sessionId={sessionId} />
+        {turns.map((turn, index) => (
+          <TurnRow
+            key={`${sessionId}-${turn.id}`}
+            turn={turn}
+            sessionId={sessionId}
+            isLastTurn={index === turns.length - 1}
+          />
         ))}
         <div ref={bottomRef} />
       </div>

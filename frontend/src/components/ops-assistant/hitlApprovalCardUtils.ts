@@ -1,14 +1,62 @@
-/** HitlApprovalCard 纯函数：执行结果展示与动态凭据校验 */
+/** HitlApprovalCard / HitlApprovalDialog 纯函数与数据转换工具 */
+
+import { isAxiosError } from "axios"
+import type { HitlProposal } from "@/lib/hitl-api"
 
 /**
- * 是否应在卡片上展示执行结果摘要。
- *
- * Args:
- *   status: 当前展示状态
- *   resultExcerpt: HTTP 详情或 WS 摘要中的结果片段
- *
- * Returns:
- *   为 true 时表示应渲染结果区
+ * 转换 HITL 审批状态显示文案
+ */
+export function statusLabel(status: string): string {
+  switch (status.trim().toUpperCase()) {
+    case "PENDING":
+      return "等待审批"
+    case "REJECTED":
+      return "已拒绝"
+    case "EXECUTED":
+      return "已执行"
+    case "APPROVED":
+    case "EXECUTION_FAILED":
+      return "已批准但未执行"
+    case "UNKNOWN":
+      return "执行结果不确定"
+    default:
+      return status || "未知状态"
+  }
+}
+
+/**
+ * 统一提取 Axios 或未知异常中的错误描述信息
+ */
+export function readErrorMessage(error: unknown, fallback: string): string {
+  if (!isAxiosError(error)) return fallback
+  const data = error.response?.data
+  if (data && typeof data === "object") {
+    const message = (data as { message?: unknown }).message
+    if (typeof message === "string" && message.trim()) return message
+    const detail = (data as { detail?: unknown }).detail
+    if (typeof detail === "string" && detail.trim()) return detail
+  }
+  return fallback
+}
+
+/**
+ * 从提案载荷中解析说明与目标资产 ID
+ */
+export function readPayloadMeta(proposal: HitlProposal): {
+  reason: string
+  assetId: number | null
+} {
+  const payload = proposal.action_payload
+  const rawReason = payload?.proposal_reason
+  const reason = typeof rawReason === "string" ? rawReason : ""
+  const rawAsset = payload?.asset_id
+  const assetId =
+    typeof rawAsset === "number" && Number.isInteger(rawAsset) ? rawAsset : null
+  return { reason, assetId }
+}
+
+/**
+ * 是否应在卡片或弹窗上展示执行结果摘要
  */
 export function shouldShowResultExcerpt(
   status: string,
@@ -19,14 +67,7 @@ export function shouldShowResultExcerpt(
 }
 
 /**
- * 批准或重试设备命令时是否需输入动态凭据密码。
- *
- * Args:
- *   actionType: 动作类型
- *   assetCredentialType: 目标资产凭据类型（仅类型，非密码）
- *
- * Returns:
- *   为 true 时需密码输入框
+ * 批准或重试设备命令时是否需输入动态凭据密码
  */
 export function needsDynamicCredentialPassword(
   actionType: string,
@@ -39,16 +80,7 @@ export function needsDynamicCredentialPassword(
 }
 
 /**
- * 批准按钮是否应禁用（含动态密码必填校验）。
- *
- * Args:
- *   deciding: 正在提交审批
- *   detailLoading: 详情加载中
- *   needsPassword: 是否需动态密码
- *   password: 当前密码输入
- *
- * Returns:
- *   为 true 时禁用批准按钮
+ * 批准按钮是否应禁用（含动态密码必填校验）
  */
 export function isApproveButtonDisabled(
   deciding: boolean,
@@ -62,13 +94,7 @@ export function isApproveButtonDisabled(
 }
 
 /**
- * 从提案载荷中读取上次执行失败的分类信息。
- *
- * Args:
- *   payload: HTTP 详情里的 action_payload
- *
- * Returns:
- *   失败分类文案；无则 null
+ * 从提案载荷中读取上次执行失败的分类信息
  */
 export function readLastError(
   payload: Record<string, unknown> | null | undefined,
@@ -78,28 +104,14 @@ export function readLastError(
 }
 
 /**
- * 是否展示「重试执行」操作（仅 APPROVED 且有审批权限）。
- *
- * Args:
- *   canApprove: 是否持有 agent:hitl_approve
- *   status: 当前展示状态
- *
- * Returns:
- *   为 true 时展示重试按钮
+ * 是否展示「重试执行」操作（仅 APPROVED 且有审批权限）
  */
 export function isRetryAvailable(canApprove: boolean, status: string): boolean {
   return canApprove && status.trim().toUpperCase() === "APPROVED"
 }
 
 /**
- * 是否展示 UNKNOWN 人工处置操作（仅 UNKNOWN 且有审批权限）。
- *
- * Args:
- *   canApprove: 是否持有 agent:hitl_approve
- *   status: 当前展示状态
- *
- * Returns:
- *   为 true 时展示确认已执行与允许重试按钮
+ * 是否展示 UNKNOWN 人工处置操作（仅 UNKNOWN 且有审批权限）
  */
 export function isUnknownResolutionAvailable(
   canApprove: boolean,

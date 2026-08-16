@@ -62,6 +62,7 @@ export type OpsChatItem =
       id: string
       toolCallId: string
       name: string
+      createdAt?: string
     }
   | {
       kind: "hitl"
@@ -75,11 +76,13 @@ export type OpsChatItem =
       resultExcerpt: string | null
       /** 服务端是否保存了可按需读取的完整结果 */
       hasFullResult: boolean
+      createdAt?: string
     }
   | {
       kind: "error"
       id: string
       message: string
+      createdAt?: string
     }
   | {
       kind: "child"
@@ -89,6 +92,7 @@ export type OpsChatItem =
       taskBrief: string
       status: string
       resultSummary: string | null
+      createdAt?: string
     }
 
 export interface OpsChatState {
@@ -162,6 +166,7 @@ export function mapHistoryToItems(messages: AgentMessage[]): OpsChatItem[] {
             id: `toolcall:${row.id}:${toolCallId || nextEphemeralId("tc")}`,
             toolCallId,
             name,
+            createdAt: row.created_at,
           })
         }
       }
@@ -193,6 +198,7 @@ function mapProposalToItem(
     assetId: proposal.asset_id,
     resultExcerpt: proposal.result_excerpt,
     hasFullResult: proposal.has_full_result,
+    createdAt: proposal.created_at,
   }
 }
 
@@ -205,18 +211,33 @@ function mapChildToItem(child: ChildAgentSnapshot): OpsChatItem {
     taskBrief: child.task_brief,
     status: child.status,
     resultSummary: child.result_summary,
+    createdAt: child.created_at,
   }
 }
 
 function mapSnapshotToItems(snapshot: AgentSessionSnapshot): OpsChatItem[] {
-  const items = mapHistoryToItems(snapshot.messages)
+  const items: OpsChatItem[] = mapHistoryToItems(snapshot.messages)
   for (const row of snapshot.proposals) {
     items.push(mapProposalToItem(row))
   }
   for (const row of snapshot.children) {
     items.push(mapChildToItem(row))
   }
-  return items
+
+  // 按 createdAt 升序稳定排序，确保 proposals 和 children 正确归属于其创建时所在的轮次
+  const indexed = items.map((item, idx) => ({ item, idx }))
+  indexed.sort((a, b) => {
+    const timeA = a.item.createdAt ? new Date(a.item.createdAt).getTime() : null
+    const timeB = b.item.createdAt ? new Date(b.item.createdAt).getTime() : null
+    if (timeA !== null && timeB !== null && !isNaN(timeA) && !isNaN(timeB)) {
+      if (timeA !== timeB) {
+        return timeA - timeB
+      }
+    }
+    return a.idx - b.idx
+  })
+
+  return indexed.map((x) => x.item)
 }
 
 function mergeReplaceSnapshot(

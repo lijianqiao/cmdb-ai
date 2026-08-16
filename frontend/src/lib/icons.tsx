@@ -48,6 +48,13 @@ import {
   Upload01Icon as Upload01,
   ServerStack02Icon as Server02,
   Database02Icon as Database02,
+  ChevronDownIcon as ChevronDown,
+  ChevronUpIcon as ChevronUp,
+  Copy01Icon as Copy01,
+  CopyCheckIcon as CopyCheck,
+  Brain02Icon as Brain02,
+  Task01Icon as Task01,
+  MinusSignIcon as MinusSign,
 } from "@hugeicons/core-free-icons"
 
 type IconProps = Omit<ComponentProps<typeof HugeiconsIcon>, "icon">
@@ -75,6 +82,12 @@ export const ChevronLeftIcon = makeIcon(ChevronLeft)
 export const ChevronRightIcon = makeIcon(ChevronRight)
 export const ChevronsLeftIcon = makeIcon(ChevronsLeft)
 export const ChevronsRightIcon = makeIcon(ChevronsRight)
+export const ChevronDownIcon = makeIcon(ChevronDown)
+export const ChevronUpIcon = makeIcon(ChevronUp)
+export const Copy01Icon = makeIcon(Copy01)
+export const CopyCheckIcon = makeIcon(CopyCheck)
+export const Brain02Icon = makeIcon(Brain02)
+export const Task01Icon = makeIcon(Task01)
 export const Dashboard02Icon = makeIcon(Dashboard02)
 export const UserMultipleIcon = makeIcon(UserMultiple)
 export const Key02Icon = makeIcon(Key02)
@@ -99,3 +112,4 @@ export const Alert02Icon = makeIcon(Alert02)
 export const Upload01Icon = makeIcon(Upload01)
 export const Server02Icon = makeIcon(Server02)
 export const Database02Icon = makeIcon(Database02)
+export const MinusSignIcon = makeIcon(MinusSign)
