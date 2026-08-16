@@ -7,6 +7,7 @@ import "@testing-library/jest-dom/vitest"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { HitlProposal } from "@/lib/hitl-api"
+import type { DeviceQueryResult } from "@/types/agent"
 
 import { HitlApprovalCard } from "./HitlApprovalCard"
 import {
@@ -32,6 +33,11 @@ vi.mock("@/lib/hitl-api", () => ({
   resolveUnknownHitlProposal: vi.fn(),
 }))
 
+vi.mock("@/lib/agent-api", () => ({
+  getDeviceQueryResult: vi.fn(),
+  recoverDeviceQuerySummary: vi.fn(),
+}))
+
 vi.mock("sonner", () => ({
   toast: {
     success: vi.fn(),
@@ -40,11 +46,24 @@ vi.mock("sonner", () => ({
 }))
 
 import { usePermission } from "@/hooks/use-permission"
-import { getHitlProposal, resolveUnknownHitlProposal } from "@/lib/hitl-api"
+import {
+  decideHitlProposal,
+  getHitlProposal,
+  resolveUnknownHitlProposal,
+  retryHitlProposal,
+} from "@/lib/hitl-api"
+import {
+  getDeviceQueryResult,
+  recoverDeviceQuerySummary,
+} from "@/lib/agent-api"
 
 const mockUsePermission = vi.mocked(usePermission)
 const mockGetHitlProposal = vi.mocked(getHitlProposal)
 const mockResolveUnknownHitlProposal = vi.mocked(resolveUnknownHitlProposal)
+const mockDecideHitlProposal = vi.mocked(decideHitlProposal)
+const mockRetryHitlProposal = vi.mocked(retryHitlProposal)
+const mockGetDeviceQueryResult = vi.mocked(getDeviceQueryResult)
+const mockRecoverDeviceQuerySummary = vi.mocked(recoverDeviceQuerySummary)
 
 function permissionResult(canApprove: boolean) {
   return {
@@ -73,6 +92,19 @@ function buildProposal(overrides: Partial<HitlProposal> = {}): HitlProposal {
     created_at: "2026-08-12T10:00:00Z",
     result_excerpt: null,
     asset_credential_type: "dynamic",
+    ...overrides,
+  }
+}
+
+function buildDeviceQueryResult(
+  overrides: Partial<DeviceQueryResult> = {},
+): DeviceQueryResult {
+  return {
+    proposal_id: 1,
+    content: "interface GigabitEthernet1/0/1\n description uplink",
+    content_length: 53,
+    summary_status: "completed",
+    created_at: "2026-08-15T10:00:00Z",
     ...overrides,
   }
 }
@@ -160,12 +192,14 @@ describe("HitlApprovalCard 组件渲染", () => {
   it("EXECUTED 且 result_excerpt 有值时在 DOM 中展示执行结果", () => {
     render(
       <HitlApprovalCard
+        sessionId={10}
         proposalId={1}
         actionType="device_query"
         status="EXECUTED"
         reason="排查交换机"
         assetId={9}
         resultExcerpt="Cisco IOS XE Software, Version 17.9.4a"
+        hasFullResult
       />,
     )
 
@@ -185,11 +219,13 @@ describe("HitlApprovalCard 组件渲染", () => {
 
     render(
       <HitlApprovalCard
+        sessionId={10}
         proposalId={1}
         actionType="device_query"
         status="PENDING"
         reason="排查交换机"
         assetId={9}
+        hasFullResult={false}
       />,
     )
 
@@ -222,11 +258,13 @@ describe("HitlApprovalCard 组件渲染", () => {
 
     render(
       <HitlApprovalCard
+        sessionId={10}
         proposalId={1}
         actionType="device_query"
         status="APPROVED"
         reason="排查交换机"
         assetId={9}
+        hasFullResult={false}
       />,
     )
 
@@ -236,6 +274,236 @@ describe("HitlApprovalCard 组件渲染", () => {
       )
     })
     expect(screen.getByTestId("hitl-retry-button")).toBeInTheDocument()
+  })
+})
+
+describe("HitlApprovalCard 完整设备配置", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockUsePermission.mockReturnValue(permissionResult(false))
+  })
+
+  it("点击后才加载完整配置，收起再展开复用局部缓存", async () => {
+    mockGetDeviceQueryResult.mockResolvedValue(buildDeviceQueryResult())
+    render(
+      <HitlApprovalCard
+        sessionId={10}
+        proposalId={1}
+        actionType="device_query"
+        status="EXECUTED"
+        reason="排查交换机"
+        assetId={9}
+        resultExcerpt="interface GigabitEthernet1/0/1"
+        hasFullResult
+      />,
+    )
+
+    expect(mockGetDeviceQueryResult).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    expect(screen.getByText("加载完整配置…")).toBeInTheDocument()
+    await waitFor(() => {
+      expect(mockGetDeviceQueryResult).toHaveBeenCalledWith(10, 1)
+    })
+    expect((await screen.findByTestId("hitl-full-result")).textContent).toBe(
+      "interface GigabitEthernet1/0/1\n description uplink",
+    )
+    expect(screen.getByText("53 个字符")).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole("button", { name: "收起完整配置" }))
+    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    expect(await screen.findByTestId("hitl-full-result")).toBeInTheDocument()
+    expect(mockGetDeviceQueryResult).toHaveBeenCalledTimes(1)
+  })
+
+  it("加载失败仅在结果区显示错误，并允许重试", async () => {
+    mockGetDeviceQueryResult
+      .mockRejectedValueOnce(new Error("network"))
+      .mockResolvedValueOnce(buildDeviceQueryResult())
+    render(
+      <HitlApprovalCard
+        sessionId={10}
+        proposalId={1}
+        actionType="device_query"
+        status="EXECUTED"
+        reason="排查交换机"
+        assetId={9}
+        resultExcerpt="preview"
+        hasFullResult
+      />,
+    )
+
+    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    expect(await screen.findByText("加载完整配置失败")).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "重试加载" }))
+    expect(await screen.findByTestId("hitl-full-result")).toBeInTheDocument()
+    expect(mockGetDeviceQueryResult).toHaveBeenCalledTimes(2)
+    expect(screen.getByText("已执行")).toBeInTheDocument()
+  })
+
+  it("旧记录只显示无法恢复提示且不请求接口", () => {
+    render(
+      <HitlApprovalCard
+        sessionId={10}
+        proposalId={1}
+        actionType="device_query"
+        status="EXECUTED"
+        reason="旧查询"
+        assetId={9}
+        resultExcerpt="preview"
+        hasFullResult={false}
+      />,
+    )
+
+    expect(
+      screen.getByText("该历史记录仅保存了预览，无法恢复完整配置。"),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole("button", { name: "查看完整配置" }),
+    ).not.toBeInTheDocument()
+    expect(mockGetDeviceQueryResult).not.toHaveBeenCalled()
+  })
+
+  it("pending 总结可恢复，成功后只更新卡片局部状态", async () => {
+    mockGetDeviceQueryResult.mockResolvedValue(
+      buildDeviceQueryResult({ summary_status: "pending" }),
+    )
+    mockRecoverDeviceQuerySummary.mockResolvedValue(
+      buildDeviceQueryResult({ summary_status: "generating" }),
+    )
+    render(
+      <HitlApprovalCard
+        sessionId={10}
+        proposalId={1}
+        actionType="device_query"
+        status="EXECUTED"
+        reason="排查交换机"
+        assetId={9}
+        resultExcerpt="preview"
+        hasFullResult
+      />,
+    )
+
+    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    fireEvent.click(await screen.findByRole("button", { name: "恢复 AI 总结" }))
+    await waitFor(() => {
+      expect(mockRecoverDeviceQuerySummary).toHaveBeenCalledWith(10, 1)
+    })
+    expect(
+      screen.queryByRole("button", { name: "恢复 AI 总结" }),
+    ).not.toBeInTheDocument()
+    expect(screen.getByText("AI 总结生成中")).toBeInTheDocument()
+    expect(mockDecideHitlProposal).not.toHaveBeenCalled()
+    expect(mockRetryHitlProposal).not.toHaveBeenCalled()
+    expect(mockGetDeviceQueryResult).toHaveBeenCalledTimes(1)
+  })
+
+  it("generating 总结只显示生成中，不显示恢复按钮", async () => {
+    mockGetDeviceQueryResult.mockResolvedValue(
+      buildDeviceQueryResult({ summary_status: "generating" }),
+    )
+    render(
+      <HitlApprovalCard
+        sessionId={10}
+        proposalId={1}
+        actionType="device_query"
+        status="EXECUTED"
+        reason="排查交换机"
+        assetId={9}
+        resultExcerpt="preview"
+        hasFullResult
+      />,
+    )
+
+    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    expect(await screen.findByText("AI 总结生成中")).toBeInTheDocument()
+    expect(
+      screen.queryByRole("button", { name: "恢复 AI 总结" }),
+    ).not.toBeInTheDocument()
+  })
+
+  it("sessionId 改变时清空旧会话正文并按新会话重新加载", async () => {
+    mockGetDeviceQueryResult
+      .mockResolvedValueOnce(buildDeviceQueryResult({ content: "session 10" }))
+      .mockResolvedValueOnce(buildDeviceQueryResult({ content: "session 20" }))
+    const { rerender } = render(
+      <HitlApprovalCard
+        sessionId={10}
+        proposalId={1}
+        actionType="device_query"
+        status="EXECUTED"
+        reason="排查交换机"
+        assetId={9}
+        resultExcerpt="preview"
+        hasFullResult
+      />,
+    )
+    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    expect(await screen.findByText("session 10")).toBeInTheDocument()
+
+    rerender(
+      <HitlApprovalCard
+        sessionId={20}
+        proposalId={1}
+        actionType="device_query"
+        status="EXECUTED"
+        reason="排查交换机"
+        assetId={9}
+        resultExcerpt="preview"
+        hasFullResult
+      />,
+    )
+    expect(screen.queryByText("session 10")).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    expect(await screen.findByText("session 20")).toBeInTheDocument()
+    expect(mockGetDeviceQueryResult).toHaveBeenLastCalledWith(20, 1)
+  })
+
+  it("忽略切换会话后才返回的旧总结恢复响应", async () => {
+    let resolveRecovery!: (value: DeviceQueryResult) => void
+    const recovery = new Promise<DeviceQueryResult>((resolve) => {
+      resolveRecovery = resolve
+    })
+    mockGetDeviceQueryResult.mockResolvedValue(
+      buildDeviceQueryResult({ summary_status: "pending" }),
+    )
+    mockRecoverDeviceQuerySummary.mockReturnValue(recovery)
+    const { rerender } = render(
+      <HitlApprovalCard
+        sessionId={10}
+        proposalId={1}
+        actionType="device_query"
+        status="EXECUTED"
+        reason="排查交换机"
+        assetId={9}
+        resultExcerpt="preview"
+        hasFullResult
+      />,
+    )
+    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    fireEvent.click(await screen.findByRole("button", { name: "恢复 AI 总结" }))
+
+    rerender(
+      <HitlApprovalCard
+        sessionId={20}
+        proposalId={1}
+        actionType="device_query"
+        status="EXECUTED"
+        reason="排查交换机"
+        assetId={9}
+        resultExcerpt="preview"
+        hasFullResult
+      />,
+    )
+    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    expect(
+      await screen.findByRole("button", { name: "恢复 AI 总结" }),
+    ).toBeEnabled()
+
+    resolveRecovery(buildDeviceQueryResult({ summary_status: "generating" }))
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "恢复 AI 总结" })).toBeEnabled()
+    })
+    expect(screen.queryByText("AI 总结生成中")).not.toBeInTheDocument()
   })
 })
 
@@ -250,11 +518,13 @@ describe("HitlApprovalCard UNKNOWN 人工处置", () => {
     mockGetHitlProposal.mockResolvedValue(buildProposal({ status: "UNKNOWN" }))
     render(
       <HitlApprovalCard
+        sessionId={10}
         proposalId={1}
         actionType="device_control"
         status="UNKNOWN"
         reason="重启接口"
         assetId={9}
+        hasFullResult={false}
       />,
     )
 
@@ -266,11 +536,13 @@ describe("HitlApprovalCard UNKNOWN 人工处置", () => {
   it("无审批权限时 UNKNOWN 仅展示状态，不显示处置按钮", async () => {
     render(
       <HitlApprovalCard
+        sessionId={10}
         proposalId={1}
         actionType="device_control"
         status="UNKNOWN"
         reason="重启接口"
         assetId={9}
+        hasFullResult={false}
       />,
     )
 
@@ -289,11 +561,13 @@ describe("HitlApprovalCard UNKNOWN 人工处置", () => {
 
     render(
       <HitlApprovalCard
+        sessionId={10}
         proposalId={1}
         actionType="device_control"
         status="UNKNOWN"
         reason="重启接口"
         assetId={9}
+        hasFullResult={false}
       />,
     )
 
@@ -316,11 +590,13 @@ describe("HitlApprovalCard UNKNOWN 人工处置", () => {
 
     render(
       <HitlApprovalCard
+        sessionId={10}
         proposalId={1}
         actionType="device_control"
         status="UNKNOWN"
         reason="重启接口"
         assetId={9}
+        hasFullResult={false}
       />,
     )
 

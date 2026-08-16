@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils"
 import type { OpsChatItem } from "@/hooks/use-ops-chat"
 
 export interface ChatMessageListProps {
+  sessionId: number
   messages: OpsChatItem[]
   isLoading?: boolean
   hasMore?: boolean
@@ -38,7 +39,13 @@ export interface ChatMessageListProps {
  * Args:
  *   item: OpsChatItem
  */
-function MessageRow({ item }: { item: OpsChatItem }) {
+function MessageRow({
+  item,
+  sessionId,
+}: {
+  item: OpsChatItem
+  sessionId: number
+}) {
   switch (item.kind) {
     case "user":
       return (
@@ -80,12 +87,14 @@ function MessageRow({ item }: { item: OpsChatItem }) {
         <div className="flex justify-start">
           <div className="w-full max-w-md">
             <HitlApprovalCard
+              sessionId={sessionId}
               proposalId={item.proposalId}
               actionType={item.actionType}
               status={item.status}
               reason={item.reason}
               assetId={item.assetId}
               resultExcerpt={item.resultExcerpt}
+              hasFullResult={item.hasFullResult}
             />
           </div>
         </div>
@@ -132,6 +141,7 @@ function MessageRow({ item }: { item: OpsChatItem }) {
  *   className: 外层布局 class
  */
 export function ChatMessageList({
+  sessionId,
   messages,
   isLoading = false,
   hasMore = false,
@@ -228,7 +238,7 @@ export function ChatMessageList({
           </div>
         ) : null}
         {messages.map((item) => (
-          <MessageRow key={item.id} item={item} />
+          <MessageRow key={item.id} item={item} sessionId={sessionId} />
         ))}
         <div ref={bottomRef} />
       </div>

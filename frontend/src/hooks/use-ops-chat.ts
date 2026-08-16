@@ -73,6 +73,8 @@ export type OpsChatItem =
       assetId: number | null
       /** WS 安全摘要中的执行结果片段（无审批权限时展示用） */
       resultExcerpt: string | null
+      /** 服务端是否保存了可按需读取的完整结果 */
+      hasFullResult: boolean
     }
   | {
       kind: "error"
@@ -189,7 +191,8 @@ function mapProposalToItem(
     status: proposal.status,
     reason: proposal.reason,
     assetId: proposal.asset_id,
-    resultExcerpt: null,
+    resultExcerpt: proposal.result_excerpt,
+    hasFullResult: proposal.has_full_result,
   }
 }
 
@@ -267,6 +270,10 @@ function readAssetId(payload: Record<string, unknown>): number | null {
 function readResultExcerpt(payload: Record<string, unknown>): string | null {
   const value = payload.result_excerpt
   return typeof value === "string" ? value : null
+}
+
+function readHasFullResult(payload: Record<string, unknown>): boolean {
+  return payload.has_full_result === true
 }
 
 function readNullableString(
@@ -436,6 +443,7 @@ function applyWsMessage(
             reason: readString(message.payload, "reason"),
             assetId: readAssetId(message.payload),
             resultExcerpt: readResultExcerpt(message.payload),
+            hasFullResult: readHasFullResult(message.payload),
           },
         ],
       }
@@ -449,7 +457,6 @@ function applyWsMessage(
         message.type === "hitl_execution_failed"
           ? readString(message.payload, "status") || "execution_failed"
           : readString(message.payload, "status") || "resolved"
-      const excerptFromPayload = readResultExcerpt(message.payload)
       const items = state.items.map((item) => {
         if (item.kind !== "hitl" || item.proposalId !== proposalId) return item
         return {
@@ -462,7 +469,14 @@ function applyWsMessage(
             message.payload.asset_id !== undefined
               ? readAssetId(message.payload)
               : item.assetId,
-          resultExcerpt: excerptFromPayload ?? item.resultExcerpt,
+          resultExcerpt:
+            message.payload.result_excerpt !== undefined
+              ? readResultExcerpt(message.payload)
+              : item.resultExcerpt,
+          hasFullResult:
+            message.payload.has_full_result !== undefined
+              ? readHasFullResult(message.payload)
+              : item.hasFullResult,
         }
       })
       const exists = items.some(
@@ -477,7 +491,8 @@ function applyWsMessage(
           status,
           reason: readString(message.payload, "reason"),
           assetId: readAssetId(message.payload),
-          resultExcerpt: excerptFromPayload,
+          resultExcerpt: readResultExcerpt(message.payload),
+          hasFullResult: readHasFullResult(message.payload),
         })
       }
       return { items }

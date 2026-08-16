@@ -6,13 +6,18 @@
  * device_query + 动态凭据：批准前需输入本次登录密码（不落库、不进审计）。
  */
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { isAxiosError } from "axios"
 import { toast } from "sonner"
 
 import { ConfirmDialog } from "@/components/common/ConfirmDialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible"
 import {
   Card,
   CardContent,
@@ -34,7 +39,12 @@ import {
   type HitlProposal,
 } from "@/lib/hitl-api"
 import { PERMISSIONS } from "@/lib/constants"
+import {
+  getDeviceQueryResult,
+  recoverDeviceQuerySummary,
+} from "@/lib/agent-api"
 import { cn } from "@/lib/utils"
+import type { DeviceQueryResult } from "@/types/agent"
 import {
   isApproveButtonDisabled,
   isRetryAvailable,
@@ -45,6 +55,7 @@ import {
 } from "@/components/ops-assistant/hitlApprovalCardUtils"
 
 export interface HitlApprovalCardProps {
+  sessionId: number
   proposalId: number
   actionType: string
   status: string
@@ -52,6 +63,7 @@ export interface HitlApprovalCardProps {
   assetId: number | null
   /** WS 安全摘要可能携带的执行结果片段（无审批权限时展示用） */
   resultExcerpt?: string | null
+  hasFullResult: boolean
   className?: string
 }
 
@@ -136,12 +148,14 @@ function readPayloadMeta(proposal: HitlProposal): {
  *   className: 外层 Card class
  */
 export function HitlApprovalCard({
+  sessionId,
   proposalId,
   actionType,
   status,
   reason,
   assetId,
   resultExcerpt,
+  hasFullResult,
   className,
 }: HitlApprovalCardProps) {
   const { hasPermission } = usePermission()
@@ -154,6 +168,12 @@ export function HitlApprovalCard({
   const [rejectOpen, setRejectOpen] = useState(false)
   const [localStatus, setLocalStatus] = useState<string | null>(null)
   const [dynamicPassword, setDynamicPassword] = useState("")
+  const [fullResultOpen, setFullResultOpen] = useState(false)
+  const [fullResult, setFullResult] = useState<DeviceQueryResult | null>(null)
+  const [fullResultLoading, setFullResultLoading] = useState(false)
+  const [fullResultError, setFullResultError] = useState<string | null>(null)
+  const [summaryRecovering, setSummaryRecovering] = useState(false)
+  const fullResultRequestRef = useRef(0)
 
   const displayStatus = localStatus ?? status
   const normalized = displayStatus.trim().toUpperCase()
@@ -181,6 +201,9 @@ export function HitlApprovalCard({
     canApprove,
     displayStatus,
   )
+  const showFullResultArea =
+    normalized === "EXECUTED" &&
+    displayActionType.trim().toLowerCase() === "device_query"
 
   const approveDisabled = isApproveButtonDisabled(
     deciding,
@@ -195,6 +218,15 @@ export function HitlApprovalCard({
     setDetailError(null)
     setDynamicPassword("")
   }, [proposalId])
+
+  useEffect(() => {
+    fullResultRequestRef.current += 1
+    setFullResultOpen(false)
+    setFullResult(null)
+    setFullResultLoading(false)
+    setFullResultError(null)
+    setSummaryRecovering(false)
+  }, [sessionId, proposalId])
 
   useEffect(() => {
     if (localStatus != null && status.trim().toUpperCase() !== "PENDING") {
@@ -316,6 +348,58 @@ export function HitlApprovalCard({
     }
   }
 
+  const loadFullResult = async (): Promise<void> => {
+    if (fullResult != null || fullResultLoading) return
+    const requestId = fullResultRequestRef.current + 1
+    fullResultRequestRef.current = requestId
+    setFullResultLoading(true)
+    setFullResultError(null)
+    try {
+      const result = await getDeviceQueryResult(sessionId, proposalId)
+      if (fullResultRequestRef.current === requestId) setFullResult(result)
+    } catch (error: unknown) {
+      if (fullResultRequestRef.current === requestId) {
+        setFullResultError(readErrorMessage(error, "加载完整配置失败"))
+      }
+    } finally {
+      if (fullResultRequestRef.current === requestId) {
+        setFullResultLoading(false)
+      }
+    }
+  }
+
+  const handleFullResultOpenChange = (open: boolean): void => {
+    setFullResultOpen(open)
+    if (open && fullResult == null && !fullResultLoading) {
+      void loadFullResult()
+    }
+  }
+
+  const handleRecoverSummary = async (): Promise<void> => {
+    if (fullResult?.summary_status !== "pending" || summaryRecovering) return
+    const requestId = fullResultRequestRef.current
+    setSummaryRecovering(true)
+    setFullResultError(null)
+    try {
+      const result = await recoverDeviceQuerySummary(sessionId, proposalId)
+      if (fullResultRequestRef.current === requestId) {
+        setFullResult((current) =>
+          current == null
+            ? current
+            : { ...current, summary_status: result.summary_status },
+        )
+      }
+    } catch (error: unknown) {
+      if (fullResultRequestRef.current === requestId) {
+        setFullResultError(readErrorMessage(error, "恢复 AI 总结失败"))
+      }
+    } finally {
+      if (fullResultRequestRef.current === requestId) {
+        setSummaryRecovering(false)
+      }
+    }
+  }
+
   return (
     <>
       <Card className={cn("bg-card", className)}>
@@ -365,6 +449,83 @@ export function HitlApprovalCard({
                 {resolvedResultExcerpt}
               </pre>
             </div>
+          ) : null}
+
+          {showFullResultArea ? (
+            hasFullResult ? (
+              <Collapsible
+                open={fullResultOpen}
+                onOpenChange={handleFullResultOpenChange}
+                className="flex flex-col gap-2"
+              >
+                <CollapsibleTrigger
+                  render={<Button type="button" size="sm" variant="outline" />}
+                >
+                  {fullResultOpen ? "收起完整配置" : "查看完整配置"}
+                </CollapsibleTrigger>
+                <CollapsibleContent className="flex flex-col gap-2">
+                  {fullResultLoading ? (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Spinner className="size-3" />
+                      <span>加载完整配置…</span>
+                    </div>
+                  ) : fullResultError ? (
+                    <div className="flex flex-col items-start gap-2">
+                      <p className="text-xs text-destructive">
+                        {fullResultError}
+                      </p>
+                      {fullResult == null ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void loadFullResult()}
+                        >
+                          重试加载
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {fullResult ? (
+                    <div className="flex flex-col gap-2">
+                      <p className="text-xs text-muted-foreground">
+                        {fullResult.content_length} 个字符
+                      </p>
+                      <pre
+                        className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 text-xs text-muted-foreground"
+                        data-testid="hitl-full-result"
+                      >
+                        {fullResult.content}
+                      </pre>
+                      {fullResult.summary_status === "pending" ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={summaryRecovering}
+                          onClick={() => void handleRecoverSummary()}
+                        >
+                          {summaryRecovering ? (
+                            <Spinner data-icon="inline-start" />
+                          ) : null}
+                          恢复 AI 总结
+                        </Button>
+                      ) : null}
+                      {fullResult.summary_status === "generating" ? (
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <Spinner className="size-3" />
+                          <span>AI 总结生成中</span>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </CollapsibleContent>
+              </Collapsible>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                该历史记录仅保存了预览，无法恢复完整配置。
+              </p>
+            )
           ) : null}
 
           {canApprove ? (

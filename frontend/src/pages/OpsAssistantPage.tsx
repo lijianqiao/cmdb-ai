@@ -409,6 +409,7 @@ export function OpsAssistantPage() {
           ) : (
             <>
               <ChatMessageList
+                sessionId={selectedSessionId}
                 messages={messages}
                 isLoading={isLoadingHistory}
                 hasMore={hasMore}

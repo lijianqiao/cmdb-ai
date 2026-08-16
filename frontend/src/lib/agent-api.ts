@@ -10,6 +10,7 @@ import type {
   AgentSession,
   AgentSessionCreate,
   AgentSessionSnapshot,
+  DeviceQueryResult,
 } from "@/types/agent"
 
 /**
@@ -163,6 +164,28 @@ export async function postAgentMessage(
     `/agent/sessions/${sessionId}/messages`,
     body,
     { timeout: POST_MESSAGE_TIMEOUT_MS },
+  )
+  return response.data.data
+}
+
+/** 点击展开后按会话归属读取已保存的完整设备查询结果。 */
+export async function getDeviceQueryResult(
+  sessionId: number,
+  proposalId: number,
+): Promise<DeviceQueryResult> {
+  const response = await api.get<ApiResponse<DeviceQueryResult>>(
+    `/agent/sessions/${sessionId}/device-query-results/${proposalId}`,
+  )
+  return response.data.data
+}
+
+/** 对已保存的设备查询正文恢复 AI 总结，不重新连接设备。 */
+export async function recoverDeviceQuerySummary(
+  sessionId: number,
+  proposalId: number,
+): Promise<DeviceQueryResult> {
+  const response = await api.post<ApiResponse<DeviceQueryResult>>(
+    `/agent/sessions/${sessionId}/device-query-results/${proposalId}/summary`,
   )
   return response.data.data
 }

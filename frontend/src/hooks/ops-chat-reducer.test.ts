@@ -55,6 +55,8 @@ function proposal(
       status_reason: null,
       reason: "test",
       asset_id: null,
+      result_excerpt: null,
+      has_full_result: false,
       created_at: "2026-08-14T00:00:00Z",
       execution_started_at: null,
       resolved_at: null,
@@ -245,6 +247,61 @@ describe("shouldSynthesizeSendError", () => {
 })
 
 describe("reduceOpsChat snapshot_loaded", () => {
+  it("保留快照结果字段，且 WS 仅在显式携带字段时更新", () => {
+    let state = reduceOpsChat(
+      { items: [] },
+      {
+        type: "snapshot_loaded",
+        replace: true,
+        snapshot: buildSnapshot({
+          proposals: [
+            proposal({
+              proposal_id: 7,
+              status: "EXECUTED",
+              action_type: "device_query",
+              result_excerpt: "preview",
+              has_full_result: true,
+            }),
+          ],
+        }),
+      },
+    )
+    expect(state.items[0]).toMatchObject({
+      kind: "hitl",
+      resultExcerpt: "preview",
+      hasFullResult: true,
+    })
+
+    state = reduceOpsChat(state, {
+      type: "ws",
+      message: {
+        type: "hitl_resolved",
+        payload: { proposal_id: 7, status: "EXECUTED" },
+      },
+    })
+    expect(state.items[0]).toMatchObject({
+      resultExcerpt: "preview",
+      hasFullResult: true,
+    })
+
+    state = reduceOpsChat(state, {
+      type: "ws",
+      message: {
+        type: "hitl_resolved",
+        payload: {
+          proposal_id: 7,
+          status: "EXECUTED",
+          result_excerpt: "new preview",
+          has_full_result: false,
+        },
+      },
+    })
+    expect(state.items[0]).toMatchObject({
+      resultExcerpt: "new preview",
+      hasFullResult: false,
+    })
+  })
+
   it("hydrates messages and pending proposals with stable ids", () => {
     const state = reduceOpsChat(
       { items: [] },

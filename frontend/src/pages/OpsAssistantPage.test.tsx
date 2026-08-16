@@ -7,6 +7,7 @@ import "@testing-library/jest-dom/vitest"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { AgentSession } from "@/types/agent"
+import type { OpsChatItem } from "@/hooks/use-ops-chat"
 
 import { OpsAssistantPage } from "./OpsAssistantPage"
 
@@ -30,6 +31,7 @@ vi.mock("@/hooks/use-ops-chat", () => ({
     monitorAlert: null,
     clearMonitorAlert: vi.fn(),
     sendMessage: vi.fn(),
+    reloadSnapshot: vi.fn(),
     loadOlder: vi.fn(),
     hasMore: false,
     isLoadingOlder: false,
@@ -53,6 +55,8 @@ vi.mock("@/lib/agent-api", () => ({
   createAgentSession: vi.fn(),
   deleteAgentSession: vi.fn(),
   patchAgentSession: vi.fn(),
+  getDeviceQueryResult: vi.fn(),
+  recoverDeviceQuerySummary: vi.fn(),
 }))
 
 vi.mock("sonner", () => ({
@@ -62,10 +66,17 @@ vi.mock("sonner", () => ({
   },
 }))
 
-import { listAgentSessions, patchAgentSession } from "@/lib/agent-api"
+import { useOpsChat } from "@/hooks/use-ops-chat"
+import {
+  getDeviceQueryResult,
+  listAgentSessions,
+  patchAgentSession,
+} from "@/lib/agent-api"
 
 const mockListAgentSessions = vi.mocked(listAgentSessions)
 const mockPatchAgentSession = vi.mocked(patchAgentSession)
+const mockUseOpsChat = vi.mocked(useOpsChat)
+const mockGetDeviceQueryResult = vi.mocked(getDeviceQueryResult)
 
 afterEach(() => {
   cleanup()
@@ -105,6 +116,7 @@ async function confirmFullAccess(): Promise<void> {
 describe("OpsAssistantPage 完全访问确认", () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    Element.prototype.scrollIntoView = vi.fn()
     mockListAgentSessions.mockResolvedValue({
       items: [buildSession(1), buildSession(2)],
       total: 2,
@@ -138,5 +150,67 @@ describe("OpsAssistantPage 完全访问确认", () => {
         approval_mode: "full",
       })
     })
+  })
+})
+
+describe("OpsAssistantPage 完整配置会话隔离", () => {
+  const sharedProposal: OpsChatItem = {
+    kind: "hitl",
+    id: "hitl:7",
+    proposalId: 7,
+    actionType: "device_query",
+    status: "EXECUTED",
+    reason: "排查交换机",
+    assetId: 9,
+    resultExcerpt: "preview",
+    hasFullResult: true,
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockListAgentSessions.mockResolvedValue({
+      items: [buildSession(1), buildSession(2)],
+      total: 2,
+      page: 1,
+      page_size: 50,
+    })
+    mockUseOpsChat.mockImplementation(({ sessionId }) => ({
+      messages: sessionId == null ? [] : [sharedProposal],
+      isLoadingHistory: false,
+      isSending: false,
+      inputDisabled: false,
+      wsStatus: "open",
+      reconnecting: false,
+      monitorAlert: null,
+      clearMonitorAlert: vi.fn(),
+      sendMessage: vi.fn(),
+      reloadSnapshot: vi.fn(),
+      loadOlder: vi.fn(),
+      hasMore: false,
+      isLoadingOlder: false,
+    }))
+    mockGetDeviceQueryResult.mockImplementation(async (sessionId) => ({
+      proposal_id: 7,
+      content: `session ${sessionId}`,
+      content_length: 9,
+      summary_status: "completed",
+      created_at: "2026-08-15T10:00:00Z",
+    }))
+  })
+
+  it("同一 proposal ID 切换会话后使用当前选中的 session ID", async () => {
+    render(<OpsAssistantPage />)
+    await selectSession(1)
+    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    expect(await screen.findByText("session 1")).toBeInTheDocument()
+
+    await selectSession(2)
+    expect(screen.queryByText("session 1")).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+
+    await waitFor(() => {
+      expect(mockGetDeviceQueryResult).toHaveBeenLastCalledWith(2, 7)
+    })
+    expect(await screen.findByText("session 2")).toBeInTheDocument()
   })
 })

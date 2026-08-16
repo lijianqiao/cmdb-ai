@@ -81,9 +81,20 @@ export interface HitlProposalSafeSummary {
   status_reason: string | null
   reason: string
   asset_id: number | null
+  result_excerpt: string | null
+  has_full_result: boolean
   created_at: string
   execution_started_at: string | null
   resolved_at: string | null
+}
+
+/** 已执行设备查询的按需完整结果（不进入聊天快照或 reducer） */
+export interface DeviceQueryResult {
+  proposal_id: number
+  content: string
+  content_length: number
+  summary_status: "pending" | "generating" | "completed" | "fallback"
+  created_at: string
 }
 
 /** 快照中暴露的子 Agent 安全摘要 */
