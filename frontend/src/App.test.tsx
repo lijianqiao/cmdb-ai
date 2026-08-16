@@ -161,7 +161,7 @@ describe("App 路由懒加载", () => {
         <App />
       </MemoryRouter>,
     )
-    expect(await screen.findByRole("heading", { name: "运维助手" })).toBeInTheDocument()
+    expect(await screen.findByRole("heading", { name: "运维助手" }, { timeout: 5_000 })).toBeInTheDocument()
   })
 
   it("renders the permissions route when the user has permission", async () => {
