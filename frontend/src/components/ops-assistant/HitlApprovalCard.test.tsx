@@ -348,9 +348,17 @@ describe("HitlApprovalCard 审批状态会话隔离", () => {
         command: "session-a-sensitive-command",
       },
     })
+    const newProposal = buildProposal({
+      session_id: 20,
+      action_payload: {
+        asset_id: 9,
+        proposal_reason: "会话 B",
+        command: "session-b-sensitive-command",
+      },
+    })
     mockGetHitlProposal
       .mockResolvedValueOnce(oldProposal)
-      .mockReturnValueOnce(new Promise<HitlProposal>(() => undefined))
+      .mockResolvedValueOnce(newProposal)
     mockDecideHitlProposal.mockResolvedValue(
       buildProposal({
         status: "APPROVED",
@@ -390,12 +398,11 @@ describe("HitlApprovalCard 审批状态会话隔离", () => {
       />,
     )
 
-    await waitFor(() => {
-      expect(screen.getByText("等待审批")).toBeInTheDocument()
-      expect(screen.getByText("加载完整载荷…")).toBeInTheDocument()
-    })
+    const newPasswordInput = await screen.findByTestId("hitl-dynamic-password")
+    expect(screen.getByText("等待审批")).toBeInTheDocument()
     expect(screen.queryByText(/session-a-sensitive-command/)).not.toBeInTheDocument()
-    expect(screen.queryByDisplayValue("session-a-password")).not.toBeInTheDocument()
+    expect(screen.getByText(/session-b-sensitive-command/)).toBeInTheDocument()
+    expect(newPasswordInput).toHaveValue("")
     expect(screen.queryByTestId("hitl-retry-password")).not.toBeInTheDocument()
     expect(mockGetHitlProposal).toHaveBeenCalledTimes(2)
   })
