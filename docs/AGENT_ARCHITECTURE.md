@@ -232,6 +232,17 @@ classDiagram
         +datetime executed_at
         +datetime created_at
     }
+    class HitlExecutionResult {
+        +int id
+        +int proposal_id
+        +text content
+        +int content_length
+        +text summary
+        +str summary_status
+        +datetime summary_started_at
+        +datetime summary_generated_at
+        +datetime created_at
+    }
     class AgentTraceEvent {
         +int id
         +str trace_id
@@ -251,6 +262,7 @@ classDiagram
     AgentSession "1" --o "*" AgentRegistry : session_id
     AgentSession "1" --o "*" HitlProposal : session_id
     AgentSession "1" --o "*" AgentTraceEvent : session_id
+    HitlProposal "1" --o "0..1" HitlExecutionResult : proposal_id (cascade delete)
 ```
 
 **设计说明：**
@@ -264,6 +276,7 @@ classDiagram
 | CMDB 变更记录、知识文档归类结果、CMDB↔监控差异巡检发现，**全部复用现有 `audit_logs` 表**，不新建审计表                                     | 现有 `utils.audit.log_audit()` 已经是通用工具；新增 `action` 枚举值即可，避免重复造轮子                                     |
 | `AgentRegistry` 就是 [guide.md 7.4](./guide.md#74-childreceipt每次-spawn-必有回执) 的 `ChildReceipt` 落地为表                              | 注册表必须能在压缩/断线后独立查询，不依赖对话正文（guide.md 6.3）                                                           |
 | `AgentTraceEvent` 字段直接照抄 [guide.md 8.3](./guide.md#83-日志字段建议)                                                                  | 保证"卡在哪一步"可回答                                                                                                      |
+| `HitlExecutionResult` 以 `proposal_id` 唯一关联 `device_query`，正文与总结状态独立于 `action_payload`                                      | 完整设备回显可按需读取、不会膨胀提案摘要；删除会话时经 proposal 外键链级联删除结果                                            |
 
 ### 4. Agent 角色目录与工具契约
 
@@ -410,11 +423,15 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 - 只有 `PENDING` 可审批决定；`REJECTED` / `EXECUTED` 为终态
 - **策略在每次认领执行前复检**：`execute_approved_proposal` 经 `_preflight_and_claim` 在同一短事务内复检命令策略与凭据，通过后才认领 `EXECUTING`；命令不存在或动态凭据缺失时不认领，提案保持 `APPROVED`；当前策略已黑名单时原子转 `REJECTED` 并写 `status_reason=policy_blacklisted`
 - **`EXECUTING` 先提交**：认领 `EXECUTING` 的事务提交后，外部执行器（Netmiko / notify）才启动；执行器内可观测已提交的 `EXECUTING` 状态
-- **`UNKNOWN` 不自动重试**：执行失败、进程崩溃或启动恢复（`reconcile_executing_proposals` 将遗留 `EXECUTING` 批量转 `UNKNOWN`）后，系统不会自动再次执行；须管理员人工处置（见 [guide.md §5.3.1](./guide.md#531-管理员处置-unknown-提案本项目)）
+- **`UNKNOWN` 不自动重试**：执行失败、进程崩溃或启动恢复（`reconcile_executing_proposals` 将遗留 `EXECUTING` 批量转 `UNKNOWN`）后，系统不会自动再次执行；须管理员人工处置（见 [guide.md §5.3.2](./guide.md#532-管理员处置-unknown-提案本项目)）
 - **`UNKNOWN` 只留给真正不确定的失败**：执行器用 `ExecutionResult.dispatched` 区分两类失败——连接尚未建立就失败（平台/驱动不支持、认证失败、主机不可达）说明命令确定没下发、设备状态未被改动，原子转回 `APPROVED` 并写 `status_reason=dispatch_failed_before_send`，管理员修好前置条件即可直接重试；连接建立之后的任何失败都无法确定命令是否已生效，仍走 `UNKNOWN` 人工核实
 - **失败原因可追**：分类原因（含异常类名）写入 `action_payload.last_error`，经安全摘要透出到审批卡片与 Agent 上下文；完整异常堆栈只进服务端日志，不外泄。审计日志 `detail` 刻意不含异常文本
 - 待审批期间，`action_payload` 中的敏感字段不通过 WebSocket 回传给发起对话的 Agent 上下文，Agent 只收到"提案已创建，等待审批"的摘要
 - 新增权限码 `agent:hitl_approve`，只有持有该权限的用户能操作 `PENDING → APPROVED/REJECTED`、`UNKNOWN` 人工处置，以及 `POST /api/v1/hitl/proposals/{id}/retry`（复用现有 RBAC，不新建权限体系）
+
+**`device_query` 结果交付**：`DeviceQueryExecutor` 在内存中返回完整原始输出；执行收尾仅为查询拆分两种数据。完整正文写入 `HitlExecutionResult.content`，只可作为隔离、无工具的总结服务临时不可信输入，或由当前会话所有者通过专用 GET 按需读取；它不进入普通 `agent_messages` / 模型历史、WebSocket、快照、审计或日志。与之对应的 4000 字符 `last_result_excerpt` 预览可进入 HITL 安全摘要、WebSocket 和普通 Agent 工具上下文。
+
+人工批准成功后，已保存的完整正文与预览随 `EXECUTED` 原子提交；审批编排同步运行无工具总结，并把最终总结或固定降级文案作为一条 root assistant 消息持久化。总结失败不会回滚已执行查询。自动批准仍由既有 Agent loop 基于安全预览生成回答，不会额外启动这条人工审批总结路径。会话所有者可调用专用恢复 POST 重新处理已保存正文的过期/待处理总结；该请求绝不重新连接设备或再次使用动态密码。
 
 **API 路径**（与代码一致）：
 
@@ -453,7 +470,7 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 
 **快照恢复 vs WebSocket 加速**：
 
-- **快照是刷新/重连的恢复来源**：`GET /api/v1/agent/sessions/{session_id}/snapshot` 返回根消息 cursor 分页、非终态 HITL 提案摘要、子 Agent 注册表摘要；前端在选中会话、页面刷新或 WebSocket 重连前先拉快照，再建立 WS 接收增量
+- **快照是刷新/重连的恢复来源**：`GET /api/v1/agent/sessions/{session_id}/snapshot` 返回根消息 cursor 分页、非终态 HITL 提案摘要、已执行的 `device_query` 摘要和子 Agent 注册表摘要；其它终态提案继续排除。查询摘要只含 4000 字符预览与 `has_full_result`，从不含完整正文；前端在选中会话、页面刷新或 WebSocket 重连前先拉快照，再建立 WS 接收增量
 - **WebSocket 是实时加速**：`WS /api/v1/ws/agent/{session_id}` 推送 `assistant_delta`、`tool_call`、`hitl_*`、`child_status`、`turn_done` 等事件，不替代快照的权威状态
 
 **压缩策略**（已实现于 `app/agent/compaction.py`）：**审计历史与模型窗口分离**——`agent_messages` 表保留全量原文，不删除；送入模型的窗口由 `build_model_history` 组装。根会话（`agent_id is None`）在每次用户可见模型调用前，`run_loop` 调用 `ensure_root_compaction`：估计 token 超阈值（`COMPACT_TOKEN_THRESHOLD`）时，把窗口外旧消息送独立摘要器（直接 `llm.chat`，不走 WebSocket 的 `chat_fn`）；摘要写入 `AgentSession.memory_summary`，原文从 `compacted_through_message_id` 之后截取最近 `COMPACT_RECENT_RAW_MESSAGES` 条；无摘要时 fallback 最近 `COMPACT_FALLBACK_MAX_MESSAGES` 条。运维根指令（`ROOT_OPS_SYSTEM_PROMPT`）每轮由 `build_model_history` 从代码注入，永不进入摘要请求；子 Agent 循环不压缩。压缩失败或超预算则跳过，本轮继续用 fallback 窗口。对应 [guide.md 6.3](./guide.md#63-compaction-规范对齐-claude--openai)"System / 根指令永不被摘要吞掉"。
