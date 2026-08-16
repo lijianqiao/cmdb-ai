@@ -18,6 +18,7 @@ from app.core.security import hash_password
 from app.crud.agent_message import agent_message_crud
 from app.crud.agent_registry import agent_registry_crud
 from app.crud.agent_session import agent_session_crud
+from app.crud.hitl_execution_result import hitl_execution_result_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
 from app.models.permission import Permission
 from app.models.role import Role, role_permissions
@@ -504,6 +505,8 @@ async def test_snapshot_returns_safe_recoverable_state(
         "created_at",
         "execution_started_at",
         "resolved_at",
+        "result_excerpt",
+        "has_full_result",
     }
     assert data["proposals"][0]["reason"] == "需要巡检"
     assert data["proposals"][0]["asset_id"] == 42
@@ -550,13 +553,13 @@ async def test_snapshot_excludes_child_transcript_from_messages(
     assert "child-private" not in contents
 
 
-async def test_snapshot_returns_only_non_terminal_proposals(
+async def test_snapshot_returns_recoverable_and_executed_device_query_proposals(
     client: AsyncClient,
     db_session: AsyncSession,
     test_user: User,
     auth_headers: Headers,
 ) -> None:
-    """快照只返回可恢复态提案：PENDING/APPROVED/EXECUTING/UNKNOWN。"""
+    """快照保留可恢复态与已执行查询，同时排除拒绝和已执行非查询提案。"""
     session = await agent_session_crud.create(
         db_session,
         {"user_id": test_user.id, "title": "提案过滤", "status": "active"},
@@ -606,6 +609,17 @@ async def test_snapshot_returns_only_non_terminal_proposals(
         action_type="notify",
         action_payload={"proposal_reason": "已执行"},
     )
+    executed_query = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="device_query",
+        action_payload={
+            "proposal_reason": "已查询",
+            "last_result_excerpt": "new-result-preview",
+            "dynamic_password": "snapshot-must-not-leak-password",
+        },
+    )
     await hitl_proposal_crud.decide(
         db_session, approved.id, approve=True, reviewed_by_user_id=test_user.id
     )
@@ -628,6 +642,16 @@ async def test_snapshot_returns_only_non_terminal_proposals(
     )
     await hitl_proposal_crud.claim_execution(db_session, executed.id)
     await hitl_proposal_crud.mark_executed(db_session, executed.id)
+    await hitl_proposal_crud.decide(
+        db_session, executed_query.id, approve=True, reviewed_by_user_id=test_user.id
+    )
+    await hitl_proposal_crud.claim_execution(db_session, executed_query.id)
+    await hitl_proposal_crud.mark_executed(db_session, executed_query.id)
+    await hitl_execution_result_crud.create_for_proposal(
+        db_session,
+        proposal_id=executed_query.id,
+        content="snapshot-must-not-leak-full-result",
+    )
     await db_session.commit()
 
     response = await client.get(
@@ -635,8 +659,79 @@ async def test_snapshot_returns_only_non_terminal_proposals(
         headers=auth_headers,
     )
     assert response.status_code == 200, response.text
-    statuses = {item["status"] for item in response.json()["data"]["proposals"]}
-    assert statuses == {"PENDING", "APPROVED", "EXECUTING", "UNKNOWN"}
+    data = response.json()["data"]
+    statuses = {item["status"] for item in data["proposals"]}
+    assert statuses == {"PENDING", "APPROVED", "EXECUTING", "UNKNOWN", "EXECUTED"}
+    assert all(
+        item["action_type"] == "device_query"
+        for item in data["proposals"]
+        if item["status"] == "EXECUTED"
+    )
+    executed_item = next(
+        item for item in data["proposals"] if item["proposal_id"] == executed_query.id
+    )
+    assert executed_item["result_excerpt"] == "new-result-preview"
+    assert executed_item["has_full_result"] is True
+    assert "snapshot-must-not-leak-full-result" not in response.text
+    assert "snapshot-must-not-leak-password" not in response.text
+
+
+async def test_snapshot_keeps_legacy_excerpt_without_claiming_a_full_result(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+) -> None:
+    """旧 EXECUTED 查询只有 payload 预览时仍可恢复卡片，但不能虚构完整正文。"""
+    session = await agent_session_crud.create(
+        db_session,
+        {"user_id": test_user.id, "title": "旧查询结果", "status": "active"},
+    )
+    legacy_proposal = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session.id,
+        proposed_by_agent_id=None,
+        action_type="device_query",
+        action_payload={
+            "proposal_reason": "历史查询",
+            "last_result_excerpt": "legacy-result-preview",
+            "password": "legacy-password-must-not-leak",
+        },
+    )
+    legacy_proposal.status = "EXECUTED"
+    current_proposal = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session.id,
+        proposed_by_agent_id=None,
+        action_type="device_query",
+        action_payload={
+            "proposal_reason": "新查询",
+            "last_result_excerpt": "current-result-preview",
+        },
+    )
+    current_proposal.status = "EXECUTED"
+    await hitl_execution_result_crud.create_for_proposal(
+        db_session,
+        proposal_id=current_proposal.id,
+        content="mixed-snapshot-must-not-leak-full-result",
+    )
+    await db_session.commit()
+
+    response = await client.get(
+        f"/api/v1/agent/sessions/{session.id}/snapshot",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    items = {
+        item["proposal_id"]: item for item in response.json()["data"]["proposals"]
+    }
+    assert items[legacy_proposal.id]["result_excerpt"] == "legacy-result-preview"
+    assert items[legacy_proposal.id]["has_full_result"] is False
+    assert items[current_proposal.id]["result_excerpt"] == "current-result-preview"
+    assert items[current_proposal.id]["has_full_result"] is True
+    assert "mixed-snapshot-must-not-leak-full-result" not in response.text
+    assert "legacy-password-must-not-leak" not in response.text
 
 
 async def test_snapshot_children_include_active_and_recent_terminal(

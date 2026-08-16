@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from typing import Literal, cast
 from weakref import WeakValueDictionary
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -318,15 +318,23 @@ class CRUDHitlProposal:
         await db.flush()
         return executed
 
-    async def list_non_terminal_for_session(
+    async def list_snapshot_for_session(
         self, db: AsyncSession, session_id: int
     ) -> list[HitlProposal]:
-        """返回会话中仍处于可恢复态的 HITL 提案。"""
+        """返回会话中可恢复态提案与已执行的设备查询。"""
         stmt = (
             select(HitlProposal)
             .where(
                 HitlProposal.session_id == session_id,
-                HitlProposal.status.in_(("PENDING", "APPROVED", "EXECUTING", "UNKNOWN")),
+                or_(
+                    HitlProposal.status.in_(
+                        ("PENDING", "APPROVED", "EXECUTING", "UNKNOWN")
+                    ),
+                    and_(
+                        HitlProposal.status == "EXECUTED",
+                        HitlProposal.action_type == "device_query",
+                    ),
+                ),
             )
             .order_by(HitlProposal.id.asc())
         )

@@ -82,6 +82,20 @@ class HitlProposalSafeResponse(ApiModel):
     created_at: datetime
     execution_started_at: datetime | None
     resolved_at: datetime | None
+    result_excerpt: str | None = None
+    has_full_result: bool = False
+
+
+class DeviceQueryResultResponse(ApiModel):
+    """会话所有者按需读取的设备查询完整结果。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+    proposal_id: int
+    content: str
+    content_length: int
+    summary_status: Literal["pending", "generating", "completed", "fallback"]
+    created_at: datetime
 
 
 class ChildAgentSnapshotResponse(ApiModel):

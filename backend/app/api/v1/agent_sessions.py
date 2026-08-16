@@ -16,25 +16,41 @@
 6. POST messages：归属校验后 claim turn 租约 → 落库用户消息 → run_chat_turn；
    整轮结束后一次 commit；HITL 事件经 BufferedWsHitlEventPublisher 在 commit 之后再广播。
    同会话并发请求返回 409；异常时仍尽量 commit 已写入的用户消息；finally 释放租约。
+7. 设备查询完整结果只经会话归属专用端点按需返回；总结恢复只处理已保存正文，
+   复用幂等总结服务且在消息提交后广播，不触发设备执行或再次使用动态凭据。
+8. 快照包含可恢复态提案及已执行查询，但只暴露 payload 中的预览；完整结果存在性
+   用一次批量 ID 查询计算，正文绝不进入快照。
 """
 
+import logging
+from datetime import UTC, datetime
+from typing import Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.chat_turn import run_chat_turn
+from app.agent.device_result_summary import (
+    SUMMARY_STALE_AFTER,
+    DeviceQueryResultNotFoundError,
+    SummaryDelivery,
+    SummaryInProgressError,
+    deliver_device_query_summary,
+)
 from app.agent.session import append_user_message
-from app.agent.ws_hub import BufferedWsHitlEventPublisher
+from app.agent.ws_hub import BufferedWsHitlEventPublisher, hub
 from app.core.database import get_db
 from app.core.deps import require_permission
 from app.crud.agent_message import agent_message_crud
 from app.crud.agent_registry import agent_registry_crud
 from app.crud.agent_session import agent_session_crud
+from app.crud.hitl_execution_result import hitl_execution_result_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
 from app.models.agent_message import AgentMessage
 from app.models.agent_registry import AgentRegistry
 from app.models.agent_session import AgentSession
+from app.models.hitl_execution_result import HitlExecutionResult
 from app.models.hitl_proposal import HitlProposal
 from app.models.user import User
 from app.schemas.agent_session import (
@@ -46,10 +62,14 @@ from app.schemas.agent_session import (
     AgentSessionResponse,
     AgentSessionSnapshotResponse,
     ChildAgentSnapshotResponse,
+    DeviceQueryResultResponse,
     HitlProposalSafeResponse,
 )
+from app.schemas.agent_ws import AgentWsServerMessage
 from app.schemas.common import PaginatedData, ResponseEnvelope, paginated_response, success_response
 from app.utils.audit import log_audit
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -82,7 +102,10 @@ async def _owned_session_or_404(
     return session
 
 
-def _safe_proposal_response(proposal: HitlProposal) -> HitlProposalSafeResponse:
+def _safe_proposal_response(
+    proposal: HitlProposal,
+    full_result_proposal_ids: set[int],
+) -> HitlProposalSafeResponse:
     """从白名单字段组装 HITL 安全摘要，避免泄露 action_payload。"""
     payload = proposal.action_payload if isinstance(proposal.action_payload, dict) else {}
     raw_asset_id = payload.get("asset_id")
@@ -91,6 +114,8 @@ def _safe_proposal_response(proposal: HitlProposal) -> HitlProposalSafeResponse:
     )
     raw_reason = payload.get("proposal_reason")
     reason = raw_reason if isinstance(raw_reason, str) else ""
+    raw_result_excerpt = payload.get("last_result_excerpt")
+    result_excerpt = raw_result_excerpt if isinstance(raw_result_excerpt, str) else None
     return HitlProposalSafeResponse(
         proposal_id=proposal.id,
         action_type=proposal.action_type,
@@ -101,6 +126,8 @@ def _safe_proposal_response(proposal: HitlProposal) -> HitlProposalSafeResponse:
         created_at=proposal.created_at,
         execution_started_at=proposal.execution_started_at,
         resolved_at=proposal.resolved_at,
+        result_excerpt=result_excerpt,
+        has_full_result=proposal.id in full_result_proposal_ids,
     )
 
 
@@ -123,15 +150,96 @@ def _snapshot_response(
     children: list[AgentRegistry],
     has_more: bool,
     next_before: int | None,
+    full_result_proposal_ids: set[int],
 ) -> AgentSessionSnapshotResponse:
     """组装会话快照响应。"""
     return AgentSessionSnapshotResponse(
         messages=[AgentMessageResponse.model_validate(item) for item in messages],
-        proposals=[_safe_proposal_response(item) for item in proposals],
+        proposals=[
+            _safe_proposal_response(item, full_result_proposal_ids) for item in proposals
+        ],
         children=[_safe_child_response(item) for item in children],
         has_more_messages=has_more,
         next_before_message_id=next_before,
     )
+
+
+def _public_summary_status(
+    result_row: HitlExecutionResult,
+) -> Literal["pending", "generating", "completed", "fallback"]:
+    """把超过五分钟的 generating 仅在公开响应中归一化为 pending。"""
+    raw_status = result_row.summary_status
+    if raw_status == "generating" and result_row.summary_started_at is not None:
+        started_at = result_row.summary_started_at
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+        if started_at < datetime.now(UTC) - SUMMARY_STALE_AFTER:
+            return "pending"
+    return cast(
+        Literal["pending", "generating", "completed", "fallback"],
+        raw_status,
+    )
+
+
+def _device_query_result_response(
+    result_row: HitlExecutionResult,
+) -> DeviceQueryResultResponse:
+    """从白名单字段组装完整结果响应，不返回总结正文或动作载荷。"""
+    return DeviceQueryResultResponse(
+        proposal_id=result_row.proposal_id,
+        content=result_row.content,
+        content_length=result_row.content_length,
+        summary_status=_public_summary_status(result_row),
+        created_at=result_row.created_at,
+    )
+
+
+async def _owned_device_query_result_or_404(
+    db: AsyncSession,
+    *,
+    session_id: int,
+    proposal_id: int,
+    user_id: int,
+) -> HitlExecutionResult:
+    """按会话归属、提案归属和动作类型收敛查询失败为统一 404。"""
+    await _owned_session_or_404(db, session_id, user_id)
+    proposal = await hitl_proposal_crud.get(db, proposal_id)
+    if (
+        proposal is None
+        or proposal.session_id != session_id
+        or proposal.action_type != "device_query"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="设备查询完整结果不存在",
+        )
+    result_row = await hitl_execution_result_crud.get_by_proposal(db, proposal_id)
+    if result_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="设备查询完整结果不存在",
+        )
+    return result_row
+
+
+async def _broadcast_summary_delivery(delivery: SummaryDelivery) -> None:
+    """只广播本次新建且已提交的总结消息；失败不改变持久化结果。"""
+    if not delivery.created_message:
+        return
+    try:
+        await hub.broadcast(
+            delivery.session_id,
+            AgentWsServerMessage(
+                type="assistant_delta",
+                payload={"text": delivery.content, "done": True},
+            ),
+        )
+    except Exception as exc:
+        logger.warning(
+            "设备查询总结广播失败 proposal_id=%s exc_type=%s",
+            delivery.proposal_id,
+            type(exc).__name__,
+        )
 
 
 @router.post(
@@ -278,6 +386,78 @@ async def list_session_messages(
 
 
 @router.get(
+    "/sessions/{session_id}/device-query-results/{proposal_id}",
+    response_model=ResponseEnvelope[DeviceQueryResultResponse],
+)
+async def get_device_query_result(
+    session_id: int,
+    proposal_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("agent:use")),
+) -> ResponseEnvelope[DeviceQueryResultResponse]:
+    """让当前会话所有者按需读取设备查询完整正文。"""
+    result_row = await _owned_device_query_result_or_404(
+        db,
+        session_id=session_id,
+        proposal_id=proposal_id,
+        user_id=current_user.id,
+    )
+    return success_response(_device_query_result_response(result_row))
+
+
+@router.post(
+    "/sessions/{session_id}/device-query-results/{proposal_id}/summary",
+    response_model=ResponseEnvelope[DeviceQueryResultResponse],
+)
+async def recover_device_query_summary(
+    session_id: int,
+    proposal_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("agent:use")),
+) -> ResponseEnvelope[DeviceQueryResultResponse]:
+    """只对已保存正文恢复总结，不重新连接设备。"""
+    await _owned_device_query_result_or_404(
+        db,
+        session_id=session_id,
+        proposal_id=proposal_id,
+        user_id=current_user.id,
+    )
+    engine = db.bind
+    if engine is None:
+        raise RuntimeError("数据库会话未绑定 AsyncEngine")
+    await db.rollback()
+    session_factory = async_sessionmaker(
+        engine,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    try:
+        delivery = await deliver_device_query_summary(
+            session_factory=session_factory,
+            proposal_id=proposal_id,
+        )
+    except SummaryInProgressError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="设备查询结果正在生成总结",
+        ) from exc
+    except DeviceQueryResultNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="设备查询完整结果不存在",
+        ) from exc
+
+    await _broadcast_summary_delivery(delivery)
+    result_row = await hitl_execution_result_crud.get_by_proposal(db, proposal_id)
+    if result_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="设备查询完整结果不存在",
+        )
+    return success_response(_device_query_result_response(result_row))
+
+
+@router.get(
     "/sessions/{session_id}/snapshot",
     response_model=ResponseEnvelope[AgentSessionSnapshotResponse],
 )
@@ -293,11 +473,21 @@ async def get_session_snapshot(
     messages, has_more = await agent_message_crud.list_root_before_id(
         db, session_id, before_id=before_message_id, limit=limit
     )
-    proposals = await hitl_proposal_crud.list_non_terminal_for_session(db, session_id)
+    proposals = await hitl_proposal_crud.list_snapshot_for_session(db, session_id)
+    full_result_proposal_ids = await hitl_execution_result_crud.existing_proposal_ids(
+        db, [proposal.id for proposal in proposals]
+    )
     children = await agent_registry_crud.list_snapshot_for_session(db, session_id)
     next_before = messages[0].id if has_more and messages else None
     return success_response(
-        _snapshot_response(messages, proposals, children, has_more, next_before)
+        _snapshot_response(
+            messages,
+            proposals,
+            children,
+            has_more,
+            next_before,
+            full_result_proposal_ids,
+        )
     )
 
 
