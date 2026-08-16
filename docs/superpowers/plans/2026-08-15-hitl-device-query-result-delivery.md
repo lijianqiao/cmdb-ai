@@ -125,7 +125,8 @@ def test_hitl_execution_result_schema() -> None:
     assert proposal_fk.ondelete == "CASCADE"
 ```
 
-在新迁移测试中固定 revision 链和关键 DDL：
+在新迁移测试中固定 revision 链，并执行 `upgrade()` 验证关键 DDL 行为；测试沿用
+`test_runtime_reliability_migration.py` 的 fake Alembic `op` 模式，不读取迁移源码文本：
 
 ```python
 def test_result_migration_follows_current_head() -> None:
@@ -134,12 +135,34 @@ def test_result_migration_follows_current_head() -> None:
     assert migration.down_revision == "f2b4c6d8e013"
 
 
-def test_upgrade_declares_result_table_and_unique_proposal() -> None:
-    source = MIGRATION_PATH.read_text(encoding="utf-8")
-    assert '"hitl_execution_results"' in source
-    assert 'sa.ForeignKeyConstraint(["proposal_id"], ["hitl_proposals.id"], ondelete="CASCADE")' in source
-    assert 'sa.UniqueConstraint("proposal_id")' in source
-    assert '"ix_hitl_execution_results_proposal_id"' in source
+def test_upgrade_creates_result_table_and_proposal_index() -> None:
+    migration = _load_migration(MIGRATION_PATH)
+    fake_op = _FakeOp()
+    migration.op = fake_op
+
+    migration.upgrade()
+
+    create_table = next(action for action in fake_op.actions if action[0] == "create_table")
+    assert create_table[1] == "hitl_execution_results"
+    columns_and_constraints = create_table[2]
+    proposal_column = next(
+        item
+        for item in columns_and_constraints
+        if isinstance(item, sa.Column) and item.name == "proposal_id"
+    )
+    assert proposal_column.nullable is False
+    foreign_key = next(
+        item for item in columns_and_constraints if isinstance(item, sa.ForeignKeyConstraint)
+    )
+    assert foreign_key.ondelete == "CASCADE"
+    assert any(isinstance(item, sa.UniqueConstraint) for item in columns_and_constraints)
+    assert (
+        "create_index",
+        "ix_hitl_execution_results_proposal_id",
+        "hitl_execution_results",
+        ["proposal_id"],
+        False,
+    ) in fake_op.actions
 ```
 
 - [ ] **Step 2: 运行测试并确认 RED**
