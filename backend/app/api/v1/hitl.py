@@ -9,27 +9,33 @@
 1. 全部端点以 agent:hitl_approve 门控，审批人可看到完整 action_payload。
 2. 列表与详情直接复用 hitl_proposal_crud 的会话查询与按 ID 读取。
 3. 审批接口调用 decide_proposal；仅在批准时再调用 resume_proposal（拒绝不恢复执行）。
-4. 新增 POST /proposals/{id}/retry，对 APPROVED 提案再次调用幂等的 resume_proposal。
-5. decide/resume/retry 注入 BufferedWsHitlEventPublisher，在 db.commit() 之后 flush，
+4. 人工批准或重试成功的 device_query 通过独立短会话生成并持久化总结；总结失败不改变设备执行结果。
+5. 新增 POST /proposals/{id}/retry，对 APPROVED 提案再次调用幂等的 resume_proposal。
+6. decide/resume/retry 注入 BufferedWsHitlEventPublisher，在 db.commit() 之后 flush，
    避免前端收到 hitl_* 事件后立刻 GET 提案却读不到未提交的行。
-6. 异常映射：缺失 404、非法迁移/恢复失败 409、提案校验拒绝 400；事务内审计后统一 commit。
+7. 已提交的 hitl_resolved 先广播，再追加 assistant_delta；广播异常只记安全 warning。
+8. 异常映射：缺失 404、非法迁移/恢复失败 409、提案校验拒绝 400；事务内审计后统一 commit。
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
+import logging
 
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.agent.device_result_summary import SummaryDelivery, deliver_device_query_summary
 from app.agent.hitl import (
     HitlProposalRejectedError,
     HitlResumeError,
     decide_proposal,
     resume_proposal,
 )
-from app.agent.ws_hub import BufferedWsHitlEventPublisher
+from app.agent.ws_hub import BufferedWsHitlEventPublisher, hub
 from app.core.database import get_db
 from app.core.deps import require_permission
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.hitl_proposal import InvalidHitlTransitionError, hitl_proposal_crud
 from app.models.user import User
+from app.schemas.agent_ws import AgentWsServerMessage
 from app.schemas.common import ResponseEnvelope, success_response
 from app.schemas.hitl import (
     HitlDecideRequest,
@@ -39,7 +45,65 @@ from app.schemas.hitl import (
 )
 from app.utils.audit import log_audit
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+
+async def _deliver_executed_query_summary(
+    db: AsyncSession,
+    *,
+    proposal_id: int,
+) -> SummaryDelivery | None:
+    """仅为已成功执行的 device_query 交付总结；失败不影响设备成功状态。"""
+    try:
+        proposal = await hitl_proposal_crud.get(db, proposal_id)
+        if (
+            proposal is None
+            or proposal.action_type != "device_query"
+            or proposal.status != "EXECUTED"
+        ):
+            return None
+
+        engine = db.bind
+        if engine is None:
+            raise RuntimeError("数据库会话未绑定 AsyncEngine")
+        session_factory = async_sessionmaker(
+            engine,
+            expire_on_commit=False,
+            autoflush=False,
+        )
+        return await deliver_device_query_summary(
+            session_factory=session_factory,
+            proposal_id=proposal_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "设备查询总结交付失败 proposal_id=%s exc_type=%s",
+            proposal_id,
+            type(exc).__name__,
+        )
+        return None
+
+
+async def _broadcast_summary_delivery(delivery: SummaryDelivery | None) -> None:
+    """只广播本次新建的总结消息；广播失败不改变 HTTP 成功语义。"""
+    if delivery is None or not delivery.created_message:
+        return
+    try:
+        await hub.broadcast(
+            delivery.session_id,
+            AgentWsServerMessage(
+                type="assistant_delta",
+                payload={"text": delivery.content, "done": True},
+            ),
+        )
+    except Exception as exc:
+        logger.warning(
+            "设备查询总结广播失败 proposal_id=%s exc_type=%s",
+            delivery.proposal_id,
+            type(exc).__name__,
+        )
 
 
 async def _to_response(db: AsyncSession, proposal: object) -> HitlProposalResponse:
@@ -135,6 +199,7 @@ async def decide_hitl_proposal(
             )
 
     publisher = BufferedWsHitlEventPublisher()
+    delivery: SummaryDelivery | None = None
     try:
         await decide_proposal(
             db,
@@ -151,6 +216,10 @@ async def decide_hitl_proposal(
                 actor_user_id=current_user.id,
                 publisher=publisher,
                 dynamic_password=body.dynamic_credential_password,
+            )
+            delivery = await _deliver_executed_query_summary(
+                db,
+                proposal_id=proposal_id,
             )
     except InvalidHitlTransitionError as exc:
         raise HTTPException(
@@ -180,6 +249,7 @@ async def decide_hitl_proposal(
     await db.commit()
     # 提交后再广播 HITL 事件，避免前端收到事件后读不到未提交的行。
     await publisher.flush()
+    await _broadcast_summary_delivery(delivery)
 
     proposal = await hitl_proposal_crud.get(db, proposal_id)
     if proposal is None:
@@ -218,6 +288,7 @@ async def retry_hitl_proposal(
             )
 
     publisher = BufferedWsHitlEventPublisher()
+    delivery: SummaryDelivery | None = None
     try:
         await resume_proposal(
             db,
@@ -225,6 +296,10 @@ async def retry_hitl_proposal(
             actor_user_id=current_user.id,
             publisher=publisher,
             dynamic_password=body.dynamic_credential_password,
+        )
+        delivery = await _deliver_executed_query_summary(
+            db,
+            proposal_id=proposal_id,
         )
     except HitlResumeError as exc:
         raise HTTPException(
@@ -234,6 +309,7 @@ async def retry_hitl_proposal(
 
     await db.commit()
     await publisher.flush()
+    await _broadcast_summary_delivery(delivery)
 
     proposal = await hitl_proposal_crud.get(db, proposal_id)
     if proposal is None:
