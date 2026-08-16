@@ -2,7 +2,7 @@
 
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import "@testing-library/jest-dom/vitest"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -274,6 +274,166 @@ describe("HitlApprovalCard 组件渲染", () => {
       )
     })
     expect(screen.getByTestId("hitl-retry-button")).toBeInTheDocument()
+  })
+})
+
+describe("HitlApprovalCard 审批状态会话隔离", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetHitlProposal.mockReset()
+    mockDecideHitlProposal.mockReset()
+    mockUsePermission.mockReturnValue(permissionResult(true))
+  })
+
+  afterEach(() => {
+    mockGetHitlProposal.mockReset()
+    mockDecideHitlProposal.mockReset()
+  })
+
+  it("切换 sessionId 后忽略旧会话晚到的审批详情载荷", async () => {
+    let resolveOldDetail!: (value: HitlProposal) => void
+    const oldDetail = new Promise<HitlProposal>((resolve) => {
+      resolveOldDetail = resolve
+    })
+    const newDetail = new Promise<HitlProposal>(() => undefined)
+    mockGetHitlProposal
+      .mockReturnValueOnce(oldDetail)
+      .mockReturnValueOnce(newDetail)
+
+    const { rerender } = render(
+      <HitlApprovalCard
+        sessionId={10}
+        proposalId={1}
+        actionType="device_query"
+        status="PENDING"
+        reason="会话 A"
+        assetId={9}
+        hasFullResult={false}
+      />,
+    )
+    rerender(
+      <HitlApprovalCard
+        sessionId={20}
+        proposalId={1}
+        actionType="device_query"
+        status="PENDING"
+        reason="会话 B"
+        assetId={9}
+        hasFullResult={false}
+      />,
+    )
+
+    await act(async () => {
+      resolveOldDetail(
+        buildProposal({
+          action_payload: {
+            asset_id: 9,
+            proposal_reason: "会话 A",
+            command: "session-a-sensitive-command",
+          },
+        }),
+      )
+    })
+
+    expect(screen.queryByText(/session-a-sensitive-command/)).not.toBeInTheDocument()
+    expect(screen.getByText("会话 B")).toBeInTheDocument()
+    expect(mockGetHitlProposal).toHaveBeenCalledTimes(2)
+  })
+
+  it("切换 sessionId 时清空旧详情、localStatus 和动态密码", async () => {
+    const oldProposal = buildProposal({
+      action_payload: {
+        asset_id: 9,
+        proposal_reason: "会话 A",
+        command: "session-a-sensitive-command",
+      },
+    })
+    mockGetHitlProposal
+      .mockResolvedValueOnce(oldProposal)
+      .mockReturnValueOnce(new Promise<HitlProposal>(() => undefined))
+    mockDecideHitlProposal.mockResolvedValue(
+      buildProposal({
+        status: "APPROVED",
+        action_payload: oldProposal.action_payload,
+      }),
+    )
+
+    const { rerender } = render(
+      <HitlApprovalCard
+        sessionId={10}
+        proposalId={1}
+        actionType="device_query"
+        status="PENDING"
+        reason="会话 A"
+        assetId={9}
+        hasFullResult={false}
+      />,
+    )
+    fireEvent.change(await screen.findByTestId("hitl-dynamic-password"), {
+      target: { value: "approve-password" },
+    })
+    fireEvent.click(screen.getByTestId("hitl-approve-button"))
+    expect(await screen.findByText("已批准但未执行")).toBeInTheDocument()
+    fireEvent.change(screen.getByTestId("hitl-retry-password"), {
+      target: { value: "session-a-password" },
+    })
+
+    rerender(
+      <HitlApprovalCard
+        sessionId={20}
+        proposalId={1}
+        actionType="device_query"
+        status="PENDING"
+        reason="会话 B"
+        assetId={9}
+        hasFullResult={false}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText("等待审批")).toBeInTheDocument()
+      expect(screen.getByText("加载完整载荷…")).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/session-a-sensitive-command/)).not.toBeInTheDocument()
+    expect(screen.queryByDisplayValue("session-a-password")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("hitl-retry-password")).not.toBeInTheDocument()
+    expect(mockGetHitlProposal).toHaveBeenCalledTimes(2)
+  })
+
+  it("切换 sessionId 时清空旧审批详情错误并重新加载", async () => {
+    mockGetHitlProposal
+      .mockRejectedValueOnce(new Error("session A failed"))
+      .mockReturnValueOnce(new Promise<HitlProposal>(() => undefined))
+    const { rerender } = render(
+      <HitlApprovalCard
+        sessionId={10}
+        proposalId={1}
+        actionType="device_query"
+        status="PENDING"
+        reason="会话 A"
+        assetId={9}
+        hasFullResult={false}
+      />,
+    )
+    expect(await screen.findByText("加载审批详情失败")).toBeInTheDocument()
+
+    rerender(
+      <HitlApprovalCard
+        sessionId={20}
+        proposalId={1}
+        actionType="device_query"
+        status="PENDING"
+        reason="会话 B"
+        assetId={9}
+        hasFullResult={false}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(screen.queryByText("加载审批详情失败")).not.toBeInTheDocument()
+      expect(screen.getByText("加载完整载荷…")).toBeInTheDocument()
+    })
+    expect(mockGetHitlProposal).toHaveBeenCalledTimes(2)
   })
 })
 

@@ -215,9 +215,12 @@ export function HitlApprovalCard({
   useEffect(() => {
     setLocalStatus(null)
     setDetail(null)
+    setDetailLoading(false)
     setDetailError(null)
     setDynamicPassword("")
-  }, [proposalId])
+    setDeciding(false)
+    setRejectOpen(false)
+  }, [sessionId, proposalId])
 
   useEffect(() => {
     fullResultRequestRef.current += 1
@@ -257,7 +260,7 @@ export function HitlApprovalCard({
     return () => {
       cancelled = true
     }
-  }, [canApprove, proposalId])
+  }, [canApprove, sessionId, proposalId])
 
   const handleApprove = async (): Promise<void> => {
     if (!canApprove || !isPending || deciding || approveDisabled) return
