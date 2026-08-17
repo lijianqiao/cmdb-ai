@@ -200,81 +200,75 @@ export function ProfilePage() {
           <CardContent>
             <form onSubmit={profileForm.handleSubmit(handleProfileSubmit)}>
               <FieldGroup>
-                <Field data-disabled>
-                  <FieldLabel htmlFor="profile-username">用户名</FieldLabel>
-                  <Input
-                    id="profile-username"
-                    value={profile?.username ?? ""}
-                    disabled
-                  />
-                  <FieldDescription>用户名创建后由系统维护，不可自行修改。</FieldDescription>
-                </Field>
-                <Controller
-                  control={profileForm.control}
-                  name="nickname"
-                  render={({ field, fieldState }) => (
-                    <Field data-invalid={fieldState.invalid}>
-                      <FieldLabel htmlFor="profile-nickname">昵称</FieldLabel>
-                      <Input
-                        id="profile-nickname"
-                        placeholder="请输入昵称"
-                        aria-invalid={fieldState.invalid}
-                        {...field}
-                      />
-                      <FieldError errors={[fieldState.error]} />
-                    </Field>
-                  )}
-                />
-                <Controller
-                  control={profileForm.control}
-                  name="email"
-                  render={({ field, fieldState }) => (
-                    <Field data-invalid={fieldState.invalid}>
-                      <FieldLabel htmlFor="profile-email">邮箱</FieldLabel>
-                      <Input
-                        id="profile-email"
-                        type="email"
-                        placeholder="请输入邮箱"
-                        aria-invalid={fieldState.invalid}
-                        {...field}
-                      />
-                      <FieldError errors={[fieldState.error]} />
-                    </Field>
-                  )}
-                />
-                <Field>
-                  <FieldTitle>所属角色</FieldTitle>
-                  <div className="flex flex-wrap gap-1.5">
-                    {profile?.roles?.length ? (
-                      profile.roles.map((role) => (
-                        <Badge key={role.id} variant="secondary">
-                          {role.name}
-                        </Badge>
-                      ))
-                    ) : (
-                      <span className="text-sm text-muted-foreground">
-                        暂无角色
-                      </span>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Field data-disabled>
+                    <FieldLabel htmlFor="profile-username">用户名</FieldLabel>
+                    <Input
+                      id="profile-username"
+                      value={profile?.username ?? ""}
+                      disabled
+                    />
+                    <FieldDescription>用户名创建后不可修改</FieldDescription>
+                  </Field>
+
+                  <Field>
+                    <FieldTitle>所属角色</FieldTitle>
+                    <div className="flex flex-wrap items-center gap-1.5 min-h-9 pt-1">
+                      {profile?.roles?.length ? (
+                        profile.roles.map((role) => (
+                          <Badge key={role.id} variant="secondary">
+                            {role.name}
+                          </Badge>
+                        ))
+                      ) : (
+                        <span className="text-sm text-muted-foreground">
+                          暂无角色
+                        </span>
+                      )}
+                    </div>
+                  </Field>
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Controller
+                    control={profileForm.control}
+                    name="nickname"
+                    render={({ field, fieldState }) => (
+                      <Field data-invalid={fieldState.invalid}>
+                        <FieldLabel htmlFor="profile-nickname">昵称</FieldLabel>
+                        <Input
+                          id="profile-nickname"
+                          placeholder="请输入昵称"
+                          aria-invalid={fieldState.invalid}
+                          {...field}
+                        />
+                        <FieldError errors={[fieldState.error]} />
+                      </Field>
                     )}
-                  </div>
-                </Field>
-                <Field data-disabled>
-                  <FieldLabel htmlFor="profile-created-at">注册时间</FieldLabel>
-                  <Input
-                    id="profile-created-at"
-                    value={
-                      profile?.created_at
-                        ? dayjs(profile.created_at).format(
-                            "YYYY-MM-DD HH:mm:ss"
-                          )
-                        : ""
-                    }
-                    disabled
                   />
-                </Field>
+
+                  <Controller
+                    control={profileForm.control}
+                    name="email"
+                    render={({ field, fieldState }) => (
+                      <Field data-invalid={fieldState.invalid}>
+                        <FieldLabel htmlFor="profile-email">邮箱</FieldLabel>
+                        <Input
+                          id="profile-email"
+                          type="email"
+                          placeholder="请输入邮箱"
+                          aria-invalid={fieldState.invalid}
+                          {...field}
+                        />
+                        <FieldError errors={[fieldState.error]} />
+                      </Field>
+                    )}
+                  />
+                </div>
+
                 <Button
                   type="submit"
-                  className="w-fit"
+                  className="w-fit mt-2"
                   disabled={profileForm.formState.isSubmitting}
                 >
                   {profileForm.formState.isSubmitting && (
