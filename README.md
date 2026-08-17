@@ -10,7 +10,7 @@ Interact with your IT infrastructure through natural language: query CMDB assets
 
 ## Product Demo
 
-[![Watch the product demo](./docs/images/product_demo_poster.jpg)](./docs/images/product_demo.mp4)
+![Product demo](./docs/images/product_demo.gif)
 
 The demo covers:
 1. Superuser login and the dashboard overview;
@@ -65,7 +65,7 @@ The demo covers:
 ent-agent/
 ├── backend/          # FastAPI API service (see backend/README.md)
 ├── frontend/         # React SPA client (see frontend/README.md)
-├── docs/             # PRD, architecture, deployment, diagrams, demo video
+├── docs/             # PRD, architecture, deployment, diagrams, demo GIF
 ├── README.md         # English documentation (this file)
 └── README_zh.md      # Chinese documentation
 ```

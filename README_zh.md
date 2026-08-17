@@ -10,8 +10,7 @@
 
 ## 产品演示
 
-[![点击播放产品演示](./docs/images/product_demo_poster.jpg)](./docs/images/product_demo.mp4)
-
+![产品演示](./docs/images/product_demo.gif)
 
 演示包含：
 1. 超级管理员登录与控制台大盘；
@@ -66,7 +65,7 @@
 ent-agent/
 ├── backend/          # FastAPI 后端服务（详见 backend/README_zh.md）
 ├── frontend/         # React SPA 前端应用（详见 frontend/README_zh.md）
-├── docs/             # PRD、架构设计、部署规范、时序图与演示视频
+├── docs/             # PRD、架构设计、部署规范、时序图与演示动图
 ├── README.md         # 英文说明
 └── README_zh.md      # 中文说明（本文件）
 ```
