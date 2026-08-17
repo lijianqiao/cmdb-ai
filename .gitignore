@@ -23,6 +23,7 @@ node_modules/
 dist/
 build/
 *.tsbuildinfo
+pnpm-lock.yaml
 
 # ===== IDE / 编辑器 =====
 .vscode/
