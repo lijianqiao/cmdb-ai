@@ -48,7 +48,9 @@ import {
 } from "@/lib/knowledge-api"
 
 const schema = z.object({
-  category_code: z.string().min(1, "请选择分类"),
+  // 可留空：不选分类时后端落到「未分类」，之后在知识库管理页用 AI 建议或人工归类。
+  // 批量导入历史文档时不必逐份先想清楚该归哪。
+  category_code: z.string(),
   title: z.string().min(1, "请输入标题").max(200, "标题最多 200 个字符"),
   file: z
     .custom<File>((value) => value instanceof File, { message: "请选择文件" })
@@ -239,7 +241,9 @@ export function KnowledgeUploadDialog({
               render={({ field, fieldState }) => (
                 <Field data-invalid={fieldState.invalid}>
                   <div className="flex items-center justify-between gap-2">
-                    <FieldLabel htmlFor="knowledge-category">分类</FieldLabel>
+                    <FieldLabel htmlFor="knowledge-category">
+                      分类（可不选，稍后在知识库页归类）
+                    </FieldLabel>
                     {canManageCategory && !categoriesForbidden && (
                       <Button
                         type="button"

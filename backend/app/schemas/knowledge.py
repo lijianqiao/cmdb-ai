@@ -40,3 +40,27 @@ class KnowledgeDocumentResponse(ApiModel):
     file_type: str
     status: str
     created_at: datetime
+    # AI 分类建议；未生成或已被应用时全部为空。
+    suggested_category_id: int | None = None
+    suggestion_confidence: float | None = None
+    suggestion_reason: str = ""
+    suggested_at: datetime | None = None
+
+
+class KnowledgeDocumentCategoryUpdate(ApiModel):
+    """把一份文档归到指定分类（采纳建议或人工覆盖）。"""
+
+    category_id: int = Field(ge=1)
+
+
+class KnowledgeClassifyRequest(ApiModel):
+    """为一批文档生成 AI 分类建议。"""
+
+    document_ids: list[int] = Field(min_length=1, max_length=50)
+
+
+class KnowledgeClassifyResponse(ApiModel):
+    """建议生成结果统计。"""
+
+    suggested: int
+    skipped: int

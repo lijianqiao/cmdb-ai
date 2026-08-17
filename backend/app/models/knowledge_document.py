@@ -3,7 +3,9 @@ under knowledge/{category_code}/{document_id}_{filename} (see
 app/services/knowledge_storage.py), per docs/AGENT_ARCHITECTURE.md §4.3.
 """
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -26,6 +28,17 @@ class KnowledgeDocument(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="processing")
     uploaded_by: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    # AI 分类建议。与 category_id 分开存：建议只是建议，必须由人确认后才改变
+    # 文档的真实归属（应用建议 = 把 suggested_category_id 写进 category_id 并清空建议）。
+    # 分类被删除时置空而不是级联删文档，所以用 SET NULL。
+    suggested_category_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("knowledge_categories.id", ondelete="SET NULL"), nullable=True
+    )
+    suggestion_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    suggestion_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    suggested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
 

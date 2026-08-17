@@ -93,6 +93,11 @@ const MonitorLogsPage = lazy(() =>
     default: module.MonitorLogsPage,
   })),
 )
+const KnowledgePage = lazy(() =>
+  import("@/pages/KnowledgePage").then((module) => ({
+    default: module.KnowledgePage,
+  })),
+)
 const UsersPage = lazy(() =>
   import("@/pages/UsersPage").then((module) => ({
     default: module.UsersPage,
@@ -233,6 +238,14 @@ export function App() {
               element={
                 <ProtectedRoute permission={PERMISSIONS.DEVICE_COMMAND_POLICY_MANAGE}>
                   <DeviceCommandPoliciesTrashPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path={ROUTES.KNOWLEDGE}
+              element={
+                <ProtectedRoute permission={PERMISSIONS.KNOWLEDGE_READ}>
+                  <KnowledgePage />
                 </ProtectedRoute>
               }
             />

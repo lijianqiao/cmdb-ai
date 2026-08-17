@@ -507,6 +507,10 @@ export function OpsAssistantPage() {
                 <MonitorAlertBanner
                   alert={monitorAlert}
                   onDismiss={clearMonitorAlert}
+                  onInvestigate={sendMessage}
+                  investigateDisabled={
+                    inputDisabled || isExecutingHitl || isBusy
+                  }
                 />
                 <ChatInput
                   disabled={inputDisabled || isExecutingHitl}

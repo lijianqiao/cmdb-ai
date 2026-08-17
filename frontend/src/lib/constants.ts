@@ -15,6 +15,7 @@ export const ROUTES = {
   MONITOR_LOGS: "/monitor-logs",
   DEVICE_COMMAND_POLICIES: "/device-command-policies",
   DEVICE_COMMAND_POLICIES_TRASH: "/device-command-policies/trash",
+  KNOWLEDGE: "/knowledge",
   PROFILE: "/profile",
   AUDIT: "/audit",
   SYSTEM_CONFIG: "/system-config",

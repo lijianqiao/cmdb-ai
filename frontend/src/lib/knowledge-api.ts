@@ -12,7 +12,7 @@ export interface KnowledgeCategory {
   created_at: string
 }
 
-/** 上传后的知识文档 */
+/** 知识文档。`suggested_*` 是待人工确认的 AI 建议，未生成或已应用时为空 */
 export interface KnowledgeDocument {
   id: number
   category_id: number
@@ -22,6 +22,10 @@ export interface KnowledgeDocument {
   file_type: string
   status: string
   created_at: string
+  suggested_category_id: number | null
+  suggestion_confidence: number | null
+  suggestion_reason: string
+  suggested_at: string | null
 }
 
 /**
@@ -87,13 +91,65 @@ export async function uploadDocument(
   file: File,
 ): Promise<KnowledgeDocument> {
   const formData = new FormData()
-  formData.append("category_code", categoryCode)
+  // 空字符串表示「不指定分类」，后端会落到「未分类」等待归类。
+  if (categoryCode) formData.append("category_code", categoryCode)
   formData.append("title", title)
   formData.append("file", file)
 
   const response = await api.post<ApiResponse<KnowledgeDocument>>(
     "/knowledge/documents",
     formData,
+  )
+  return response.data.data
+}
+
+/**
+ * 把文档归到指定分类（采纳 AI 建议或人工覆盖）。
+ *
+ * 需要 `knowledge:manage`。应用后该文档的建议会被清空。
+ *
+ * Args:
+ *   documentId: 文档 ID
+ *   categoryId: 目标分类 ID
+ *
+ * Returns:
+ *   更新后的文档
+ */
+export async function applyDocumentCategory(
+  documentId: number,
+  categoryId: number,
+): Promise<KnowledgeDocument> {
+  const response = await api.patch<ApiResponse<KnowledgeDocument>>(
+    `/knowledge/documents/${documentId}/category`,
+    { category_id: categoryId },
+  )
+  return response.data.data
+}
+
+/** 批量建议结果统计 */
+export interface KnowledgeClassifyResult {
+  suggested: number
+  skipped: number
+}
+
+/**
+ * 为选中的文档生成 AI 分类建议。
+ *
+ * 需要 `knowledge:manage`。只写建议，不改变文档当前归属——
+ * 真正归类要用户在列表里点「应用」。
+ *
+ * Args:
+ *   documentIds: 文档 ID 列表（1~50 个）
+ *
+ * Returns:
+ *   生成与跳过的份数
+ */
+export async function classifyDocuments(
+  documentIds: number[],
+): Promise<KnowledgeClassifyResult> {
+  const response = await api.post<ApiResponse<KnowledgeClassifyResult>>(
+    "/knowledge/documents/classify",
+    { document_ids: documentIds },
   )
   return response.data.data
 }

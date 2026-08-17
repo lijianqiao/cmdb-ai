@@ -1,24 +1,48 @@
-"""Knowledge-base routes: category management and document upload."""
+"""Knowledge-base routes: category management, document upload, and AI classification."""
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.deps import get_client_ip, require_permission
 from app.crud.knowledge_category import knowledge_category_crud
+from app.crud.knowledge_document import knowledge_document_crud
 from app.models.user import User
-from app.schemas.common import ResponseEnvelope, success_response
+from app.schemas.common import (
+    PaginatedData,
+    ResponseEnvelope,
+    paginated_response,
+    success_response,
+)
 from app.schemas.knowledge import (
     KnowledgeCategoryCreate,
     KnowledgeCategoryResponse,
+    KnowledgeClassifyRequest,
+    KnowledgeClassifyResponse,
+    KnowledgeDocumentCategoryUpdate,
     KnowledgeDocumentResponse,
 )
+from app.services.knowledge_classification import suggest_categories
 from app.services.knowledge_ingestion import DuplicateDocumentError, ingest_document
 from app.utils.audit import log_audit
 
 router = APIRouter()
 
 _SUPPORTED_FILE_TYPES = {"md", "txt"}
+# 上传时不指定分类的文档落在这里，等 AI 建议或人工归类。
+# 用固定 code 而不是迁移种子：任何部署第一次用到时按需创建，不依赖迁移顺序。
+UNCATEGORIZED_CODE = "uncategorized"
+UNCATEGORIZED_NAME = "未分类"
 
 
 @router.post(
@@ -69,13 +93,17 @@ async def list_categories(
 )
 async def upload_document(
     request: Request,
-    category_code: str = Form(...),
     title: str = Form(...),
     file: UploadFile = File(...),
+    category_code: str | None = Form(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("knowledge:upload")),
 ) -> ResponseEnvelope[KnowledgeDocumentResponse]:
-    """Upload a document (.md/.txt only), chunk it, embed it, and store it."""
+    """Upload a document (.md/.txt only), chunk it, embed it, and store it.
+
+    `category_code` 可省略：省略时落到「未分类」，之后可在知识库管理页用
+    AI 建议或人工归类。这样批量导入历史文档时不必逐份先想清楚分类。
+    """
     filename = file.filename or "unnamed"
     file_type = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if file_type not in _SUPPORTED_FILE_TYPES:
@@ -84,9 +112,22 @@ async def upload_document(
             detail=f"不支持的文件类型: .{file_type}（仅支持 .md/.txt）",
         )
 
-    category = await knowledge_category_crud.get_by_code(db, category_code)
-    if category is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分类不存在")
+    if category_code:
+        category = await knowledge_category_crud.get_by_code(db, category_code)
+        if category is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分类不存在")
+    else:
+        category = await knowledge_category_crud.get_by_code(db, UNCATEGORIZED_CODE)
+        if category is None:
+            category = await knowledge_category_crud.create(
+                db,
+                {
+                    "code": UNCATEGORIZED_CODE,
+                    "name": UNCATEGORIZED_NAME,
+                    "description": "上传时未指定分类的文档，等待 AI 建议或人工归类",
+                },
+            )
+            await db.flush()
 
     content = await file.read()
 
@@ -117,4 +158,103 @@ async def upload_document(
     await db.commit()
     return success_response(
         KnowledgeDocumentResponse.model_validate(document), message="上传成功", code=status.HTTP_201_CREATED
+    )
+
+
+@router.get(
+    "/documents",
+    response_model=ResponseEnvelope[PaginatedData[KnowledgeDocumentResponse]],
+)
+async def list_documents(
+    page: int = Query(default=1, ge=1, le=100_000),
+    page_size: int = Query(default=20, ge=1, le=100),
+    category_id: int | None = Query(default=None, ge=1),
+    search: str | None = Query(default=None, max_length=200),
+    pending_suggestion: bool | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("knowledge:read")),
+) -> ResponseEnvelope[PaginatedData[KnowledgeDocumentResponse]]:
+    """分页列出知识文档，支持按分类、标题关键词与「有无待确认 AI 建议」筛选。"""
+    documents, total = await knowledge_document_crud.list_filtered(
+        db,
+        category_id=category_id,
+        search=search,
+        pending_suggestion=pending_suggestion,
+        skip=(page - 1) * page_size,
+        limit=page_size,
+    )
+    items = [KnowledgeDocumentResponse.model_validate(item) for item in documents]
+    return paginated_response(items, total, page, page_size)
+
+
+@router.patch(
+    "/documents/{document_id}/category",
+    response_model=ResponseEnvelope[KnowledgeDocumentResponse],
+)
+async def update_document_category(
+    document_id: int,
+    body: KnowledgeDocumentCategoryUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("knowledge:manage")),
+) -> ResponseEnvelope[KnowledgeDocumentResponse]:
+    """把文档归到指定分类（采纳 AI 建议或人工覆盖），并清空已消费的建议。"""
+    document = await knowledge_document_crud.get(db, document_id)
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文档不存在")
+
+    category = await knowledge_category_crud.get(db, body.category_id)
+    if category is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分类不存在")
+
+    previous_category_id = document.category_id
+    adopted_suggestion = document.suggested_category_id == body.category_id
+    await knowledge_document_crud.apply_category(db, document, body.category_id)
+    await log_audit(
+        db,
+        current_user.id,
+        "update_knowledge_document_category",
+        target=f"knowledge_document:{document.id}",
+        detail=(
+            f"分类 {previous_category_id} → {body.category_id}"
+            f"（{'采纳 AI 建议' if adopted_suggestion else '人工指定'}）"
+        ),
+        ip=get_client_ip(request),
+    )
+    await db.commit()
+    return success_response(
+        KnowledgeDocumentResponse.model_validate(document), message="已更新分类"
+    )
+
+
+@router.post(
+    "/documents/classify",
+    response_model=ResponseEnvelope[KnowledgeClassifyResponse],
+)
+async def classify_documents_endpoint(
+    body: KnowledgeClassifyRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("knowledge:manage")),
+) -> ResponseEnvelope[KnowledgeClassifyResponse]:
+    """为选中的文档生成 AI 分类建议。
+
+    只写建议字段，不改变文档当前归属——用户在管理页确认后才会真正归类。
+    单份直接调模型，多份走并行编排工作流。
+    """
+    outcome = await suggest_categories(
+        db, body.document_ids, actor_user_id=current_user.id
+    )
+    await log_audit(
+        db,
+        current_user.id,
+        "suggest_knowledge_document_categories",
+        target=f"knowledge_document:{','.join(str(i) for i in body.document_ids[:10])}",
+        detail=f"请求 {len(body.document_ids)} 份，生成建议 {outcome.suggested} 份",
+        ip=get_client_ip(request),
+    )
+    await db.commit()
+    return success_response(
+        KnowledgeClassifyResponse(suggested=outcome.suggested, skipped=outcome.skipped),
+        message=f"已生成 {outcome.suggested} 份建议",
     )

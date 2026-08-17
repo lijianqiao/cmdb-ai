@@ -10,6 +10,9 @@ import { HugeiconsIcon } from "@hugeicons/react"
 import type { ComponentProps, FC } from "react"
 import {
   Cancel01Icon as Cancel01,
+  Search01Icon as Search01,
+  MagicWand01Icon as MagicWand01,
+  Book02Icon as Book02,
   Shield02Icon as Shield02,
   Tick02Icon as Tick02,
   UnfoldMoreIcon as UnfoldMore,
@@ -68,6 +71,9 @@ function makeIcon(
 }
 
 export const Cancel01Icon = makeIcon(Cancel01)
+export const Search01Icon = makeIcon(Search01)
+export const MagicWand01Icon = makeIcon(MagicWand01)
+export const Book02Icon = makeIcon(Book02)
 export const Shield02Icon = makeIcon(Shield02)
 export const Tick02Icon = makeIcon(Tick02)
 export const UnfoldMoreIcon = makeIcon(UnfoldMore)
