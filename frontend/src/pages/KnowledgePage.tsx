@@ -14,7 +14,7 @@ import type { ColumnDef } from "@tanstack/react-table"
 import dayjs from "dayjs"
 import { toast } from "sonner"
 
-import { MagicWand01Icon, Tick02Icon } from "@/lib/icons"
+import { MagicWand01Icon, Tick02Icon, Upload01Icon } from "@/lib/icons"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -27,6 +27,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { KnowledgeUploadDialog } from "@/components/ops-assistant/KnowledgeUploadDialog"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable } from "@/components/common/DataTable"
 import { Pagination } from "@/components/common/Pagination"
@@ -49,7 +50,9 @@ const MAX_CLASSIFY_BATCH = 50
 export function KnowledgePage() {
   const { hasPermission } = usePermission()
   const canManage = hasPermission(PERMISSIONS.KNOWLEDGE_MANAGE)
+  const canUploadKnowledge = hasPermission(PERMISSIONS.KNOWLEDGE_UPLOAD)
 
+  const [uploadOpen, setUploadOpen] = useState(false)
   const [categories, setCategories] = useState<KnowledgeCategory[]>([])
   const [categoryFilter, setCategoryFilter] = useState<string>(ALL_CATEGORIES)
   const [pendingOnly, setPendingOnly] = useState(false)
@@ -225,12 +228,17 @@ export function KnowledgePage() {
         accessorKey: "title",
         header: "标题",
         cell: ({ row }) => (
-          <span className="flex flex-col">
-            <span className="font-medium">{row.original.title}</span>
-            <span className="text-xs text-muted-foreground">
+          <div className="flex max-w-xs flex-col">
+            <span className="truncate font-medium" title={row.original.title}>
+              {row.original.title}
+            </span>
+            <span
+              className="truncate text-xs text-muted-foreground"
+              title={row.original.original_filename}
+            >
               {row.original.original_filename}
             </span>
-          </span>
+          </div>
         ),
       },
       {
@@ -252,9 +260,9 @@ export function KnowledgePage() {
           }
           const confidence = document.suggestion_confidence
           return (
-            <span className="flex flex-col gap-0.5">
-              <span className="flex items-center gap-1">
-                <Badge>
+            <div className="flex max-w-sm flex-col gap-0.5">
+              <div className="flex items-center gap-1.5">
+                <Badge className="max-w-[160px] truncate">
                   {categoryName.get(document.suggested_category_id) ??
                     `#${document.suggested_category_id}`}
                 </Badge>
@@ -263,13 +271,16 @@ export function KnowledgePage() {
                     {Math.round(confidence * 100)}%
                   </span>
                 ) : null}
-              </span>
+              </div>
               {document.suggestion_reason ? (
-                <span className="text-xs text-muted-foreground">
+                <span
+                  className="line-clamp-2 text-xs text-muted-foreground"
+                  title={document.suggestion_reason}
+                >
                   {document.suggestion_reason}
                 </span>
               ) : null}
-            </span>
+            </div>
           )
         },
       },
@@ -315,6 +326,25 @@ export function KnowledgePage() {
       <PageHeader
         title="知识库"
         description="查看已上传的运维文档，按需生成 AI 分类建议并确认归类"
+        actions={
+          canUploadKnowledge ? (
+            <Button
+              type="button"
+              onClick={() => setUploadOpen(true)}
+            >
+              <Upload01Icon data-icon="inline-start" />
+              上传知识文档
+            </Button>
+          ) : null
+        }
+      />
+
+      <KnowledgeUploadDialog
+        open={uploadOpen}
+        onOpenChange={(open) => {
+          setUploadOpen(open)
+          if (!open) void refetch()
+        }}
       />
 
       <div className="flex flex-wrap items-center gap-2">
@@ -397,7 +427,7 @@ export function KnowledgePage() {
         columns={columns}
         data={documents}
         isLoading={isLoading}
-        emptyMessage="暂无知识文档，可在运维助手页上传"
+        emptyMessage="暂无知识文档，可点击右上角「上传知识文档」进行添加"
       />
 
       <Pagination

@@ -28,9 +28,6 @@ import {
   FieldError,
   FieldGroup,
   FieldLabel,
-  FieldLegend,
-  FieldSeparator,
-  FieldSet,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
@@ -154,14 +151,30 @@ function ChatTierFields({ form, tier, value }: ChatTierFieldsProps) {
   })
 
   return (
-    <FieldSet>
-      <FieldLegend className="flex flex-wrap items-center gap-2">
-        {CHAT_TIER_LABELS[tier]}
-        {tier !== "balanced" && !value.configured ? (
-          <Badge variant="outline">未配置 · 回退到平衡档</Badge>
-        ) : null}
-      </FieldLegend>
-      <FieldDescription>{TIER_HINTS[tier]}</FieldDescription>
+    <div className="rounded-xl border bg-muted/20 p-4 transition-colors">
+      <div className="mb-4 flex flex-col gap-1 border-b border-border/60 pb-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="text-base font-semibold text-foreground">
+              {CHAT_TIER_LABELS[tier]}
+            </span>
+            {tier !== "balanced" && !value.configured ? (
+              <Badge variant="outline" className="text-xs font-normal text-muted-foreground">
+                未配置 · 回退到平衡档
+              </Badge>
+            ) : tier === "balanced" ? (
+              <Badge variant="secondary" className="text-xs font-normal">
+                主力对话档
+              </Badge>
+            ) : (
+              <Badge variant="secondary" className="text-xs font-normal">
+                独立配置已生效
+              </Badge>
+            )}
+          </div>
+          <p className="mt-0.5 text-xs text-muted-foreground">{TIER_HINTS[tier]}</p>
+        </div>
+      </div>
       <FieldGroup className="gap-4">
         <div className="grid gap-4 sm:grid-cols-2">
           <Controller
@@ -265,7 +278,7 @@ function ChatTierFields({ form, tier, value }: ChatTierFieldsProps) {
           render={({ fieldState }) => <FieldError errors={[fieldState.error]} />}
         />
       </FieldGroup>
-    </FieldSet>
+    </div>
   )
 }
 
@@ -382,16 +395,32 @@ export function LlmConfigCard({ value, onSaved }: LlmConfigCardProps) {
       </CardHeader>
       <form onSubmit={form.handleSubmit(handleSubmit)}>
         <CardContent>
-          <FieldGroup>
+          <div className="flex flex-col gap-5">
             {CHAT_TIERS.map((tier) => (
-              <div key={tier}>
-                <ChatTierFields form={form} tier={tier} value={value[`chat_${tier}`]} />
-                <FieldSeparator />
-              </div>
+              <ChatTierFields
+                key={tier}
+                form={form}
+                tier={tier}
+                value={value[`chat_${tier}`]}
+              />
             ))}
 
-            <FieldSet>
-              <FieldLegend>Embedding</FieldLegend>
+            <div className="rounded-xl border bg-muted/20 p-4 transition-colors">
+              <div className="mb-4 flex flex-col gap-1 border-b border-border/60 pb-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-base font-semibold text-foreground">
+                      Embedding 向量模型
+                    </span>
+                    <Badge variant="secondary" className="text-xs font-normal">
+                      知识库召回
+                    </Badge>
+                  </div>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    用于知识库文档向量化与语义检索召回
+                  </p>
+                </div>
+              </div>
               <FieldGroup className="gap-4">
                 <div className="grid gap-4 sm:grid-cols-2">
                   <Controller
@@ -455,8 +484,8 @@ export function LlmConfigCard({ value, onSaved }: LlmConfigCardProps) {
                   )}
                 />
               </FieldGroup>
-            </FieldSet>
-          </FieldGroup>
+            </div>
+          </div>
         </CardContent>
         <CardFooter className="justify-end border-t pt-4">
           <Button type="submit" disabled={form.formState.isSubmitting}>

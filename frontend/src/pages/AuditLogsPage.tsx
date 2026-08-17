@@ -104,7 +104,10 @@ export function AuditLogsPage() {
         accessorKey: "target",
         header: "目标",
         cell: ({ row }) => (
-          <span className="font-mono text-sm text-muted-foreground">
+          <span
+            className="block max-w-xs truncate font-mono text-sm text-muted-foreground"
+            title={row.original.target || undefined}
+          >
             {row.original.target || "-"}
           </span>
         ),
@@ -113,7 +116,10 @@ export function AuditLogsPage() {
         accessorKey: "detail",
         header: "详情",
         cell: ({ row }) => (
-          <span className="text-sm text-muted-foreground">
+          <span
+            className="block max-w-md line-clamp-2 text-sm text-muted-foreground"
+            title={row.original.detail || undefined}
+          >
             {row.original.detail || "-"}
           </span>
         ),

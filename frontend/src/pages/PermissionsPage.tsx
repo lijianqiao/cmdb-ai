@@ -173,14 +173,22 @@ export function PermissionsPage() {
         accessorKey: "name",
         header: "权限名称",
         cell: ({ row }) => (
-          <span className="font-medium">{row.original.name}</span>
+          <span
+            className="block max-w-[180px] truncate font-medium"
+            title={row.original.name}
+          >
+            {row.original.name}
+          </span>
         ),
       },
       {
         accessorKey: "code",
         header: "权限码",
         cell: ({ row }) => (
-          <code className="rounded bg-muted px-1.5 py-0.5 text-sm">
+          <code
+            className="inline-block max-w-[200px] truncate rounded bg-muted px-1.5 py-0.5 text-xs font-mono"
+            title={row.original.code}
+          >
             {row.original.code}
           </code>
         ),
@@ -193,7 +201,14 @@ export function PermissionsPage() {
       {
         accessorKey: "description",
         header: "描述",
-        cell: ({ row }) => row.original.description || "-",
+        cell: ({ row }) => (
+          <span
+            className="block max-w-xs line-clamp-2 text-sm text-muted-foreground"
+            title={row.original.description || undefined}
+          >
+            {row.original.description || "-"}
+          </span>
+        ),
       },
       {
         accessorKey: "is_active",

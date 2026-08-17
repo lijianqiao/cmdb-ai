@@ -8,14 +8,17 @@ import { useCallback, useEffect, useState } from "react"
 import dayjs from "dayjs"
 import { toast } from "sonner"
 
-import { AiChat01Icon, Delete02Icon, PlusSignIcon, Upload01Icon } from "@/lib/icons"
+import {
+  AiChat01Icon,
+  Delete02Icon,
+  PanelLeftIcon,
+  PlusSignIcon,
+} from "@/lib/icons"
 import { ChatInput } from "@/components/ops-assistant/ChatInput"
 import { ChatMessageList } from "@/components/ops-assistant/ChatMessageList"
-import { KnowledgeUploadDialog } from "@/components/ops-assistant/KnowledgeUploadDialog"
 import { MonitorAlertBanner } from "@/components/ops-assistant/MonitorAlertBanner"
 import { ConfirmDialog } from "@/components/common/ConfirmDialog"
 import { HitlApprovalDialog } from "@/components/ops-assistant/HitlApprovalDialog"
-import { PageHeader } from "@/components/layout/PageHeader"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -34,18 +37,15 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { useOpsChat } from "@/hooks/use-ops-chat"
-import { usePermission } from "@/hooks/use-permission"
 import {
   createAgentSession,
   deleteAgentSession,
   listAgentSessions,
   patchAgentSession,
 } from "@/lib/agent-api"
-import { PERMISSIONS } from "@/lib/constants"
 import { decideHitlProposal } from "@/lib/hitl-api"
 import { readErrorMessage } from "@/components/ops-assistant/hitlApprovalCardUtils"
 import { cn } from "@/lib/utils"
@@ -64,20 +64,18 @@ function wsStatusLabel(
 }
 
 /**
- * 运维助手页面：会话选择、消息时间线、发送输入。
+ * 运维助手页面：类 Claude 全屏工作台布局，支持侧边栏折叠与宽屏问答。
  */
 export function OpsAssistantPage() {
-  const { hasPermission } = usePermission()
   const [sessions, setSessions] = useState<AgentSession[]>([])
   const [sessionsLoading, setSessionsLoading] = useState(true)
   const [creating, setCreating] = useState(false)
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null)
-  const [uploadOpen, setUploadOpen] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(true)
   const [deleteTarget, setDeleteTarget] = useState<AgentSession | null>(null)
   const [fullAccessTargetSessionId, setFullAccessTargetSessionId] =
     useState<number | null>(null)
   const [patchingApprovalMode, setPatchingApprovalMode] = useState(false)
-  const canUploadKnowledge = hasPermission(PERMISSIONS.KNOWLEDGE_UPLOAD)
 
   const selectedSession =
     selectedSessionId == null
@@ -268,40 +266,8 @@ export function OpsAssistantPage() {
   const connectionLabel = wsStatusLabel(reconnecting, wsStatus)
 
   return (
-    <div className="flex h-[calc(100svh-7.5rem)] flex-col gap-4">
-      <PageHeader
-        title="运维助手"
-        description="通过对话查询与处理运维问题"
-        actions={
-          <div className="flex flex-wrap items-center gap-2">
-            {canUploadKnowledge && (
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setUploadOpen(true)}
-              >
-                <Upload01Icon data-icon="inline-start" />
-                上传知识
-              </Button>
-            )}
-            <Button
-              type="button"
-              onClick={() => void handleCreateSession()}
-              disabled={creating}
-            >
-              {creating ? (
-                <Spinner data-icon="inline-start" />
-              ) : (
-                <PlusSignIcon data-icon="inline-start" />
-              )}
-              新建会话
-            </Button>
-          </div>
-        }
-      />
-
-      <KnowledgeUploadDialog open={uploadOpen} onOpenChange={setUploadOpen} />
-
+    <div className="flex h-[calc(100svh-5.75rem)] md:h-[calc(100svh-6.75rem)] overflow-hidden rounded-xl border bg-background shadow-2xs">
+      <h1 className="sr-only">运维助手</h1>
       {activeHitl && selectedSessionId != null ? (
         <HitlApprovalDialog
           open={true}
@@ -370,19 +336,46 @@ export function OpsAssistantPage() {
         </DialogContent>
       </Dialog>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-4 md:flex-row">
-        <aside className="flex w-full shrink-0 flex-col gap-2 rounded-xl border bg-card md:w-64">
-          <div className="flex items-center justify-between px-3 py-2">
-            <span className="text-sm font-medium">会话</span>
+      {/* 左侧会话侧边栏（可展开/折叠） */}
+      {sidebarOpen && (
+        <aside className="flex w-72 shrink-0 flex-col border-r bg-card/40">
+          <div className="flex items-center gap-2 p-3 pb-2">
+            <Button
+              type="button"
+              className="flex-1 justify-start gap-2 font-medium shadow-2xs"
+              onClick={() => void handleCreateSession()}
+              disabled={creating}
+            >
+              {creating ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <PlusSignIcon data-icon="inline-start" />
+              )}
+              新建会话
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-9 shrink-0 text-muted-foreground hover:text-foreground"
+              onClick={() => setSidebarOpen(false)}
+              title="收起会话列表"
+            >
+              <PanelLeftIcon className="size-4.5" />
+            </Button>
+          </div>
+
+          <div className="flex items-center justify-between px-3.5 py-1.5 text-xs font-medium text-muted-foreground">
+            <span>会话列表</span>
             {sessionsLoading ? (
-              <Spinner className="size-3.5 text-muted-foreground" />
+              <Spinner className="size-3" />
             ) : (
-              <span className="text-xs text-muted-foreground">
+              <span className="rounded-full bg-muted px-1.5 py-0.2 text-[11px]">
                 {sessions.length}
               </span>
             )}
           </div>
-          <Separator />
+
           <ScrollArea className="min-h-0 flex-1 px-2 pb-2">
             {sessionsLoading ? (
               <div className="flex flex-col gap-2 p-1">
@@ -398,7 +391,7 @@ export function OpsAssistantPage() {
                   </EmptyMedia>
                   <EmptyTitle>暂无会话</EmptyTitle>
                   <EmptyDescription>
-                    点击右上角「新建会话」开始对话。
+                    点击上方「新建会话」开始对话。
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>
@@ -410,23 +403,25 @@ export function OpsAssistantPage() {
                     <div
                       key={session.id}
                       className={cn(
-                        "group flex items-stretch gap-0.5 rounded-lg",
-                        active && "bg-muted",
+                        "group flex items-stretch gap-0.5 rounded-lg transition-colors",
+                        active
+                          ? "bg-muted font-medium text-foreground"
+                          : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
                       )}
                     >
                       <Button
                         type="button"
-                        variant={active ? "secondary" : "ghost"}
+                        variant="ghost"
                         className={cn(
-                          "h-auto min-w-0 flex-1 flex-col items-start gap-0.5 px-3 py-2 text-left",
-                          active && "bg-transparent hover:bg-transparent",
+                          "h-auto min-w-0 flex-1 flex-col items-start gap-0.5 px-3 py-2 text-left hover:bg-transparent",
+                          active && "font-medium text-foreground",
                         )}
                         onClick={() => setSelectedSessionId(session.id)}
                       >
-                        <span className="w-full truncate text-sm font-medium">
+                        <span className="w-full truncate text-xs font-medium">
                           {session.title || `会话 #${session.id}`}
                         </span>
-                        <span className="text-xs font-normal text-muted-foreground">
+                        <span className="text-[11px] font-normal text-muted-foreground">
                           {dayjs(session.updated_at).format("MM-DD HH:mm")}
                           {" · "}
                           {APPROVAL_MODE_LABELS[session.approval_mode]}
@@ -436,14 +431,14 @@ export function OpsAssistantPage() {
                         type="button"
                         variant="ghost"
                         size="icon-sm"
-                        className="mt-1 mr-1 shrink-0 text-muted-foreground opacity-70 hover:text-destructive group-hover:opacity-100"
+                        className="mr-1 mt-1 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
                         aria-label={`删除会话 ${session.title || session.id}`}
                         onClick={(event) => {
                           event.stopPropagation()
                           setDeleteTarget(session)
                         }}
                       >
-                        <Delete02Icon />
+                        <Delete02Icon className="size-3.5" />
                       </Button>
                     </div>
                   )
@@ -452,23 +447,48 @@ export function OpsAssistantPage() {
             )}
           </ScrollArea>
         </aside>
+      )}
 
-        <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border bg-background">
-          <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
-            <div className="flex min-w-0 items-center gap-2">
-              <AiChat01Icon className="size-4 shrink-0 text-muted-foreground" />
-              <span className="truncate text-sm font-medium">
-                {selectedSessionId == null
-                  ? "未选择会话"
-                  : sessions.find((row) => row.id === selectedSessionId)
-                      ?.title || `会话 #${selectedSessionId}`}
-              </span>
-            </div>
+      {/* 右侧主聊天区 */}
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background">
+        {/* 顶部标题与状态条 */}
+        <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b bg-background px-4">
+          <div className="flex min-w-0 items-center gap-2.5">
+            {!sidebarOpen && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-8.5 shrink-0 text-muted-foreground hover:text-foreground"
+                onClick={() => setSidebarOpen(true)}
+                title="展开会话列表"
+              >
+                <PanelLeftIcon className="size-4.5" />
+              </Button>
+            )}
+            <AiChat01Icon className="size-4 shrink-0 text-primary" />
+            <span className="truncate text-sm font-semibold text-foreground">
+              {selectedSessionId == null
+                ? "运维助手"
+                : sessions.find((row) => row.id === selectedSessionId)
+                    ?.title || `会话 #${selectedSessionId}`}
+            </span>
+            {selectedSession != null && (
+              <Badge
+                variant="outline"
+                className="hidden text-[11px] font-normal sm:inline-flex"
+              >
+                {APPROVAL_MODE_LABELS[selectedSession.approval_mode]}
+              </Badge>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
             {selectedSessionId != null && connectionLabel ? (
               <Badge
                 variant={
                   connectionLabel === "已连接" ? "secondary" : "outline"
                 }
+                className="text-xs"
               >
                 {(reconnecting || connectionLabel === "重连中") && (
                   <Spinner className="size-3" />
@@ -477,34 +497,45 @@ export function OpsAssistantPage() {
               </Badge>
             ) : null}
           </div>
+        </div>
 
-          {selectedSessionId == null ? (
-            <div className="flex flex-1 items-center justify-center p-4">
-              <Empty className="border-0">
-                <EmptyHeader>
-                  <EmptyMedia variant="icon">
-                    <AiChat01Icon />
-                  </EmptyMedia>
-                  <EmptyTitle>选择或新建会话</EmptyTitle>
-                  <EmptyDescription>
-                    左侧选择已有会话，或新建会话后开始提问。
-                  </EmptyDescription>
-                </EmptyHeader>
-              </Empty>
+        {selectedSessionId == null ? (
+          <div className="flex flex-1 items-center justify-center p-6">
+            <div className="flex max-w-md flex-col items-center text-center">
+              <div className="mb-4 flex size-14 items-center justify-center rounded-2xl bg-primary/10 text-primary [&_svg]:size-7">
+                <AiChat01Icon />
+              </div>
+              <h2 className="text-lg font-semibold text-foreground">
+                开启运维智能对话
+              </h2>
+              <p className="mt-1.5 text-sm text-muted-foreground">
+                查询交换机与路由器配置、核查端口状态、分析告警根因与执行运维诊断。
+              </p>
+              <Button
+                type="button"
+                className="mt-5 gap-2"
+                onClick={() => void handleCreateSession()}
+                disabled={creating}
+              >
+                {creating ? <Spinner /> : <PlusSignIcon />}
+                新建对话
+              </Button>
             </div>
-          ) : (
-            <>
-              <ChatMessageList
-                sessionId={selectedSessionId}
-                messages={messages}
-                isLoading={isLoadingHistory}
-                isSending={isBusy}
-                hasMore={hasMore}
-                isLoadingOlder={isLoadingOlder}
-                onLoadOlder={loadOlder}
-                className="min-h-0 flex-1"
-              />
-              <div className="flex flex-col gap-2 border-t p-3">
+          </div>
+        ) : (
+          <>
+            <ChatMessageList
+              sessionId={selectedSessionId}
+              messages={messages}
+              isLoading={isLoadingHistory}
+              isSending={isBusy}
+              hasMore={hasMore}
+              isLoadingOlder={isLoadingOlder}
+              onLoadOlder={loadOlder}
+              className="min-h-0 flex-1"
+            />
+            <div className="border-t bg-background/95 p-3 backdrop-blur-xs">
+              <div className="mx-auto flex max-w-4xl flex-col gap-2">
                 <MonitorAlertBanner
                   alert={monitorAlert}
                   onDismiss={clearMonitorAlert}
@@ -523,10 +554,10 @@ export function OpsAssistantPage() {
                   onCancel={isExecutingHitl ? undefined : cancelTurn}
                 />
               </div>
-            </>
-          )}
-        </section>
-      </div>
+            </div>
+          </>
+        )}
+      </section>
     </div>
   )
 }

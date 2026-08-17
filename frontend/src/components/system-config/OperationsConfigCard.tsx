@@ -19,7 +19,6 @@ import {
   Field,
   FieldDescription,
   FieldError,
-  FieldGroup,
   FieldLabel,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
@@ -111,108 +110,132 @@ export function OperationsConfigCard({
       </CardHeader>
       <form onSubmit={form.handleSubmit(handleSubmit)}>
         <CardContent>
-          <FieldGroup className="gap-4">
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              <Controller
-                control={form.control}
-                name="monitor_probe_timeout_seconds"
-                render={({ field, fieldState }) => (
-                  <Field data-invalid={fieldState.invalid}>
-                    <FieldLabel htmlFor="monitor-probe-timeout">
-                      探测超时（秒）
-                    </FieldLabel>
-                    <Input
-                      id="monitor-probe-timeout"
-                      type="number"
-                      min={1}
-                      max={30}
-                      aria-invalid={fieldState.invalid}
-                      {...field}
-                    />
-                    <FieldDescription>
-                      单个 TCP 连接探测允许等待的最长时间，范围为 (0, 30]
-                      秒；下一轮监控探测生效。
-                    </FieldDescription>
-                    <FieldError errors={[fieldState.error]} />
-                  </Field>
-                )}
-              />
+          <div className="flex flex-col gap-5">
+            {/* 监控巡检参数 */}
+            <div className="rounded-xl border bg-muted/20 p-4 transition-colors">
+              <div className="mb-4 flex flex-col gap-1 border-b border-border/60 pb-3">
+                <span className="text-base font-semibold text-foreground">
+                  监控巡检与探测策略
+                </span>
+                <p className="text-xs text-muted-foreground">
+                  设置 TCP 探活连接超时、每轮全量探测周期间隔与变化记录保留周期
+                </p>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                <Controller
+                  control={form.control}
+                  name="monitor_probe_timeout_seconds"
+                  render={({ field, fieldState }) => (
+                    <Field data-invalid={fieldState.invalid}>
+                      <FieldLabel htmlFor="monitor-probe-timeout">
+                        探测超时（秒）
+                      </FieldLabel>
+                      <Input
+                        id="monitor-probe-timeout"
+                        type="number"
+                        min={1}
+                        max={30}
+                        aria-invalid={fieldState.invalid}
+                        {...field}
+                      />
+                      <FieldDescription>
+                        单个 TCP 连接探测允许等待的最长时间，范围为 (0, 30]
+                        秒；下一轮监控探测生效。
+                      </FieldDescription>
+                      <FieldError errors={[fieldState.error]} />
+                    </Field>
+                  )}
+                />
 
-              <Controller
-                control={form.control}
-                name="monitor_sweep_interval_seconds"
-                render={({ field, fieldState }) => (
-                  <Field data-invalid={fieldState.invalid}>
-                    <FieldLabel htmlFor="monitor-sweep-interval">
-                      巡检间隔（秒）
-                    </FieldLabel>
-                    <Input
-                      id="monitor-sweep-interval"
-                      type="number"
-                      min={5}
-                      max={3600}
-                      aria-invalid={fieldState.invalid}
-                      {...field}
-                    />
-                    <FieldDescription>
-                      全部启用目标探测完成后，到下一轮开始前的全局等待时间，范围为
-                      [5, 3600] 秒。
-                    </FieldDescription>
-                    <FieldError errors={[fieldState.error]} />
-                  </Field>
-                )}
-              />
+                <Controller
+                  control={form.control}
+                  name="monitor_sweep_interval_seconds"
+                  render={({ field, fieldState }) => (
+                    <Field data-invalid={fieldState.invalid}>
+                      <FieldLabel htmlFor="monitor-sweep-interval">
+                        巡检间隔（秒）
+                      </FieldLabel>
+                      <Input
+                        id="monitor-sweep-interval"
+                        type="number"
+                        min={5}
+                        max={3600}
+                        aria-invalid={fieldState.invalid}
+                        {...field}
+                      />
+                      <FieldDescription>
+                        全部启用目标探测完成后，到下一轮开始前的全局等待时间，范围为
+                        [5, 3600] 秒。
+                      </FieldDescription>
+                      <FieldError errors={[fieldState.error]} />
+                    </Field>
+                  )}
+                />
 
-              <Controller
-                control={form.control}
-                name="cmdb_diff_interval_seconds"
-                render={({ field, fieldState }) => (
-                  <Field data-invalid={fieldState.invalid}>
-                    <FieldLabel htmlFor="cmdb-diff-interval">
-                      CMDB 差异巡检（秒）
-                    </FieldLabel>
-                    <Input
-                      id="cmdb-diff-interval"
-                      type="number"
-                      min={60}
-                      max={86400}
-                      aria-invalid={fieldState.invalid}
-                      {...field}
-                    />
-                    <FieldDescription>
-                      比较监控在线 IP 与 CMDB 资产台账的周期，范围为 [60, 86400]
-                      秒；只记录差异审计，不自动修改资产。
-                    </FieldDescription>
-                    <FieldError errors={[fieldState.error]} />
-                  </Field>
-                )}
-              />
-
-              <Controller
-                control={form.control}
-                name="monitor_event_retention_days"
-                render={({ field, fieldState }) => (
-                  <Field data-invalid={fieldState.invalid}>
-                    <FieldLabel htmlFor="monitor-event-retention-days">
-                      监控日志保留天数
-                    </FieldLabel>
-                    <Input
-                      id="monitor-event-retention-days"
-                      type="number"
-                      min={1}
-                      max={90}
-                      aria-invalid={fieldState.invalid}
-                      {...field}
-                    />
-                    <FieldDescription>
-                      过期变化记录会被清理，每台最新一条会保留。
-                    </FieldDescription>
-                    <FieldError errors={[fieldState.error]} />
-                  </Field>
-                )}
-              />
+                <Controller
+                  control={form.control}
+                  name="monitor_event_retention_days"
+                  render={({ field, fieldState }) => (
+                    <Field data-invalid={fieldState.invalid}>
+                      <FieldLabel htmlFor="monitor-event-retention-days">
+                        监控日志保留天数
+                      </FieldLabel>
+                      <Input
+                        id="monitor-event-retention-days"
+                        type="number"
+                        min={1}
+                        max={90}
+                        aria-invalid={fieldState.invalid}
+                        {...field}
+                      />
+                      <FieldDescription>
+                        过期变化记录会被清理，每台最新一条会保留。
+                      </FieldDescription>
+                      <FieldError errors={[fieldState.error]} />
+                    </Field>
+                  )}
+                />
+              </div>
             </div>
-          </FieldGroup>
+
+            {/* CMDB 差异巡检 */}
+            <div className="rounded-xl border bg-muted/20 p-4 transition-colors">
+              <div className="mb-4 flex flex-col gap-1 border-b border-border/60 pb-3">
+                <span className="text-base font-semibold text-foreground">
+                  CMDB 资产差异巡检
+                </span>
+                <p className="text-xs text-muted-foreground">
+                  设置监控在线 IP 与 CMDB 资产台账的自动比对周期
+                </p>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Controller
+                  control={form.control}
+                  name="cmdb_diff_interval_seconds"
+                  render={({ field, fieldState }) => (
+                    <Field data-invalid={fieldState.invalid}>
+                      <FieldLabel htmlFor="cmdb-diff-interval">
+                        CMDB 差异巡检周期（秒）
+                      </FieldLabel>
+                      <Input
+                        id="cmdb-diff-interval"
+                        type="number"
+                        min={60}
+                        max={86400}
+                        aria-invalid={fieldState.invalid}
+                        {...field}
+                      />
+                      <FieldDescription>
+                        比较监控在线 IP 与 CMDB 资产台账的周期，范围为 [60, 86400]
+                        秒；只记录差异审计，不自动修改资产。
+                      </FieldDescription>
+                      <FieldError errors={[fieldState.error]} />
+                    </Field>
+                  )}
+                />
+              </div>
+            </div>
+          </div>
         </CardContent>
         <CardFooter className="justify-end border-t pt-4">
           <Button type="submit" disabled={form.formState.isSubmitting}>
