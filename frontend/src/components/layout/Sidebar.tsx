@@ -92,6 +92,7 @@ const NAV_ENTRIES: NavEntry[] = [
     label: "运维助手",
     path: ROUTES.OPS_ASSISTANT,
     icon: AiChat01Icon,
+    permission: PERMISSIONS.AGENT_USE,
   },
   {
     type: "group",

@@ -250,13 +250,15 @@ export function DashboardPage() {
             <CardDescription>常用运维入口</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-wrap gap-3">
-            <Button
-              onClick={() => navigate(ROUTES.OPS_ASSISTANT)}
-              variant="outline"
-            >
-              <AiChat01Icon data-icon="inline-start" />
-              运维助手
-            </Button>
+            {hasPermission(PERMISSIONS.AGENT_USE) && (
+              <Button
+                onClick={() => navigate(ROUTES.OPS_ASSISTANT)}
+                variant="outline"
+              >
+                <AiChat01Icon data-icon="inline-start" />
+                运维助手
+              </Button>
+            )}
             {hasPermission(PERMISSIONS.CMDB_MANAGE) && (
               <Button
                 onClick={() => navigate(`${ROUTES.CMDB}?create=1`)}

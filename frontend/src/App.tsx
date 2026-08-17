@@ -152,7 +152,14 @@ export function App() {
             }
           >
             <Route path={ROUTES.DASHBOARD} element={<DashboardPage />} />
-            <Route path={ROUTES.OPS_ASSISTANT} element={<OpsAssistantPage />} />
+            <Route
+              path={ROUTES.OPS_ASSISTANT}
+              element={
+                <ProtectedRoute permission={PERMISSIONS.AGENT_USE}>
+                  <OpsAssistantPage />
+                </ProtectedRoute>
+              }
+            />
             <Route
               path={ROUTES.USERS}
               element={

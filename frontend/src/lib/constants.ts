@@ -57,7 +57,8 @@ export const PERMISSIONS = {
   MONITOR_READ: "monitor:read",
   MONITOR_MANAGE: "monitor:manage",
   MONITOR_LOG_READ: "monitor_log:read",
-  // Agent HITL
+  // Agent
+  AGENT_USE: "agent:use",
   AGENT_HITL_APPROVE: "agent:hitl_approve",
   // 设备命令策略
   DEVICE_COMMAND_POLICY_READ: "device_command_policy:read",

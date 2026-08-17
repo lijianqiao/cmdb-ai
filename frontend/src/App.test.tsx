@@ -156,12 +156,27 @@ describe("App 路由懒加载", () => {
   })
 
   it("renders the ops assistant route through suspense", async () => {
+    seedAuthenticatedUser([PERMISSIONS.AGENT_USE])
     renderApp(
       <MemoryRouter initialEntries={[ROUTES.OPS_ASSISTANT]}>
         <App />
       </MemoryRouter>,
     )
     expect(await screen.findByRole("heading", { name: "运维助手" }, { timeout: 5_000 })).toBeInTheDocument()
+  })
+
+  it("blocks the ops assistant route without agent:use", async () => {
+    // 后端每个运维助手接口都要 agent:use；前端不挡的话，用户能点进页面，
+    // 然后每个操作都 403 且没有任何解释
+    seedAuthenticatedUser([PERMISSIONS.PERMISSION_READ])
+    renderApp(
+      <MemoryRouter initialEntries={[ROUTES.OPS_ASSISTANT]}>
+        <App />
+      </MemoryRouter>,
+    )
+    expect(
+      await screen.findByText("403 无访问权限", undefined, { timeout: 5_000 }),
+    ).toBeInTheDocument()
   })
 
   it("renders the permissions route when the user has permission", async () => {
