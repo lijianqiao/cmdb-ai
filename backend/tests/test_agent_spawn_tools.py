@@ -6,42 +6,27 @@
 @Docs: Task 10 根 Agent Spawn 工具 schema 与 dispatcher 测试。
 """
 
-import asyncio
 import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Literal
 
 import pytest
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
 
-from app.agent.budget import Budget
 from app.agent.spawn import (
     ChildBudgetSnapshot,
     ChildReceipt,
-    ChildRunResult,
     ChildRuntimeUnavailableError,
-    SpawnManager,
     SpawnRejectedError,
 )
 from app.agent.spawn_tools import (
     ORCHESTRATION_TOOL_NAMES,
-    SPAWN_PRIMITIVE_TOOL_NAMES,
     SPAWN_TOOL_NAMES,
     build_spawn_tool_dispatcher,
     spawn_tool_schemas,
 )
 from app.agent.tool_dispatch import root_tool_schemas, tool_schemas_for
-from app.models import Base
-from app.models.agent_session import AgentSession
-from app.models.user import User
 
 _CHILD_ID_RE = re.compile(r"child_id[=:]\s*([^\s\n]+)")
 
@@ -203,42 +188,9 @@ def fake_spawn_manager() -> FakeSpawnManager:
     return FakeSpawnManager()
 
 
-def test_spawn_schema_exposes_only_server_controlled_arguments() -> None:
-  schemas = {item["function"]["name"]: item for item in spawn_tool_schemas()}
-  parameters = schemas["spawn_agent"]["function"]["parameters"]
-  assert set(parameters["properties"]) == {"role", "task_brief"}
-  assert set(parameters["properties"]["role"]["enum"]) == {
-      "classifier",
-      "kb_explorer",
-      "ops_explorer",
-      "investigator",
-      "reviewer",
-  }
-  assert "model" not in parameters["properties"]
-  assert "tools_allowlist" not in parameters["properties"]
-  assert "budget" not in parameters["properties"]
-
-
 def test_spawn_tool_names_match_schemas() -> None:
     names = {item["function"]["name"] for item in spawn_tool_schemas()}
     assert names == set(SPAWN_TOOL_NAMES)
-
-
-def test_spawn_primitives_and_orchestration_tools_are_exposed_separately() -> None:
-    """五原语与两编排工作流应分别登记并合并为七工具全集。"""
-    assert SPAWN_PRIMITIVE_TOOL_NAMES == {
-        "spawn_agent",
-        "wait_agent",
-        "send_input",
-        "list_agents",
-        "close_agent",
-    }
-    assert ORCHESTRATION_TOOL_NAMES == {
-        "classify_documents",
-        "investigate_root_cause",
-    }
-    assert SPAWN_TOOL_NAMES == SPAWN_PRIMITIVE_TOOL_NAMES | ORCHESTRATION_TOOL_NAMES
-    assert {item["function"]["name"] for item in spawn_tool_schemas()} == SPAWN_TOOL_NAMES
 
 
 def test_orchestration_tool_schemas_use_strict_workflow_arguments() -> None:
@@ -346,226 +298,91 @@ def test_root_and_child_schemas_exclude_spawn_tools() -> None:
         assert spawn_name not in child_names
 
 
-async def test_root_spawn_dispatcher_spawns_waits_lists_and_closes(
+_WORKFLOW_ARGS = {
+    "incident_context": "三台设备同时离线",
+    "branches": [
+        {"name": "a", "objective": "查监控历史"},
+        {"name": "b", "objective": "查 CMDB 拓扑"},
+    ],
+}
+
+
+async def test_workflow_dispatcher_hides_internal_exception_detail(
     fake_spawn_manager: FakeSpawnManager,
 ) -> None:
-    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=9)
-    spawned = await dispatch(
-        "spawn_agent",
-        {"role": "ops_explorer", "task_brief": "检查资产 42 的当前监控状态"},
-    )
-    assert spawned.control == "ok"
-    assert "child-0" in spawned.content
-
-    waited = await dispatch("wait_agent", {"child_id": "child-0", "timeout_ms": 1000})
-    assert "COMPLETED" in waited.content
-    assert fake_spawn_manager.spawn_kwargs["fork_mode"] == "none"
-
-    listed = await dispatch("list_agents", {})
-    assert "child-0" in listed.content
-
-    closed = await dispatch("close_agent", {"child_id": "child-0"})
-    assert "CLOSED" in closed.content
-
-
-async def test_spawn_dispatcher_rejects_unknown_role(
-    fake_spawn_manager: FakeSpawnManager,
-) -> None:
-    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=1)
-    result = await dispatch(
-        "spawn_agent",
-        {"role": "super_admin", "task_brief": "越权"},
-    )
-    assert result.control == "clarification"
-    assert "参数无效" in result.content
-
-
-async def test_spawn_dispatcher_rejects_out_of_bounds_timeout(
-    fake_spawn_manager: FakeSpawnManager,
-) -> None:
-    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=1)
-    await dispatch(
-        "spawn_agent",
-        {"role": "ops_explorer", "task_brief": "合法 brief"},
-    )
-    result = await dispatch("wait_agent", {"child_id": "child-0", "timeout_ms": 40000})
-    assert result.control == "clarification"
-    assert "参数无效" in result.content
-
-
-async def test_spawn_dispatcher_rejects_other_session_child_id(
-    fake_spawn_manager: FakeSpawnManager,
-) -> None:
-    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=1)
-    await dispatch(
-        "spawn_agent",
-        {"role": "ops_explorer", "task_brief": "会话 9 的子任务"},
-    )
-    other_dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=99)
-    result = await other_dispatch("wait_agent", {"child_id": "child-0", "timeout_ms": 1000})
-    assert result.control == "failed"
-    assert "ChildNotFoundError" in result.content
-
-
-def test_send_input_schema_exposes_child_and_message_only() -> None:
-    schemas = {item["function"]["name"]: item for item in spawn_tool_schemas()}
-    properties = schemas["send_input"]["function"]["parameters"]["properties"]
-    assert set(properties) == {"child_id", "message"}
-
-
-async def test_spawn_dispatcher_sends_input_to_current_session_child(
-    fake_spawn_manager: FakeSpawnManager,
-) -> None:
-    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=9)
-    await dispatch("spawn_agent", {"role": "ops_explorer", "task_brief": "检查资产"})
-    result = await dispatch(
-        "send_input", {"child_id": "child-0", "message": "再核查最近五分钟"}
-    )
-    assert result.control == "ok"
-    assert fake_spawn_manager.sent_inputs == [("child-0", "再核查最近五分钟")]
-
-
-async def test_spawn_dispatcher_rejects_other_session_send_input(
-    fake_spawn_manager: FakeSpawnManager,
-) -> None:
-    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=1)
-    await dispatch(
-        "spawn_agent",
-        {"role": "ops_explorer", "task_brief": "本会话子任务"},
-    )
-    other_dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=99)
-    result = await other_dispatch(
-        "send_input",
-        {"child_id": "child-0", "message": "跨会话补充输入"},
-    )
-    assert result.control == "failed"
-    assert "ChildNotFoundError" in result.content
-    assert fake_spawn_manager.sent_inputs == []
-
-
-async def test_spawn_dispatcher_rejects_blank_send_input_message(
-    fake_spawn_manager: FakeSpawnManager,
-) -> None:
-    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=1)
-    await dispatch(
-        "spawn_agent",
-        {"role": "ops_explorer", "task_brief": "合法 brief"},
-    )
-    result = await dispatch("send_input", {"child_id": "child-0", "message": ""})
-    assert result.control == "clarification"
-    assert "参数无效" in result.content
-
-
-async def test_spawn_dispatcher_wait_timeout_does_not_cancel_child(
-    tmp_path: Path,
-) -> None:
-    """wait 超时时 dispatcher 返回失败分类，子 Agent 仍在 RUNNING。"""
-    database_path = tmp_path / "spawn-wait-timeout.sqlite3"
-    engine: AsyncEngine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(
-        engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autoflush=False,
-    )
-    async with session_factory() as db:
-        user = User(
-            username="spawn-wait",
-            email="spawn-wait@example.com",
-            hashed_password="not-used",
-            nickname="SpawnWait",
-        )
-        db.add(user)
-        await db.flush()
-        session = AgentSession(user_id=user.id, title="wait-timeout", status="active")
-        db.add(session)
-        await db.commit()
-        session_id = session.id
-
-    async def slow_runner(
-        _db: AsyncSession,
-        _receipt: ChildReceipt,
-        _budget: Budget,
-    ) -> ChildRunResult:
-        await asyncio.sleep(2)
-        return ChildRunResult(status="COMPLETED", result_summary="慢任务")
-
-    manager = SpawnManager(session_factory, child_runner=slow_runner)
-    dispatch = build_spawn_tool_dispatcher(manager, session_id=session_id)
-    spawned = await dispatch(
-        "spawn_agent",
-        {"role": "ops_explorer", "task_brief": "慢速监控检查"},
-    )
-    child_id = _CHILD_ID_RE.search(spawned.content).group(1)
-    result = await dispatch("wait_agent", {"child_id": child_id, "timeout_ms": 50})
-    assert result.control == "failed"
-    assert "ChildWaitTimeoutError" in result.content
-    receipts = await manager.list_agents(session_id)
-    running = next(item for item in receipts if item.child_id == child_id)
-    assert running.status == "RUNNING"
-    await manager.close_agent(child_id)
-    await engine.dispose()
-
-
-async def test_spawn_dispatcher_hides_internal_exception_detail(
-    fake_spawn_manager: FakeSpawnManager,
-) -> None:
+    """工作流内部异常只回类型名，不透传原始文本。"""
     fake_spawn_manager.spawn_raises = RuntimeError("secret spawn failure detail")
     dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=1)
-    result = await dispatch(
-        "spawn_agent",
-        {"role": "ops_explorer", "task_brief": "触发内部异常"},
-    )
+
+    result = await dispatch("investigate_root_cause", _WORKFLOW_ARGS)
+
     assert result.control == "failed"
     assert "RuntimeError" in result.content
     assert "secret spawn failure detail" not in result.content
 
 
-async def test_spawn_dispatcher_maps_spawn_rejected_to_safe_message(
+async def test_workflow_dispatcher_maps_spawn_rejected_to_safe_message(
     fake_spawn_manager: FakeSpawnManager,
 ) -> None:
+    """并发/配额拒绝原样透出限额名，让模型知道是「满了」而不是「坏了」。"""
     fake_spawn_manager.spawn_raises = SpawnRejectedError("max_concurrent_children")
     dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=1)
-    result = await dispatch(
-        "spawn_agent",
-        {"role": "ops_explorer", "task_brief": "并发已满"},
-    )
+
+    result = await dispatch("investigate_root_cause", _WORKFLOW_ARGS)
+
     assert result.control == "rejected"
     assert "max_concurrent_children" in result.content
     assert "secret" not in result.content.lower()
 
 
-async def test_spawn_dispatcher_passes_budget_exceeded_safe_reason(
+async def test_workflow_dispatcher_passes_budget_exceeded_safe_reason(
     fake_spawn_manager: FakeSpawnManager,
 ) -> None:
-    fake_spawn_manager.wait_raises = ChildRuntimeUnavailableError(
+    """子 Agent 超预算时错误分类固定在五类安全枚举内。"""
+    fake_spawn_manager.spawn_raises = ChildRuntimeUnavailableError(
         "child-0",
         reason="budget_exceeded",
     )
     dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=1)
-    await dispatch(
-        "spawn_agent",
-        {"role": "ops_explorer", "task_brief": "预算终止"},
-    )
-    result = await dispatch("wait_agent", {"child_id": "child-0"})
+
+    result = await dispatch("investigate_root_cause", _WORKFLOW_ARGS)
+
     assert result.control == "failed"
-    assert result.content == "工具 'wait_agent' 执行失败: budget_exceeded"
+    assert result.content == "工具 'investigate_root_cause' 执行失败: budget_exceeded"
 
 
-async def test_safe_receipt_text_excludes_sensitive_fields(
+def test_withdrawn_spawn_primitives_are_not_exposed_to_the_model() -> None:
+    """五个 Spawn 原语已从模型工具面收起，不得回归。
+
+    收起的理由见 spawn_tools 模块 docstring：原语要求模型正确完成
+    spawn → wait → close 三步，漏 close 会占满并发槽；而
+    investigate_root_cause 的自定义 branches 已经覆盖了并行取证的需求。
+    这条断言是防止以后有人「顺手」把原语加回去。
+    """
+    exposed = {item["function"]["name"] for item in spawn_tool_schemas()}
+    withdrawn = {"spawn_agent", "wait_agent", "send_input", "list_agents", "close_agent"}
+
+    assert exposed.isdisjoint(withdrawn)
+    assert exposed == {"classify_documents", "investigate_root_cause"}
+
+
+async def test_withdrawn_primitives_are_rejected_by_dispatcher(
     fake_spawn_manager: FakeSpawnManager,
 ) -> None:
-    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=3)
-    result = await dispatch(
-        "spawn_agent",
-        {"role": "ops_explorer", "task_brief": "只读监控取证"},
-    )
-    assert result.control == "ok"
-    assert "tools_allowlist" not in result.content
-    assert "budget" not in result.content
-    assert "model" not in result.content
-    assert "trace_id" not in result.content
-    assert "secret-artifact-token" not in result.content
-    assert "只读监控取证" in result.content
+    """即使模型凭记忆硬调原语名，dispatcher 也必须拒绝而不是执行。"""
+    dispatch = build_spawn_tool_dispatcher(fake_spawn_manager, session_id=1)
+
+    for name in ("spawn_agent", "wait_agent", "send_input", "list_agents", "close_agent"):
+        result = await dispatch(name, {"role": "ops_explorer", "task_brief": "x"})
+        assert result.control == "rejected", name
+        assert name in result.content
+
+
+def test_total_root_tool_count_stays_within_small_model_budget() -> None:
+    """根 Agent 工具总数守门：19 → 14。
+
+    本地小模型在工具数超过十来个之后选择准确率下降明显。这条断言不是要求
+    永远 14 个，而是让「又加了一个工具」这件事必须被显式确认一次。
+    """
+    total = len(root_tool_schemas()) + len(spawn_tool_schemas())
+    assert total == 14, f"根 Agent 工具数变成 {total}，如果是有意新增请同步更新本断言"

@@ -322,22 +322,36 @@ classDiagram
 | `list_device_commands`    | `asset_id`                                        | 该资产可用命令名、说明、白/黑名单策略与凭据前提（只读，无审批）；策略文案随当前会话 `approval_mode` 变化，避免模型误判自动执行范围 | 读                 |
 | `get_device_query_result` | `proposal_id`                                     | 按会话回查已提交的设备命令查询提案状态或执行结果（只读，无审批）                                                 | 读                 |
 
-**Spawn 原语类**（照抄 [guide.md 7.2](./guide.md#72-对照三家产品的工具面)）：
+**Spawn 原语类** —— **已于 2026-08-17 从模型工具面收起，不再暴露给模型**：
 
 ```text
-spawn_agent(role, task_brief, model?, tools_allowlist?, budget?, fork_mode="none")
-wait_agent(child_id, timeout_ms?)
-send_input(child_id, message)
-list_agents(session_id)        # 读注册表，不依赖对话记忆
-close_agent(child_id)          # 幂等；级联关闭子孙
+spawn_agent / wait_agent / send_input / list_agents / close_agent
 ```
 
-**服务端确定性编排工具**（根 Agent 优先调用，不由模型手工复刻分波并发与复核条件）：
+这五个原语（[guide.md 7.2](./guide.md#72-对照三家产品的工具面)）仍然作为
+`SpawnManager` 的**内部方法**存在，是下面两个编排工作流的执行引擎，但模型不能直接调用。
+收起的理由：
+
+- **并行能力没有损失**：`investigate_root_cause` 的 `branches` 完全由模型控制（2~10 个
+  自定义 `name` + `objective`），每个分支跑一个 `investigator`，而 `investigator` 持有
+  全部 7 个只读工具，是其它所有子 Agent 角色的能力**超集**。「开 N 个子 Agent 并行查
+  不同的东西」一次工具调用即可完成。
+- **少掉一段极易出错的三步舞**：原语要求模型正确完成 `spawn → wait → close`。漏 `wait`
+  会拿不到结果就编造回答；漏 `close` 会让并发槽被占满 TTL（默认 300 秒，总槽位只有 5 个）。
+  系统提示词曾用三行专门叮嘱这套流程——需要靠提示词反复叮嘱的接口本身就是设计负担。
+- **给模型腾出工具预算**：工具面 19 → 14 个，每轮固定开销约 4,100 → 3,450 tokens。
+  本地小模型在工具数超过十来个之后选择准确率下降明显。
+
+**代价**：模型不能再自定义子 Agent 的角色，也不能做「先 spawn 一个、看结果再决定下一个」
+的单体粒度自适应编排。前者因 `investigator` 是能力超集而几乎无影响；后者可通过多次调用
+工作流在**工作流粒度**上达成。
+
+**服务端确定性编排工具**（模型可用的两个工具，服务端负责分波并发与复核条件）：
 
 | 工具 | 用途 |
 | :--- | :--- |
 | `classify_documents` | 至少两份文档的批量并行分类建议 |
-| `investigate_root_cause` | 至少两个独立分支的多源根因排查 |
+| `investigate_root_cause` | **通用并行只读调查**：把一件事拆成 2~10 个独立分支同时取证再汇总。不限于故障根因，多业务系统健康度核查、多设备配置比对等同样适用 |
 
 所有工具遵循 [guide.md 3.2](./guide.md#32-工具设计原则claude--codex--cursor-共识) 六原则：一工具一契约、副作用分级、结构化 `control` 返回（`ok`/`rejected`/`failed`/`clarification`/`pending_approval`）、大结果截断、错误信息可行动。
 
@@ -403,9 +417,18 @@ sequenceDiagram
     Root-->>U: 根因假设 + 建议(可能带 notify)
 ```
 
-**根 Agent 自动编排**（`ROOT_OPS_SYSTEM_PROMPT` + `chat_turn.py`）：批量文档分类优先 `classify_documents`，多分支根因排查优先 `investigate_root_cause`；仅当前置条件不满足或其它并行任务时，根循环才手工组合五个 Spawn 原语。简单查询由根 Agent 直接调用只读工具，不 spawn。子 Agent **仅持有角色目录中的只读工具**（`kb_explorer` / `ops_explorer` / `investigator` / `reviewer` 等），不得执行 HITL、设备变更或再次 spawn。
+**根 Agent 自动编排**（`ROOT_OPS_SYSTEM_PROMPT` + `chat_turn.py`）：批量文档分类用 `classify_documents`，需要同时查多个彼此独立的方面再汇总时用 `investigate_root_cause`（分支由模型自定义）。简单查询由根 Agent 直接调用只读工具，不走工作流。子 Agent **仅持有角色目录中的只读工具**（`kb_explorer` / `ops_explorer` / `investigator` / `reviewer` 等），不得执行 HITL、设备变更或再次 spawn。
+
+模型已无法直接创建子 Agent（原语收起，见 §4.2），因此「该不该 spawn」这个判断不再由模型承担——它只需要判断「这件事要不要拆成多个分支并行查」。
+
+> **两张时序图的读法（2026-08-17 更新）**：图中 `Root->>C1: spawn_agent(...)` 描述的是
+> **工作流内部**的行为。原语收起后模型不再直接调 `spawn_agent`——它只调
+> `classify_documents` / `investigate_root_cause`，由服务端工作流代为分波并发地创建
+> 这些子 Agent。子 Agent 的生命周期、并发槽与关闭全部由工作流管理，模型不参与。
 
 **反模式红线**（照抄 [guide.md 7.8](./guide.md#78-反模式)，本项目额外强调）：单个文档分类、单个设备状态查询、告警文案生成——这些是单次动作，禁止 spawn；只有批量并行或多数据源独立取证才允许。
+
+这条红线现在**由代码强制**而不再依赖提示词自觉：模型已无法直接创建子 Agent，而两个工作流各自在入参上设了下限（`classify_documents` 要求 ≥2 份文档，`investigate_root_cause` 要求 ≥2 个分支），单次动作从接口层面就走不进并行路径。知识库的单文档分类另走 `services/knowledge_classification.py` 的直接 `llm.chat` 路径，同样不 spawn。
 
 ### 6. HITL 状态机
 

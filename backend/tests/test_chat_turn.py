@@ -39,16 +39,22 @@ async def test_root_ops_system_prompt_uses_execution_tool_names() -> None:
     assert "propose_device_control" not in ROOT_OPS_SYSTEM_PROMPT
 
 
-async def test_root_ops_system_prompt_mentions_spawn_policy() -> None:
-    """ROOT_OPS_SYSTEM_PROMPT 应说明何时 Spawn、子 Agent 只读与 wait 汇总。"""
+async def test_root_ops_system_prompt_states_orchestration_policy() -> None:
+    """提示词应说明两个编排工作流何时用，且不再教已收起的 Spawn 原语。
+
+    原语收起后提示词里那三行「spawn → wait → close」的叮嘱必须一并去掉：
+    留着会让模型去调一个已经不存在的工具，白白浪费一轮并拿到 rejected。
+    """
     from app.agent.chat_turn import ROOT_OPS_SYSTEM_PROMPT
 
-    assert "spawn_agent" in ROOT_OPS_SYSTEM_PROMPT
-    assert "wait_agent" in ROOT_OPS_SYSTEM_PROMPT
     assert "classify_documents" in ROOT_OPS_SYSTEM_PROMPT
     assert "investigate_root_cause" in ROOT_OPS_SYSTEM_PROMPT
-    assert "不要 Spawn" in ROOT_OPS_SYSTEM_PROMPT
     assert "device_control" in ROOT_OPS_SYSTEM_PROMPT
+    # 明确告诉模型「单一方面别用工作流」，避免它对简单查询也开并行分支
+    assert "直接调" in ROOT_OPS_SYSTEM_PROMPT
+
+    for withdrawn in ("spawn_agent", "wait_agent", "send_input", "close_agent"):
+        assert withdrawn not in ROOT_OPS_SYSTEM_PROMPT, withdrawn
 
 
 async def test_chat_turn_passes_orchestration_tools_in_production_schema(
@@ -90,7 +96,10 @@ async def test_chat_turn_passes_orchestration_tools_in_production_schema(
     tool_names = {item["function"]["name"] for item in captured_tools}
     assert "classify_documents" in tool_names
     assert "investigate_root_cause" in tool_names
-    assert "send_input" in tool_names
+    # 五个 Spawn 原语已收起，生产 schema 里不得再出现
+    assert tool_names.isdisjoint(
+        {"spawn_agent", "wait_agent", "send_input", "list_agents", "close_agent"}
+    )
 
 _SENSITIVE_KEYS = frozenset({"message", "command", "command_name", "password", "credential"})
 
@@ -636,10 +645,11 @@ async def test_chat_turn_spawn_parallel_children_summarizes_safely(
     ws = FakeWebSocket()
     await test_hub.connect(session_id, ws)  # type: ignore[arg-type]
 
-    brief_a = "调查资产 11 监控状态"
-    brief_b = "调查资产 22 CMDB 拓扑"
-    summary_a = f"摘要-ops_explorer-{brief_a}"
-    summary_b = f"摘要-investigator-{brief_b}"
+    branch_a = "monitor_11"
+    branch_b = "topology_22"
+    objective_a = "调查资产 11 监控状态"
+    objective_b = "调查资产 22 CMDB 拓扑"
+    summary_a = "摘要-investigator"
     round_no = {"n": 0}
 
     async def spawn_chat(
@@ -649,49 +659,23 @@ async def test_chat_turn_spawn_parallel_children_summarizes_safely(
     ) -> ChatResult:
         round_no["n"] += 1
         if round_no["n"] == 1:
+            # 五个原语收起后，模型开并行子 Agent 的唯一入口是这个工作流；
+            # branches 由模型自定义，覆盖「未预见的多分支任务」这个场景。
             return ChatResult(
                 content=None,
                 tool_calls=[
                     ToolCall(
-                        id="spawn_a",
-                        name="spawn_agent",
+                        id="workflow_1",
+                        name="investigate_root_cause",
                         arguments=json.dumps(
-                            {"role": "ops_explorer", "task_brief": brief_a},
+                            {
+                                "incident_context": "并行调查两台资产",
+                                "branches": [
+                                    {"name": branch_a, "objective": objective_a},
+                                    {"name": branch_b, "objective": objective_b},
+                                ],
+                            },
                             ensure_ascii=False,
-                        ),
-                    ),
-                    ToolCall(
-                        id="spawn_b",
-                        name="spawn_agent",
-                        arguments=json.dumps(
-                            {"role": "investigator", "task_brief": brief_b},
-                            ensure_ascii=False,
-                        ),
-                    ),
-                ],
-                finish_reason="tool_calls",
-                prompt_tokens=8,
-                completion_tokens=6,
-            )
-        if round_no["n"] == 2:
-            receipts = await spawn_mgr.list_agents(session_id)
-            child_ids = [receipt.child_id for receipt in receipts]
-            assert len(child_ids) == 2
-            return ChatResult(
-                content=None,
-                tool_calls=[
-                    ToolCall(
-                        id="wait_a",
-                        name="wait_agent",
-                        arguments=json.dumps(
-                            {"child_id": child_ids[0], "timeout_ms": 5000}
-                        ),
-                    ),
-                    ToolCall(
-                        id="wait_b",
-                        name="wait_agent",
-                        arguments=json.dumps(
-                            {"child_id": child_ids[1], "timeout_ms": 5000}
                         ),
                     ),
                 ],
@@ -700,7 +684,7 @@ async def test_chat_turn_spawn_parallel_children_summarizes_safely(
                 completion_tokens=6,
             )
         return ChatResult(
-            content=f"并行调查完成：{summary_a}；{summary_b}",
+            content=f"并行调查完成：{summary_a}",
             tool_calls=[],
             finish_reason="stop",
             prompt_tokens=6,
@@ -719,9 +703,6 @@ async def test_chat_turn_spawn_parallel_children_summarizes_safely(
 
     assert outcome.reason == "final_answer"
     assert summary_a in outcome.final_answer
-    assert summary_b in outcome.final_answer
-    assert brief_a in outcome.final_answer
-    assert brief_b in outcome.final_answer
     assert "tools_allowlist" not in outcome.final_answer
     assert "budget" not in outcome.final_answer
 
@@ -729,13 +710,13 @@ async def test_chat_turn_spawn_parallel_children_summarizes_safely(
         db_session, session_id, agent_id=None
     )
     root_tool_messages = [m for m in root_messages if m.role == "tool"]
-    assert len(root_tool_messages) >= 2
+    assert len(root_tool_messages) >= 1
     assert all(message.tool_call_id is not None for message in root_tool_messages)
 
+    # 工作流真的开了两个并行 investigator，且各自 transcript 相互隔离
     receipts = await spawn_mgr.list_agents(session_id)
     assert len(receipts) == 2
-    briefs = {receipt.task_brief for receipt in receipts}
-    assert briefs == {brief_a, brief_b}
+    assert {receipt.role for receipt in receipts} == {"investigator"}
     for receipt in receipts:
         child_messages = await agent_message_crud.list_for_agent(
             db_session, session_id, agent_id=receipt.child_id
