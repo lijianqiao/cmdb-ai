@@ -63,6 +63,7 @@ class CRUDMonitorStatusEvent:
         status: str,
         latency_ms: int | None = None,
         detail: str = "",
+        current: MonitorStatusEvent | None = None,
     ) -> MonitorStatusEvent:
         """记录一次探测结果：同状态更新当前行，变状态追加新行。
 
@@ -72,12 +73,17 @@ class CRUDMonitorStatusEvent:
             status: 探测状态（``up`` 或 ``down``）。
             latency_ms: 探测延迟（毫秒），失败时为 ``None``。
             detail: 附加说明（如错误信息）。
+            current: 调用方已批量查得的当前行。探活扫描会先用一次
+                ``get_latest_status_for_targets`` 拿到全部目标的当前状态，
+                传进来可以避免在循环里对每台设备重复跑一遍窗口查询。
+                省略时退回自行查询，保持既有调用点行为不变。
 
         Returns:
             更新或新建的状态事件行。
         """
-        latest = await self.get_latest_status_for_targets(db, [target_id])
-        current = latest.get(target_id)
+        if current is None:
+            latest = await self.get_latest_status_for_targets(db, [target_id])
+            current = latest.get(target_id)
         if current is not None and current.status == status:
             current.checked_at = datetime.now(UTC)
             current.latency_ms = latency_ms
@@ -206,6 +212,52 @@ class CRUDMonitorStatusEvent:
         result = await db.execute(stmt)
         events = result.scalars().all()
         return {event.target_id: event for event in events}
+
+    async def list_recent_for_targets(
+        self, db: AsyncSession, target_ids: list[int], *, limit: int
+    ) -> dict[int, list[MonitorStatusEvent]]:
+        """按 target 分组返回各自最近 ``limit`` 条事件，每组最新在前。
+
+        一次窗口查询取代「逐个目标调 list_recent_for_target」的 N 次往返。
+        没有事件的目标不会出现在结果里。
+
+        Args:
+            db: 数据库会话。
+            target_ids: 目标 ID 列表。
+            limit: 每个目标返回的最大条数。
+
+        Returns:
+            target_id → 最近事件列表（最新在前）。
+        """
+        if not target_ids or limit <= 0:
+            return {}
+
+        row_number = (
+            func.row_number()
+            .over(
+                partition_by=MonitorStatusEvent.target_id,
+                order_by=(MonitorStatusEvent.checked_at.desc(), MonitorStatusEvent.id.desc()),
+            )
+            .label("rn")
+        )
+        ranked = (
+            select(MonitorStatusEvent, row_number)
+            .where(MonitorStatusEvent.target_id.in_(target_ids))
+            .subquery()
+        )
+        recent = aliased(MonitorStatusEvent, ranked)
+        # 按 (target_id, rn) 排序：rn 保证组内最新在前，target_id 让扫描顺序
+        # 与 ix_monitor_status_events_target_checked 一致，避免跨目标交错。
+        stmt = (
+            select(recent)
+            .where(ranked.c.rn <= limit)
+            .order_by(ranked.c.target_id, ranked.c.rn)
+        )
+
+        grouped: dict[int, list[MonitorStatusEvent]] = {}
+        for event in (await db.execute(stmt)).scalars().all():
+            grouped.setdefault(event.target_id, []).append(event)
+        return grouped
 
     async def purge_older_than(
         self,

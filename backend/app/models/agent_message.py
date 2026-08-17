@@ -20,7 +20,10 @@ class AgentMessage(Base):
 
     __tablename__ = "agent_messages"
     __table_args__ = (
-        Index("ix_agent_messages_session_id_agent_id", "session_id", "agent_id"),
+        # 末尾带上 id：三列同时覆盖 list_for_agent / list_for_agent_after_id /
+        # list_root_before_id 的 WHERE 与 ORDER BY id，让分页走纯索引扫描。
+        # 不写 DESC——排序只有 id 一列，反向扫升序索引即可。
+        Index("ix_agent_messages_session_agent_id", "session_id", "agent_id", "id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

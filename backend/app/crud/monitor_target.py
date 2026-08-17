@@ -26,6 +26,26 @@ class CRUDMonitorTarget(CRUDBase[MonitorTarget]):
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_by_ids(self, db: AsyncSession, target_ids: list[int]) -> list[MonitorTarget]:
+        """按 ID 批量返回目标，替代调用方的逐条 get 循环。
+
+        Args:
+            db: 数据库会话。
+            target_ids: 目标 ID 列表；空列表直接返回空结果不发查询。
+
+        Returns:
+            匹配到的目标，按 ID 升序；不存在的 ID 直接缺席。
+        """
+        if not target_ids:
+            return []
+        stmt = (
+            select(MonitorTarget)
+            .where(MonitorTarget.id.in_(target_ids))
+            .order_by(MonitorTarget.id.asc())
+        )
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
     async def list_by_ip_prefix(self, db: AsyncSession, ip_prefix: str) -> list[MonitorTarget]:
         """Return targets whose IP starts with `ip_prefix` (literal prefix match, not CIDR math)."""
         pattern = f"{_escape_like_literal(ip_prefix)}%"

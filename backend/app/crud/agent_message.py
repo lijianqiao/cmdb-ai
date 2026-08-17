@@ -46,17 +46,24 @@ class CRUDAgentMessage:
         *,
         limit: int | None = None,
     ) -> list[AgentMessage]:
-        """Return a session's messages oldest-first, optionally capped to the most recent `limit`."""
-        stmt = (
-            select(AgentMessage)
-            .where(AgentMessage.session_id == session_id)
-            .order_by(AgentMessage.id.asc())
-        )
-        result = await db.execute(stmt)
-        messages = list(result.scalars().all())
+        """Return a session's messages oldest-first, optionally capped to the most recent `limit`.
+
+        limit 走真正的 SQL LIMIT。原实现是先把整个会话拉回内存再用 Python 切片，
+        对含设备回显的长会话等于每次都全量读表。
+        """
+        stmt = select(AgentMessage).where(AgentMessage.session_id == session_id)
         if limit is not None:
-            return messages[-limit:] if limit else []
-        return messages
+            if limit <= 0:
+                return []
+            rows = list(
+                (await db.execute(stmt.order_by(AgentMessage.id.desc()).limit(limit)))
+                .scalars()
+                .all()
+            )
+            rows.reverse()
+            return rows
+        result = await db.execute(stmt.order_by(AgentMessage.id.asc()))
+        return list(result.scalars().all())
 
     async def list_for_agent(
         self,

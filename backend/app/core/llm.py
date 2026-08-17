@@ -8,7 +8,9 @@ should construct an HTTP client to a model provider directly.
 可选 `on_delta` 回调每段文本增量，结束后仍返回完整 `ChatResult`。
 """
 
+import asyncio
 import json
+import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -20,6 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.data_encryption import DataDecryptError, DataEncryptionKeyMissingError
 from app.services.system_config import get_effective_llm_config
+
+logger = logging.getLogger(__name__)
 
 type ChatDeltaCallback = Callable[[str], Awaitable[None]]
 
@@ -141,9 +145,68 @@ def _message_to_payload(message: ChatMessage) -> dict[str, Any]:
     return payload
 
 
+# 按 (事件循环, 连接身份) 复用客户端，避免每次调用重做 TCP+TLS 握手。
+# 一轮 Agent 对话最多 max_steps 次模型调用，逐次新建客户端等于逐次完整握手。
+# - 连接身份进键：LLM 配置可在系统设置里热改（见 _resolve_model_config），
+#   改完要自然切到新客户端，不能只按 model_key 缓存。
+# - 事件循环进键：AsyncClient 的连接池持有绑定到具体 loop 的 socket，而 pytest
+#   配的是每用例一个新 loop，跨 loop 复用会抛 "Event loop is closed"。
+#   直接持 loop 对象而不是 id()，避免 loop 回收后 id 复用导致误命中。
+_CLIENT_CACHE: dict[tuple[asyncio.AbstractEventLoop, str, str, float], httpx.AsyncClient] = {}
+
+
 def _build_client(config: ModelConfig) -> httpx.AsyncClient:
+    """构造一个新的客户端。
+
+    与 _shared_client 分开是刻意的：这里只管「怎么造」，缓存策略在外层。
+    单测通过 monkeypatch 这个函数注入 MockTransport，接缝必须保留。
+    """
     headers = {"Authorization": f"Bearer {config.api_key}"} if config.api_key else {}
-    return httpx.AsyncClient(base_url=config.base_url, headers=headers, timeout=config.timeout_seconds)
+    return httpx.AsyncClient(
+        base_url=config.base_url,
+        headers=headers,
+        timeout=config.timeout_seconds,
+        limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+    )
+
+
+def _shared_client(config: ModelConfig) -> httpx.AsyncClient:
+    """返回按连接身份与事件循环复用的客户端。"""
+    key = (
+        asyncio.get_running_loop(),
+        config.base_url,
+        config.api_key,
+        config.timeout_seconds,
+    )
+    cached = _CLIENT_CACHE.get(key)
+    if cached is not None and not cached.is_closed:
+        return cached
+    created = _build_client(config)
+    _CLIENT_CACHE[key] = created
+    return created
+
+
+async def close_llm_clients() -> None:
+    """释放**当前事件循环**上的缓存客户端；由 app.main 的 lifespan 在关停时调用。
+
+    只关本 loop 的：AsyncClient 的连接池绑定 loop，去 aclose 别的 loop 上的客户端
+    （测试进程里每个用例一个 loop，缓存里会留下已结束 loop 的条目）会在关停路径上
+    抛 CancelledError，进而把后面的 engine.dispose() 一起带崩。
+
+    单个客户端关闭失败也不能中断关停流程——此时进程本来就要退出了。
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    for key in [cached_key for cached_key in _CLIENT_CACHE if cached_key[0] is loop]:
+        client = _CLIENT_CACHE.pop(key, None)
+        if client is None:
+            continue
+        try:
+            await client.aclose()
+        except Exception:
+            logger.warning("关闭 LLM 客户端失败 base_url=%s", key[1], exc_info=True)
 
 
 def _cost_usd(config: ModelConfig, prompt_tokens: int, completion_tokens: int) -> float:
@@ -204,7 +267,7 @@ class _StreamToolCallBuilder:
     arguments: str = ""
 
 
-def _parse_chat_completion_body(model_key: str, body: dict[str, Any], config: ModelConfig) -> ChatResult:
+def _parse_chat_completion_body(body: dict[str, Any], config: ModelConfig) -> ChatResult:
     """解析非流式 /chat/completions JSON 为 ChatResult。"""
     try:
         choice = body["choices"][0]
@@ -234,7 +297,6 @@ def _parse_chat_completion_body(model_key: str, body: dict[str, Any], config: Mo
 
 
 async def _consume_chat_sse(
-    model_key: str,
     response: httpx.Response,
     config: ModelConfig,
     on_delta: ChatDeltaCallback | None,
@@ -243,7 +305,6 @@ async def _consume_chat_sse(
     消费 OpenAI 兼容 SSE，可选回调文本增量，返回聚合后的 ChatResult。
 
     Args:
-        model_key: 模型登记键（错误信息用）
         response: 已打开的流式响应（调用方负责关闭）
         config: 模型配置（算费用）
         on_delta: 每段 content 增量回调；可为 None
@@ -369,33 +430,30 @@ async def chat(
         # 尽量要到 usage（OpenAI / 部分兼容实现支持；不支持则保持 0）
         payload["stream_options"] = {"include_usage": True}
 
-    owns_client = client is None
-    http_client = client or _build_client(config)
-    try:
-        if not stream:
-            try:
-                response = await http_client.post("/chat/completions", json=payload)
-            except httpx.RequestError:
-                return _error_result("网络请求失败")
-            if response.status_code != 200:
-                return _error_result(_http_error_reason(response.status_code, response.text))
-            try:
-                body = response.json()
-            except ValueError:
-                return _error_result("响应格式无效")
-            return _parse_chat_completion_body(model_key, body, config)
-
+    # 注入的客户端（单测用）由调用方负责生命周期；共享客户端在 lifespan 关停时
+    # 由 close_llm_clients 统一释放，这里不能逐次 aclose，否则连接池形同虚设。
+    http_client = client if client is not None else _shared_client(config)
+    if not stream:
         try:
-            async with http_client.stream("POST", "/chat/completions", json=payload) as response:
-                if response.status_code != 200:
-                    error_text = (await response.aread()).decode("utf-8", errors="replace")
-                    return _error_result(_http_error_reason(response.status_code, error_text))
-                return await _consume_chat_sse(model_key, response, config, on_delta)
+            response = await http_client.post("/chat/completions", json=payload)
         except httpx.RequestError:
             return _error_result("网络请求失败")
-    finally:
-        if owns_client:
-            await http_client.aclose()
+        if response.status_code != 200:
+            return _error_result(_http_error_reason(response.status_code, response.text))
+        try:
+            body = response.json()
+        except ValueError:
+            return _error_result("响应格式无效")
+        return _parse_chat_completion_body(body, config)
+
+    try:
+        async with http_client.stream("POST", "/chat/completions", json=payload) as response:
+            if response.status_code != 200:
+                error_text = (await response.aread()).decode("utf-8", errors="replace")
+                return _error_result(_http_error_reason(response.status_code, error_text))
+            return await _consume_chat_sse(response, config, on_delta)
+    except httpx.RequestError:
+        return _error_result("网络请求失败")
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,17 +489,18 @@ async def embed(
 
     payload: dict[str, Any] = {"model": config.request_model, "input": inputs}
 
-    owns_client = client is None
-    http_client = client or _build_client(config)
+    http_client = client if client is not None else _shared_client(config)
     try:
         response = await http_client.post("/embeddings", json=payload)
-    finally:
-        if owns_client:
-            await http_client.aclose()
+    except httpx.RequestError as exc:
+        raise LlmRequestError(f"model {model_key!r} 网络请求失败") from exc
 
+    # 与 chat() 一致：错误正文必须截断并脱敏后才能进异常消息。这个异常会被
+    # kb_semantic_search 拼进 ToolResult 回灌给模型，原样透传上游正文可能把
+    # 被网关回显的 Authorization 头带进模型上下文。
     if response.status_code != 200:
         raise LlmRequestError(
-            f"model {model_key!r} returned HTTP {response.status_code}: {response.text}"
+            f"model {model_key!r} 调用失败：{_http_error_reason(response.status_code, response.text)}"
         )
 
     try:
@@ -450,7 +509,5 @@ async def embed(
         vectors = [item["embedding"] for item in ordered]
         usage = body.get("usage", {})
         return EmbeddingResult(vectors=vectors, prompt_tokens=usage.get("prompt_tokens", 0))
-    except (KeyError, IndexError, ValueError) as exc:
-        raise LlmRequestError(
-            f"malformed embedding response from model {model_key!r}: {response.text}"
-        ) from exc
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise LlmRequestError(f"model {model_key!r} 返回的 embedding 响应格式无效") from exc

@@ -70,12 +70,31 @@ class Settings(BaseSettings):
     MONITOR_SWEEP_INTERVAL_SECONDS: float = Field(default=30.0, ge=5, le=3600)
     CMDB_DIFF_INTERVAL_SECONDS: float = Field(default=3600.0, ge=60, le=86_400)
     MONITOR_EVENT_RETENTION_DAYS: int = Field(default=7, ge=1, le=90)
+    # 单轮探活的并发上限。探活是纯 I/O，串行执行时一轮耗时 = 目标数 × 超时，
+    # 大批设备同时离线（最需要告警的时刻）会把扫描周期拖垮。太大则可能触发
+    # 网络设备或防火墙的连接速率限制。
+    MONITOR_PROBE_CONCURRENCY: int = Field(default=50, ge=1, le=500)
+    # 过期探测记录的最小清理间隔。清理要对全表做窗口排序，属于低频维护动作，
+    # 没必要每轮扫描（默认 30 秒）都跑一次。
+    MONITOR_PURGE_MIN_INTERVAL_SECONDS: float = Field(default=3600.0, ge=0, le=86_400)
     # Netmiko 的两个超时量纲不同，分开配：
     # - CONN：建立 TCP 连接、认证、读 banner 的上限（Netmiko 默认 10）
     # - READ：单条命令等待提示符出现的上限（Netmiko 默认 10）；show running-config
     #   这类大输出靠它兜底，所以放宽到 60
     DEVICE_COMMAND_CONN_TIMEOUT_SECONDS: float = Field(default=15.0, gt=0, le=120)
     DEVICE_COMMAND_READ_TIMEOUT_SECONDS: float = Field(default=60.0, gt=0, le=600)
+    # 设备命令专用线程池容量，决定「同时能有多少台设备在跑命令」。
+    # 必须与 asyncio 默认线程池隔离：默认池同时承载密码哈希（core/security.py），
+    # 单条设备命令最长占用 CONN+READ 秒，占满默认池会让登录接口直接 503，
+    # 而且从密码限流指标上完全看不出原因。
+    DEVICE_COMMAND_MAX_CONCURRENCY: int = Field(default=8, ge=1, le=64)
+    # SSH 主机密钥校验。关闭时 Netmiko/Paramiko 用 AutoAddPolicy 接受任意主机密钥，
+    # 而设备连接会发送特权账号明文口令，等于允许中间人直接窃取设备管理员密码。
+    # 默认 False 是为了不破坏现网（开启后未登记指纹的设备会立刻连不上）；
+    # 纳管流程补齐 known_hosts 后应尽快置 True，生产环境见下方 fail-fast 校验。
+    DEVICE_SSH_STRICT_HOST_KEY: bool = False
+    # 额外的 known_hosts 文件路径；为空时只用系统默认 (~/.ssh/known_hosts)。
+    DEVICE_SSH_KNOWN_HOSTS_FILE: str | None = None
 
     # 子 Agent Spawn 配额与回执回收
     AGENT_MAX_CONCURRENT_CHILDREN: int = Field(default=5, ge=1)

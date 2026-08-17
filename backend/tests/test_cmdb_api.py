@@ -15,7 +15,7 @@ pytestmark = pytest.mark.asyncio
 type Headers = dict[str, str]
 
 
-async def _grant_cmdb_permissions(db_session: AsyncSession, test_user) -> None:  # noqa: ANN001
+async def _grant_cmdb_permissions(db_session: AsyncSession, test_user) -> None:
     """现场创建 cmdb:read + cmdb:manage 并挂到 test_user 已有角色上。
 
     不能像别处那样直接查询已存在的 Permission 行——测试库的权限种子只来自
@@ -63,7 +63,7 @@ async def _latest_update_audit_detail(db_session: AsyncSession, asset_id: int) -
 async def test_create_asset_with_static_credential_never_echoes_plaintext(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -93,7 +93,7 @@ async def test_create_asset_with_static_credential_never_echoes_plaintext(
 
 
 async def test_create_dynamic_credential_stores_username_only(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     await _grant_cmdb_permissions(db_session, test_user)
 
@@ -120,7 +120,7 @@ async def test_create_dynamic_credential_stores_username_only(
 async def test_update_without_password_keeps_existing_secret(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -155,7 +155,7 @@ async def test_update_without_password_keeps_existing_secret(
 async def test_update_hostname_with_unchanged_credentials_audit_not_changed(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -196,7 +196,7 @@ async def test_update_hostname_with_unchanged_credentials_audit_not_changed(
 async def test_update_credential_change_audit_reports_changed(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -235,7 +235,7 @@ async def test_update_credential_change_audit_reports_changed(
 
 
 async def test_switch_to_static_without_password_is_rejected_when_no_existing_secret(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     await _grant_cmdb_permissions(db_session, test_user)
     create_resp = await client.post(
@@ -259,7 +259,7 @@ async def test_switch_to_static_without_password_is_rejected_when_no_existing_se
 
 
 async def test_soft_delete_restore_purge_flow(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     await _grant_cmdb_permissions(db_session, test_user)
     create_resp = await client.post(
@@ -330,7 +330,7 @@ async def _make_asset_pair(db_session: AsyncSession) -> tuple[int, int]:
 
 
 async def test_create_dependency_then_list_shows_both_directions(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     await _grant_cmdb_permissions(db_session, test_user)
     parent_id, child_id = await _make_asset_pair(db_session)
@@ -360,7 +360,7 @@ async def test_create_dependency_then_list_shows_both_directions(
 
 
 async def test_create_dependency_rejects_self_loop(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     await _grant_cmdb_permissions(db_session, test_user)
     parent_id, _child_id = await _make_asset_pair(db_session)
@@ -374,7 +374,7 @@ async def test_create_dependency_rejects_self_loop(
 
 
 async def test_create_dependency_rejects_unknown_child_asset(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     await _grant_cmdb_permissions(db_session, test_user)
     parent_id, _child_id = await _make_asset_pair(db_session)
@@ -388,7 +388,7 @@ async def test_create_dependency_rejects_unknown_child_asset(
 
 
 async def test_create_duplicate_dependency_returns_409(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     await _grant_cmdb_permissions(db_session, test_user)
     parent_id, child_id = await _make_asset_pair(db_session)
@@ -406,7 +406,7 @@ async def test_create_duplicate_dependency_returns_409(
 
 
 async def test_delete_dependency_removes_edge(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     await _grant_cmdb_permissions(db_session, test_user)
     parent_id, child_id = await _make_asset_pair(db_session)
@@ -428,7 +428,7 @@ async def test_delete_dependency_removes_edge(
 
 
 async def test_dependency_endpoints_require_permission(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     # test_user 默认没有任何 cmdb 权限（未调用 _grant_cmdb_permissions）
     parent_id, child_id = await _make_asset_pair(db_session)
@@ -444,7 +444,7 @@ async def test_dependency_endpoints_require_permission(
     assert list_resp.status_code == 403
 
 
-async def _grant_cmdb_credential_read(db_session: AsyncSession, test_user) -> None:  # noqa: ANN001
+async def _grant_cmdb_credential_read(db_session: AsyncSession, test_user) -> None:
     """为 test_user 追加 cmdb:credential_read 权限。"""
     from app.models.permission import Permission
     from app.models.role import role_permissions
@@ -495,7 +495,7 @@ async def _create_static_asset(
 async def test_reveal_credential_requires_credential_read_permission(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -511,7 +511,7 @@ async def test_reveal_credential_requires_credential_read_permission(
 async def test_reveal_static_credential_returns_plaintext(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -530,7 +530,7 @@ async def test_reveal_static_credential_returns_plaintext(
 async def test_reveal_credential_writes_audit_without_password(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -563,7 +563,7 @@ async def test_reveal_credential_writes_audit_without_password(
 async def test_asset_detail_still_has_no_password_field(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -584,7 +584,7 @@ async def test_asset_detail_still_has_no_password_field(
 
 
 async def test_reveal_credential_rejects_non_static_asset(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     """credential_type=none 的资产查看密码应返回 422。"""
     await _grant_cmdb_permissions(db_session, test_user)

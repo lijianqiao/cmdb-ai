@@ -101,6 +101,15 @@ class AgentWsHub:
         self._queue_size = queue_size
         self._send_timeout_seconds = send_timeout_seconds
         self._connections: dict[int, dict[WebSocket, _Peer]] = defaultdict(dict)
+        # 事件循环只持 Task 的弱引用，裸 create_task 且丢弃返回值时，清理任务
+        # 可能在跑完之前就被 GC 掉，导致死连接残留在 _connections 里被反复入队。
+        self._cleanup_tasks: set[asyncio.Task[None]] = set()
+
+    def _spawn_cleanup(self, session_id: int, websocket: WebSocket) -> None:
+        """启动一次断连清理并保留强引用，直到任务自行完成。"""
+        task = asyncio.create_task(self.disconnect(session_id, websocket))
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_tasks.discard)
 
     async def connect(
         self,
@@ -193,13 +202,13 @@ class AgentWsHub:
         try:
             state = getattr(websocket, "client_state", WebSocketState.CONNECTED)
             if state != WebSocketState.CONNECTED:
-                asyncio.create_task(self.disconnect(session_id, websocket))
+                self._spawn_cleanup(session_id, websocket)
                 return
             peer.queue.put_nowait(message)
         except asyncio.QueueFull:
-            asyncio.create_task(self.disconnect(session_id, websocket))
+            self._spawn_cleanup(session_id, websocket)
         except Exception:
-            asyncio.create_task(self.disconnect(session_id, websocket))
+            self._spawn_cleanup(session_id, websocket)
 
     async def broadcast(self, session_id: int, message: AgentWsServerMessage) -> None:
         """

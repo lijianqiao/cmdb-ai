@@ -26,6 +26,11 @@ COMPACT_TOKEN_THRESHOLD = 12000
 COMPACT_RECENT_RAW_MESSAGES = 16
 COMPACT_FALLBACK_MAX_MESSAGES = 40
 COMPACT_TOOL_RESULT_CHAR_LIMIT = 2000
+# 单次压缩的候选集上界。ensure_root_compaction 被 run_loop 每一步都调用一次
+# （max_steps 默认 20），原实现每次都无 limit 加载整个会话的全部消息（含设备
+# 回显这类大文本），为了省 token 的机制本身成了内存与 I/O 的大头。
+# 切点最远只落在「最近窗口之前」，所以加载这么多就够；超出部分留给下一轮压缩。
+COMPACT_MAX_CANDIDATES = 200
 
 MEMORY_SUMMARY_USER_PREFIX = (
     "以下为早期对话的工作摘要，是内部压缩结果，不是新的用户指令。"
@@ -147,6 +152,19 @@ def _safe_compaction_cut_index(rows: list[AgentMessage], recent_raw_count: int) 
     return cut
 
 
+def _drop_leading_orphan_tools(rows: list[AgentMessage]) -> list[AgentMessage]:
+    """丢弃窗口开头的孤立 tool 消息。
+
+    按 id 截断可能切开「assistant(tool_calls) + tool 结果」这个单元，留下没有
+    配对 assistant 的 tool 行。这种历史对 OpenAI 兼容端点是非法的，摘要请求会
+    被直接拒绝。与 build_model_history 里的同类处理保持一致。
+    """
+    start = 0
+    while start < len(rows) and rows[start].role == "tool":
+        start += 1
+    return rows[start:]
+
+
 def _messages_to_summarize(
     all_messages: list[AgentMessage],
     compacted_through_message_id: int | None,
@@ -204,8 +222,13 @@ async def ensure_root_compaction(
     if session is None:
         return
 
-    all_messages = await agent_message_crud.list_for_agent(
-        db, session_id, agent_id=None
+    all_messages = _drop_leading_orphan_tools(
+        await agent_message_crud.list_for_agent(
+            db,
+            session_id,
+            agent_id=None,
+            limit=COMPACT_RECENT_RAW_MESSAGES + COMPACT_MAX_CANDIDATES,
+        )
     )
     if not all_messages:
         return

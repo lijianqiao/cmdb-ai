@@ -26,8 +26,23 @@ from app.agent.hitl import (
 )
 from app.agent.hitl_execution import execute_approved_proposal
 from app.agent.loop import BeforeToolDecision, ToolDispatcher, ToolResult
+from app.agent.tool_args import (
+    DeviceControlArgs,
+    NotifyArgs,
+    QueryDeviceCommandArgs,
+    validation_reason_for_tool,
+)
 
 _GATED_TOOLS: frozenset[str] = frozenset({"notify", "device_control", "query_device_command"})
+
+# 门控工具 → 参数模型。提到模块级常量：原实现在 before() 里每次调用都重建这个
+# 字典并重跑一次函数内 import（那是为了绕开 tool_dispatch 的循环依赖，现在
+# 参数模型已下沉到叶子模块 tool_args，环消失了）。
+_GATE_ARGUMENT_MODELS: dict[str, type[BaseModel]] = {
+    "notify": NotifyArgs,
+    "device_control": DeviceControlArgs,
+    "query_device_command": QueryDeviceCommandArgs,
+}
 
 _PENDING_MESSAGES: dict[str, str] = {
     "notify": "通知提案",
@@ -135,20 +150,7 @@ class HitlGateHook:
         if name not in _GATED_TOOLS:
             return BeforeToolDecision(block=False)
 
-        from app.agent.tool_dispatch import (
-            DeviceControlArgs,
-            NotifyArgs,
-            QueryDeviceCommandArgs,
-            validation_reason_for_tool,
-        )
-
-        gate_models: dict[str, type[BaseModel]] = {
-            "notify": NotifyArgs,
-            "device_control": DeviceControlArgs,
-            "query_device_command": QueryDeviceCommandArgs,
-        }
-
-        argument_model = gate_models.get(name)
+        argument_model = _GATE_ARGUMENT_MODELS.get(name)
         if argument_model is None:
             return BeforeToolDecision(
                 block=True,

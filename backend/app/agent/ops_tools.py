@@ -19,13 +19,40 @@ from app.crud.monitor_target import monitor_target_crud
 from app.models.cmdb_asset import CmdbAsset
 from app.models.monitor_target import MonitorTarget
 
+# 工具结果的字符预算。要控的是灌进模型上下文的 token 量，所以按字符算而不是
+# 按行数算——notes/location 是自由文本，单行长度能差一个数量级，按行数截断在
+# 备注写得长的环境里根本挡不住。
+_MAX_TOOL_RESULT_CHARS = 8000
+_MAX_NOTES_CHARS = 100
+
 
 def _format_asset(asset: CmdbAsset) -> str:
+    notes = asset.notes or "无"
+    if len(notes) > _MAX_NOTES_CHARS:
+        notes = notes[:_MAX_NOTES_CHARS] + "…"
     return (
         f"[id={asset.id}] {asset.hostname} ({asset.ip_address}) "
         f"类型={asset.asset_type} 位置={asset.location or '未填写'} "
-        f"业务系统={asset.business_system or '未填写'} 备注={asset.notes or '无'}"
+        f"业务系统={asset.business_system or '未填写'} 备注={notes}"
     )
+
+
+def _render_assets(assets: list[CmdbAsset]) -> str:
+    """在字符预算内渲染资产列表，超出时截断并提示模型收窄条件。"""
+    lines: list[str] = []
+    used = 0
+    for asset in assets:
+        line = _format_asset(asset)
+        if used + len(line) > _MAX_TOOL_RESULT_CHARS:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    if len(lines) < len(assets):
+        lines.append(
+            f"…共匹配 {len(assets)} 台，因长度限制仅显示前 {len(lines)} 台。"
+            "请补充更精确的过滤条件（IP 或业务系统）后重试。"
+        )
+    return "\n".join(lines)
 
 
 async def query_cmdb(
@@ -48,7 +75,7 @@ async def query_cmdb(
 
     if not assets:
         return ToolResult(control="ok", content="没有找到匹配的资产")
-    return ToolResult(control="ok", content="\n".join(_format_asset(a) for a in assets))
+    return ToolResult(control="ok", content=_render_assets(assets))
 
 
 async def query_cmdb_dependencies(
@@ -69,11 +96,19 @@ async def query_cmdb_dependencies(
     assets_by_id = {a.id: a for a in await cmdb_asset_crud.list_by_ids(db, reached_ids)}
     depth_by_id = dict(reached)
 
-    lines = [
-        f"[深度={depth_by_id[a_id]}] {_format_asset(assets_by_id[a_id])}"
-        for a_id in reached_ids
-        if a_id in assets_by_id
-    ]
+    # max_depth=5 的依赖遍历同样可能命中大量资产，这里也走字符预算。
+    lines: list[str] = []
+    used = 0
+    for a_id in reached_ids:
+        asset = assets_by_id.get(a_id)
+        if asset is None:
+            continue
+        line = f"[深度={depth_by_id[a_id]}] {_format_asset(asset)}"
+        if used + len(line) > _MAX_TOOL_RESULT_CHARS:
+            lines.append(f"…共 {len(reached_ids)} 个关联资产，因长度限制已截断，请缩小 max_depth。")
+            break
+        lines.append(line)
+        used += len(line) + 1
     return ToolResult(control="ok", content="\n".join(lines))
 
 
@@ -92,8 +127,8 @@ async def query_monitor_status(
     """
     targets: list[MonitorTarget]
     if target_ids is not None:
-        results = [await monitor_target_crud.get(db, target_id) for target_id in target_ids]
-        targets = [target for target in results if target is not None]
+        # 批量 IN 查询，不要逐个 get——target_ids 上限 100，逐条会打 100 次往返。
+        targets = await monitor_target_crud.list_by_ids(db, target_ids)
     elif ip_prefix is not None:
         targets = await monitor_target_crud.list_by_ip_prefix(db, ip_prefix)
     else:
@@ -102,9 +137,17 @@ async def query_monitor_status(
     if not targets:
         return ToolResult(control="ok", content="没有找到匹配的监控目标")
 
+    target_id_list = [target.id for target in targets]
     latest_status = await monitor_status_event_crud.get_latest_status_for_targets(
         db,
-        [target.id for target in targets],
+        target_id_list,
+    )
+    # 一次窗口查询取回所有目标的最近历史，取代「每个目标一次 list_recent_for_target」。
+    # 无过滤条件时 targets 是全系统目标，逐条查会打出与目标数等量的往返。
+    recent_by_target = await monitor_status_event_crud.list_recent_for_targets(
+        db,
+        target_id_list,
+        limit=since_limit,
     )
 
     lines: list[str] = []
@@ -115,11 +158,7 @@ async def query_monitor_status(
             lines.append(f"{header} — 尚未探测")
             continue
 
-        recent = await monitor_status_event_crud.list_recent_for_target(
-            db,
-            target.id,
-            limit=since_limit,
-        )
+        recent = recent_by_target.get(target.id, [])
         history = ", ".join(f"{event.status}@{event.checked_at:%H:%M:%S}" for event in recent)
         latency_text = f"{latest.latency_ms}ms" if latest.latency_ms is not None else "—"
         lines.append(

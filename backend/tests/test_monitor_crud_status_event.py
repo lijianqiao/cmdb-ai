@@ -109,3 +109,64 @@ async def test_purge_older_than_keeps_single_stale_event(db_session: AsyncSessio
     assert deleted == 0
     assert len(events) == 1
     assert events[0].status == "down"
+
+
+async def test_list_recent_for_targets_groups_by_target_newest_first(
+    db_session: AsyncSession,
+) -> None:
+    """一次窗口查询按目标分组返回最近 N 条，取代逐目标查询的 N+1。"""
+    first_id = await _make_target(db_session, ip="10.0.0.11")
+    second_id = await _make_target(db_session, ip="10.0.0.12")
+
+    base = datetime.now(UTC)
+    for index, status in enumerate(["up", "down", "up"]):
+        event = await monitor_status_event_crud.record(
+            db_session, target_id=first_id, status=status
+        )
+        event.checked_at = base - timedelta(minutes=10 - index)
+    for index, status in enumerate(["down", "up"]):
+        event = await monitor_status_event_crud.record(
+            db_session, target_id=second_id, status=status
+        )
+        event.checked_at = base - timedelta(minutes=5 - index)
+    await db_session.commit()
+
+    grouped = await monitor_status_event_crud.list_recent_for_targets(
+        db_session, [first_id, second_id], limit=2
+    )
+
+    assert set(grouped) == {first_id, second_id}
+    # 每组最多 limit 条，且最新在前
+    assert len(grouped[first_id]) == 2
+    assert grouped[first_id][0].checked_at > grouped[first_id][1].checked_at
+    assert len(grouped[second_id]) == 2
+    assert grouped[second_id][0].status == "up"
+
+
+async def test_list_recent_for_targets_handles_empty_inputs(db_session: AsyncSession) -> None:
+    """空目标列表或非正 limit 不发查询，直接返回空结果。"""
+    assert await monitor_status_event_crud.list_recent_for_targets(db_session, [], limit=5) == {}
+
+    target_id = await _make_target(db_session, ip="10.0.0.13")
+    await monitor_status_event_crud.record(db_session, target_id=target_id, status="up")
+    await db_session.commit()
+
+    assert await monitor_status_event_crud.list_recent_for_targets(
+        db_session, [target_id], limit=0
+    ) == {}
+
+
+async def test_list_recent_for_targets_omits_targets_without_events(
+    db_session: AsyncSession,
+) -> None:
+    """从未探测过的目标直接缺席，不返回空列表条目。"""
+    with_events = await _make_target(db_session, ip="10.0.0.14")
+    without_events = await _make_target(db_session, ip="10.0.0.15")
+    await monitor_status_event_crud.record(db_session, target_id=with_events, status="up")
+    await db_session.commit()
+
+    grouped = await monitor_status_event_crud.list_recent_for_targets(
+        db_session, [with_events, without_events], limit=5
+    )
+
+    assert set(grouped) == {with_events}

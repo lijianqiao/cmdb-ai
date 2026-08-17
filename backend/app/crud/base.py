@@ -40,7 +40,13 @@ class CRUDBase(Generic[ModelT]):
     model: type[ModelT]
 
     def _id_column(self) -> InstrumentedAttribute[int]:
-        return cast("InstrumentedAttribute[int]", vars(self.model)["id"])
+        """取模型主键列。
+
+        必须用 getattr：ModelT 的上界是 Base，Base 上没有声明 id，直接写
+        self.model.id 过不了 mypy strict。也不能用 vars(self.model)["id"]——
+        那只看类自身的 __dict__，id 若继承自 mixin 就会 KeyError。
+        """
+        return cast("InstrumentedAttribute[int]", getattr(self.model, "id"))  # noqa: B009
 
     def _soft_delete_column(self) -> InstrumentedAttribute[bool] | None:
         column = getattr(self.model, "is_deleted", None)

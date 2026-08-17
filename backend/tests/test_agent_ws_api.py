@@ -94,7 +94,7 @@ async def _wait_until_hub_has(session_id: int, *, max_wait_seconds: float = 1.0)
     """在应用事件循环上轮询，直到 Hub 注册了该会话连接。"""
     deadline = asyncio.get_running_loop().time() + max_wait_seconds
     while asyncio.get_running_loop().time() < deadline:
-        if session_id in hub._connections and hub._connections[session_id]:
+        if hub._connections.get(session_id):
             return
         await asyncio.sleep(0.01)
     raise AssertionError(f"Hub 在 {max_wait_seconds}s 内未注册 session_id={session_id}")
@@ -407,7 +407,7 @@ async def test_ws_first_frame_auth_connects(
 async def test_ws_without_agent_use_permission_closes_4403(
     client: AsyncClient,
     db_session: AsyncSession,
-    login_user,  # noqa: ANN001
+    login_user,
 ) -> None:
     """没有 agent:use 权限的用户，即使会话就是自己的，也应该在握手阶段被拒绝。"""
     role = Role(name="无权限角色", description="", permissions=[])

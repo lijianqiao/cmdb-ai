@@ -37,8 +37,19 @@ target-version = "py314"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "N", "B", "UP", "ASYNC"]
-ignore = ["E501", "B008", "UP046"]
+# DTZ：禁止裸 datetime（本项目已全量时区感知，加上防回退）
+# PTH：路径操作用 pathlib
+# RUF：ruff 自有规则，含若干 asyncio / dunder 陷阱
+select = ["E", "F", "W", "I", "N", "B", "UP", "ASYNC", "DTZ", "PTH", "RUF"]
+# RUF001/002/003「歧义 Unicode 字符」对中文代码库是纯误报：全角括号、破折号、
+#   引号都会被判为可疑，本项目注释与文案全是中文，开了会淹没真实问题。
+# 刻意未启用的规则集（评估过，不适合本项目）：
+#   ARG —— agent/hitl_tools.py 的「薄工具」按统一签名接收全部参数但故意不用
+#          （真正执行在 HITL 门控 before 钩子里），是接口契约不是死代码。
+#          启用它需要 30+ 处 noqa 或把参数改名成 _db，两种都让代码更差。
+#   S   —— 命中的是 config.py 的 HOST="0.0.0.0"、内部不变量 assert 等有意为之的写法。
+#   SIM —— 建议多为风格偏好，收益不足以换取一次全库改动。
+ignore = ["E501", "B008", "UP046", "RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]

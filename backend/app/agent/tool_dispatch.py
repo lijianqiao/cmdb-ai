@@ -15,12 +15,10 @@
 
 from collections.abc import Iterable
 from copy import deepcopy
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.device_commands import CommandName
 from app.agent.hitl import HitlEventPublisher
 from app.agent.hitl_gate import HitlGateHook
 from app.agent.hitl_tools import (
@@ -35,116 +33,53 @@ from app.agent.loop import ToolDispatcher, ToolResult
 from app.agent.ops_tools import query_cmdb, query_cmdb_dependencies, query_monitor_status
 from app.agent.roles import ToolName
 
+# 参数模型定义在叶子模块 tool_args 里（见该模块 docstring：打破本模块与
+# hitl_gate 的循环 import）。这里原样再导出，既有调用方与测试的导入路径不变。
+from app.agent.tool_args import (
+    DeviceControlArgs,
+    GetDeviceQueryResultArgs,
+    KbGlobArgs,
+    KbGrepArgs,
+    KbReadArgs,
+    KbSemanticSearchArgs,
+    ListDeviceCommandsArgs,
+    NotifyArgs,
+    NotifyPayloadArgs,
+    QueryCmdbArgs,
+    QueryCmdbDependenciesArgs,
+    QueryDeviceCommandArgs,
+    QueryMonitorStatusArgs,
+    _Args,
+    validate_and_run,
+    validation_reason_for_tool,
+)
+
+__all__ = [
+    "ROOT_TOOL_SCHEMA_VERSION",
+    "TOOL_SCHEMA_VERSION",
+    "DeviceControlArgs",
+    "GetDeviceQueryResultArgs",
+    "KbGlobArgs",
+    "KbGrepArgs",
+    "KbReadArgs",
+    "KbSemanticSearchArgs",
+    "ListDeviceCommandsArgs",
+    "NotifyArgs",
+    "NotifyPayloadArgs",
+    "QueryCmdbArgs",
+    "QueryCmdbDependenciesArgs",
+    "QueryDeviceCommandArgs",
+    "QueryMonitorStatusArgs",
+    "build_root_tool_dispatcher",
+    "build_tool_dispatcher",
+    "root_tool_schemas",
+    "tool_schemas_for",
+    "validate_and_run",
+    "validation_reason_for_tool",
+]
+
 TOOL_SCHEMA_VERSION = "t09-v1"
 ROOT_TOOL_SCHEMA_VERSION = "t11-v1"
-
-
-class _Args(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-
-class KbGlobArgs(_Args):
-    pattern: str = Field(min_length=1, max_length=500)
-    category: str | None = Field(default=None, max_length=100)
-
-
-class KbGrepArgs(_Args):
-    pattern: str = Field(min_length=1, max_length=500)
-    category: str | None = Field(default=None, max_length=100)
-    context_lines: int = Field(default=0, ge=0, le=20)
-
-
-class KbReadArgs(_Args):
-    path: str = Field(min_length=1, max_length=500)
-    offset: int = Field(default=0, ge=0)
-    limit: int | None = Field(default=4000, ge=1, le=32_000)
-
-
-class KbSemanticSearchArgs(_Args):
-    query: str = Field(min_length=1, max_length=2000)
-    category_id: int | None = Field(default=None, ge=1)
-    top_k: int = Field(default=5, ge=1, le=20)
-
-
-class QueryCmdbArgs(_Args):
-    asset_ids: list[int] | None = Field(default=None, max_length=100)
-    ip: str | None = Field(default=None, min_length=1, max_length=45)
-    business_system: str | None = Field(default=None, min_length=1, max_length=100)
-
-    @model_validator(mode="after")
-    def at_most_one_filter(self) -> QueryCmdbArgs:
-        selected = sum(
-            value is not None
-            for value in (self.asset_ids, self.ip, self.business_system)
-        )
-        if selected > 1:
-            raise ValueError("asset_ids, ip, business_system 最多提供一个")
-        return self
-
-
-class QueryCmdbDependenciesArgs(_Args):
-    asset_id: int = Field(ge=1)
-    direction: Literal["up", "down"] = "down"
-    max_depth: int = Field(default=3, ge=1, le=5)
-
-
-class QueryMonitorStatusArgs(_Args):
-    target_ids: list[int] | None = Field(default=None, max_length=100)
-    ip_prefix: str | None = Field(default=None, min_length=1, max_length=45)
-    since_limit: int = Field(default=5, ge=1, le=20)
-
-    @model_validator(mode="after")
-    def at_most_one_filter(self) -> QueryMonitorStatusArgs:
-        if self.target_ids is not None and self.ip_prefix is not None:
-            raise ValueError("target_ids 与 ip_prefix 最多提供一个")
-        return self
-
-
-class NotifyPayloadArgs(_Args):
-    """notify 工具 payload 内的 message 字段。"""
-
-    message: str = Field(min_length=1, max_length=2000)
-
-
-class NotifyArgs(_Args):
-    """根 Agent 通知工具的模型可控参数。"""
-
-    asset_id: int = Field(ge=1)
-    payload: NotifyPayloadArgs
-    reason: str = Field(min_length=1, max_length=2000)
-
-
-class DeviceControlArgs(_Args):
-    """根 Agent 设备管控工具的模型可控参数。"""
-
-    asset_id: int = Field(ge=1)
-    command_name: CommandName
-    interface_name: str | None = Field(default=None, min_length=1, max_length=64)
-    reason: str = Field(min_length=1, max_length=2000)
-
-
-class QueryDeviceCommandArgs(_Args):
-    asset_id: int = Field(ge=1)
-    command_name: CommandName
-    reason: str = Field(min_length=1, max_length=2000)
-
-
-class GetDeviceQueryResultArgs(_Args):
-    proposal_id: int = Field(ge=1)
-
-
-class ListDeviceCommandsArgs(_Args):
-    asset_id: int = Field(ge=1)
-
-
-def validation_reason_for_tool(name: str, exc: ValidationError) -> str:
-    """把校验错误变成模型可自我纠正的提示：字段名 + 期望约束，不回显输入值。"""
-    details: list[str] = []
-    for error in exc.errors(include_url=False, include_input=False, include_context=False):
-        loc = ".".join(str(part) for part in error.get("loc", ())) or "(根)"
-        details.append(f"{loc}: {error.get('msg', 'invalid')}")
-    joined = "; ".join(dict.fromkeys(details))[:1000]
-    return f"工具 {name!r} 参数无效: {joined}"
 
 
 _ARGUMENT_MODELS: dict[ToolName, type[_Args]] = {
@@ -249,21 +184,12 @@ def build_tool_dispatcher(
         if name not in _ARGUMENT_MODELS:
             return ToolResult(control="rejected", content=f"未知工具 {name!r}")
         tool_name: ToolName = name
-        argument_model = _ARGUMENT_MODELS[tool_name]
-        try:
-            parsed = argument_model.model_validate(arguments)
-        except ValidationError as exc:
-            return ToolResult(
-                control="clarification",
-                content=validation_reason_for_tool(name, exc),
-            )
-        try:
-            return await _dispatch_validated(db, tool_name, parsed)
-        except Exception as exc:
-            return ToolResult(
-                control="failed",
-                content=f"工具 {name!r} 执行失败: {type(exc).__name__}",
-            )
+        return await validate_and_run(
+            name,
+            arguments,
+            _ARGUMENT_MODELS[tool_name],
+            lambda parsed: _dispatch_validated(db, tool_name, parsed),
+        )
 
     return dispatch
 
@@ -277,11 +203,6 @@ _ROOT_READ_ONLY_TOOLS: tuple[ToolName, ...] = (
     "query_cmdb_dependencies",
     "query_monitor_status",
 )
-
-_ROOT_EXECUTION_TOOLS: frozenset[str] = frozenset(
-    {"notify", "device_control", "query_device_command"}
-)
-
 
 def _inline_command_name_enum(parameters: dict[str, Any]) -> dict[str, Any]:
     """将 CommandName $ref 内联为 enum，避免模型端点 $ref 解析问题。"""
@@ -407,94 +328,76 @@ def build_root_tool_dispatcher(
     read_dispatch = build_tool_dispatcher(db, _ROOT_READ_ONLY_TOOLS)
 
     async def dispatch(name: str, arguments: dict[str, Any]) -> ToolResult:
-        if name in _ROOT_EXECUTION_TOOLS:
-            try:
-                if name == "notify":
-                    notify_args = NotifyArgs.model_validate(arguments)
-                    return await notify(
-                        db,
-                        asset_id=notify_args.asset_id,
-                        payload=notify_args.payload.model_dump(),
-                        reason=notify_args.reason,
-                        session_id=session_id,
-                        actor_user_id=actor_user_id,
-                        proposed_by_agent_id=proposed_by_agent_id,
-                        publisher=publisher,
-                        gate_hook=gate_hook,
-                    )
-                if name == "device_control":
-                    control_args = DeviceControlArgs.model_validate(arguments)
-                    return await device_control(
-                        db,
-                        asset_id=control_args.asset_id,
-                        command_name=control_args.command_name,
-                        interface_name=control_args.interface_name,
-                        reason=control_args.reason,
-                        session_id=session_id,
-                        actor_user_id=actor_user_id,
-                        proposed_by_agent_id=proposed_by_agent_id,
-                        publisher=publisher,
-                        gate_hook=gate_hook,
-                    )
-                query_args = QueryDeviceCommandArgs.model_validate(arguments)
-                return await query_device_command(
+        if name == "notify":
+            return await validate_and_run(
+                name,
+                arguments,
+                NotifyArgs,
+                lambda args: notify(
                     db,
-                    asset_id=query_args.asset_id,
-                    command_name=query_args.command_name,
-                    reason=query_args.reason,
+                    asset_id=args.asset_id,
+                    payload=args.payload.model_dump(),
+                    reason=args.reason,
                     session_id=session_id,
                     actor_user_id=actor_user_id,
                     proposed_by_agent_id=proposed_by_agent_id,
                     publisher=publisher,
                     gate_hook=gate_hook,
-                )
-            except ValidationError as exc:
-                return ToolResult(
-                    control="clarification",
-                    content=validation_reason_for_tool(name, exc),
-                )
-            except Exception as exc:
-                return ToolResult(
-                    control="failed",
-                    content=f"工具 {name!r} 执行失败: {type(exc).__name__}",
-                )
-
-        if name == "list_device_commands":
-            try:
-                list_args = ListDeviceCommandsArgs.model_validate(arguments)
-            except ValidationError as exc:
-                return ToolResult(
-                    control="clarification",
-                    content=validation_reason_for_tool(name, exc),
-                )
-            try:
-                return await list_device_commands_for_asset(
-                    db, session_id=session_id, asset_id=list_args.asset_id
-                )
-            except Exception as exc:
-                return ToolResult(
-                    control="failed",
-                    content=f"工具 {name!r} 执行失败: {type(exc).__name__}",
-                )
-        if name == "get_device_query_result":
-            try:
-                result_args = GetDeviceQueryResultArgs.model_validate(arguments)
-            except ValidationError as exc:
-                return ToolResult(
-                    control="clarification",
-                    content=validation_reason_for_tool(name, exc),
-                )
-            try:
-                return await get_device_query_result(
+                ),
+            )
+        if name == "device_control":
+            return await validate_and_run(
+                name,
+                arguments,
+                DeviceControlArgs,
+                lambda args: device_control(
                     db,
+                    asset_id=args.asset_id,
+                    command_name=args.command_name,
+                    interface_name=args.interface_name,
+                    reason=args.reason,
                     session_id=session_id,
-                    proposal_id=result_args.proposal_id,
-                )
-            except Exception as exc:
-                return ToolResult(
-                    control="failed",
-                    content=f"工具 {name!r} 执行失败: {type(exc).__name__}",
-                )
+                    actor_user_id=actor_user_id,
+                    proposed_by_agent_id=proposed_by_agent_id,
+                    publisher=publisher,
+                    gate_hook=gate_hook,
+                ),
+            )
+        if name == "query_device_command":
+            return await validate_and_run(
+                name,
+                arguments,
+                QueryDeviceCommandArgs,
+                lambda args: query_device_command(
+                    db,
+                    asset_id=args.asset_id,
+                    command_name=args.command_name,
+                    reason=args.reason,
+                    session_id=session_id,
+                    actor_user_id=actor_user_id,
+                    proposed_by_agent_id=proposed_by_agent_id,
+                    publisher=publisher,
+                    gate_hook=gate_hook,
+                ),
+            )
+        if name == "list_device_commands":
+            return await validate_and_run(
+                name,
+                arguments,
+                ListDeviceCommandsArgs,
+                lambda args: list_device_commands_for_asset(
+                    db, session_id=session_id, asset_id=args.asset_id
+                ),
+            )
+        if name == "get_device_query_result":
+            return await validate_and_run(
+                name,
+                arguments,
+                GetDeviceQueryResultArgs,
+                lambda args: get_device_query_result(
+                    db, session_id=session_id, proposal_id=args.proposal_id
+                ),
+            )
         return await read_dispatch(name, arguments)
 
     return dispatch

@@ -15,6 +15,7 @@
 
 import asyncio
 import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
@@ -37,6 +38,7 @@ from app.agent.hitl import (
     _publish,
     _summary,
 )
+from app.core.config import settings
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
 from app.crud.hitl_execution_result import hitl_execution_result_crud
@@ -48,6 +50,11 @@ from app.utils.audit import log_audit
 logger = logging.getLogger(__name__)
 
 _OUTPUT_PREVIEW_LIMIT = 4000
+# 并发执行轮询：指数退避而不是固定 50ms 死等。原实现是 200 次 × 50ms，
+# 最坏打 200 次数据库往返却只覆盖 10 秒——比设备命令的读超时还短，
+# 该等到的没等到，不该打的往返全打了。
+_POLL_INITIAL_DELAY_SECONDS = 0.05
+_POLL_MAX_DELAY_SECONDS = 2.0
 
 
 def build_result_preview(text: str, *, limit: int = _OUTPUT_PREVIEW_LIMIT) -> str:
@@ -130,8 +137,12 @@ async def _poll_executing_terminal(
     Raises:
         HitlResumeError: 提案不存在、UNKNOWN 或等待超时。
     """
-    for _ in range(200):
-        await asyncio.sleep(0.05)
+    # 等待窗口对齐设备命令读超时：另一个执行者跑的可能正是一条慢命令。
+    deadline = time.monotonic() + settings.DEVICE_COMMAND_READ_TIMEOUT_SECONDS
+    delay = _POLL_INITIAL_DELAY_SECONDS
+    while time.monotonic() < deadline:
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, _POLL_MAX_DELAY_SECONDS)
         db.expire_all()
         refreshed = await hitl_proposal_crud.get(db, proposal_id)
         if refreshed is None:

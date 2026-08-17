@@ -17,12 +17,14 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from app.agent.executors import shutdown_device_executor
 from app.agent.hitl_execution import reconcile_executing_proposals
 from app.agent.spawn import run_receipt_gc_loop, spawn_manager
 from app.agent.ws_hub import WsSpawnEventPublisher, hub
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal, engine
+from app.core.llm import close_llm_clients
 from app.core.security import PasswordHashOverloadedError
 from app.crud.agent_session import agent_session_crud
 from app.crud.base import RelatedObjectsNotFoundError
@@ -79,6 +81,21 @@ def validate_single_worker_environment(environment: Mapping[str, str]) -> None:
             )
 
 
+def _warn_on_background_task_death(task: asyncio.Task[None]) -> None:
+    """常驻后台循环不应正常返回；无论异常退出还是静默返回都要留下证据。
+
+    没有这个回调时，裸 create_task 起的循环一旦死掉就完全无声——监控/巡检
+    停止工作，日志里却只有当初那一条异常，运维不会意识到功能已经失效。
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.critical("后台任务 %s 异常退出，相关功能已停止", task.get_name(), exc_info=exc)
+    else:
+        logger.critical("后台任务 %s 意外返回，相关功能已停止", task.get_name())
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Reconcile crashed child-agent state, run background jobs, then release resources.
@@ -89,21 +106,36 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     child this process still owns, then dispose the database engine last.
     """
     validate_single_worker_environment(os.environ)
+    if not settings.DEVICE_SSH_STRICT_HOST_KEY:
+        # 不做成 fail-fast：开启会让所有未登记指纹的设备立刻连不上，属于破坏性
+        # 变更，必须先用 ssh-keyscan 批量补齐 known_hosts。这里只保证「没开」这件事
+        # 每次启动都被看见，而不是无声地一直关着。
+        logger.warning(
+            "设备 SSH 主机密钥校验未开启（DEVICE_SSH_STRICT_HOST_KEY=false）："
+            "设备连接会发送特权账号明文口令，中间人可直接窃取。"
+            "补齐 known_hosts 后请尽快置为 true"
+        )
     await reconcile_executing_proposals(AsyncSessionLocal)
     async with AsyncSessionLocal() as recover_db:
         await agent_session_crud.recover_active_turns(recover_db)
         await recover_db.commit()
     await spawn_manager.reconcile_startup()
     spawn_manager.set_event_publisher(WsSpawnEventPublisher(hub))
-    monitor_task = asyncio.create_task(run_monitor_sweep_loop())
-    diff_task = asyncio.create_task(run_cmdb_diff_loop())
-    gc_task = asyncio.create_task(run_receipt_gc_loop(spawn_manager))
+    monitor_task = asyncio.create_task(run_monitor_sweep_loop(), name="monitor_sweep")
+    diff_task = asyncio.create_task(run_cmdb_diff_loop(), name="cmdb_diff")
+    gc_task = asyncio.create_task(run_receipt_gc_loop(spawn_manager), name="receipt_gc")
+    background_tasks = (monitor_task, diff_task, gc_task)
+    for task in background_tasks:
+        task.add_done_callback(_warn_on_background_task_death)
     yield
-    for task in (monitor_task, diff_task, gc_task):
+    for task in background_tasks:
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
     await spawn_manager.shutdown()
+    # 设备线程池不等待在跑的命令（Netmiko 线程不可取消，可能还要几十秒）。
+    shutdown_device_executor()
+    await close_llm_clients()
     await engine.dispose()
 
 

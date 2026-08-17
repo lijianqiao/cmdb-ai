@@ -7,7 +7,7 @@ from app.schemas.device_command_policy import DeviceCommandPolicyCreate
 
 
 def test_state_changing_command_rejects_asset_type_scope() -> None:
-    with pytest.raises(ValidationError, match="变更类命令.*scope.*asset"):
+    with pytest.raises(ValidationError, match=r"变更类命令.*scope.*asset"):
         DeviceCommandPolicyCreate(
             scope="asset_type",
             asset_type="switch",

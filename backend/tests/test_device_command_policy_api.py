@@ -14,7 +14,7 @@ type Headers = dict[str, str]
 
 async def _grant_policy_permissions(
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     *,
     read: bool = True,
     manage: bool = True,
@@ -45,7 +45,7 @@ async def _grant_policy_permissions(
 async def test_create_asset_type_policy_success(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
 ) -> None:
     await _grant_policy_permissions(db_session, test_user)
@@ -75,7 +75,7 @@ async def test_create_asset_type_policy_success(
 async def test_create_policy_rejects_asset_type_scope_for_state_changing_command(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
 ) -> None:
     await _grant_policy_permissions(db_session, test_user)
@@ -95,7 +95,7 @@ async def test_create_policy_rejects_asset_type_scope_for_state_changing_command
 async def test_create_unknown_command_name_rejected(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
 ) -> None:
     await _grant_policy_permissions(db_session, test_user)
@@ -117,7 +117,7 @@ async def test_create_unknown_command_name_rejected(
 async def test_create_duplicate_policy_returns_409(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
 ) -> None:
     await _grant_policy_permissions(db_session, test_user)
@@ -146,7 +146,7 @@ async def test_create_duplicate_policy_returns_409(
 async def test_read_only_permission_cannot_create(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
 ) -> None:
     await _grant_policy_permissions(db_session, test_user, manage=False)
@@ -168,7 +168,7 @@ async def test_read_only_permission_cannot_create(
 async def test_soft_delete_restore_purge_flow(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
 ) -> None:
     await _grant_policy_permissions(db_session, test_user)
@@ -230,7 +230,7 @@ async def test_soft_delete_restore_purge_flow(
 async def test_restore_conflict_returns_409(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
 ) -> None:
     """软删后新建同目标策略，再恢复旧策略应 409，不能制造重复活跃行。"""
@@ -276,7 +276,7 @@ async def test_restore_conflict_returns_409(
 async def test_create_and_update_write_audit(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
 ) -> None:
     await _grant_policy_permissions(db_session, test_user)

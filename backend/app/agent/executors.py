@@ -28,9 +28,11 @@ UNKNOWN（可能已下发）处理，这与既有的 HITL 状态机语义一致�
 """
 
 import asyncio
+import functools
 import logging
 import re
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -51,6 +53,26 @@ from app.models.cmdb_asset import CmdbAsset
 from app.utils.audit import log_audit
 
 logger = logging.getLogger(__name__)
+
+# 设备命令专用线程池，绝不能用 asyncio 的默认执行器。
+# asyncio.to_thread 走的是默认池（容量 min(32, cpu_count+4)，8 核上只有 12），
+# 而 core/security.py 的密码哈希也用 asyncio.to_thread。单条设备命令最长占用
+# CONN(15s)+READ(60s)，十几个并发设备命令就能占满默认池，导致所有用户登录
+# 因为排不进线程池而 503——且此时密码限流信号量是空闲的，指标上完全看不出原因。
+# 物理隔离两个池，让设备命令的慢只影响设备命令。
+_DEVICE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=settings.DEVICE_COMMAND_MAX_CONCURRENCY,
+    thread_name_prefix="device-cmd",
+)
+
+
+def shutdown_device_executor() -> None:
+    """释放设备命令线程池；由 app.main 的 lifespan 在关停时调用。
+
+    ``wait=False`` 是刻意的：Netmiko 线程不可取消，正在跑的命令可能还要几十秒，
+    关停流程不应被它阻塞。``cancel_futures=True`` 只丢弃尚未开始的排队任务。
+    """
+    _DEVICE_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,16 +165,27 @@ def _open_netmiko_connection(
 
     ConnectHandler 构造过程里就完成了 TCP 连接、认证和 session_preparation
     （含按 device_type 关闭分页），所以它一返回就意味着"已经跟设备说过话了"。
+
+    DEVICE_SSH_STRICT_HOST_KEY 开启时 Paramiko 改用 RejectPolicy：未登记在
+    known_hosts 里的设备直接拒连，而不是静默接受任意主机密钥。这条连接会把
+    特权账号明文口令发给对端，不校验主机密钥等于允许中间人直接窃取该口令。
     """
-    return ConnectHandler(
-        device_type=_netmiko_device_type_for_vendor(vendor),
-        host=host,
-        username=username,
-        password=password,
-        conn_timeout=conn_timeout,
-        auth_timeout=conn_timeout,
-        banner_timeout=conn_timeout,
-    )
+    kwargs: dict[str, Any] = {
+        "device_type": _netmiko_device_type_for_vendor(vendor),
+        "host": host,
+        "username": username,
+        "password": password,
+        "conn_timeout": conn_timeout,
+        "auth_timeout": conn_timeout,
+        "banner_timeout": conn_timeout,
+    }
+    if settings.DEVICE_SSH_STRICT_HOST_KEY:
+        kwargs["ssh_strict"] = True
+        kwargs["system_host_keys"] = True
+        if settings.DEVICE_SSH_KNOWN_HOSTS_FILE:
+            kwargs["alt_host_keys"] = True
+            kwargs["alt_key_file"] = settings.DEVICE_SSH_KNOWN_HOSTS_FILE
+    return ConnectHandler(**kwargs)
 
 
 def _run_device_command(
@@ -302,15 +335,21 @@ class DeviceQueryExecutor:
         vendor = cast(VendorName, asset.vendor)
         # Netmiko 全同步，丢到工作线程避免阻塞事件循环。注意线程不可取消：
         # 调用方取消时命令仍会跑完，因此失败一律按 dispatched 语义交给上层判定。
-        return await asyncio.to_thread(
-            _run_device_command,
-            host=asset.ip_address,
-            vendor=vendor,
-            username=asset.credential_username,
-            password=password,
-            command_name=command_name,
-            definition=definition,
-            interface_name=interface_name,
-            conn_timeout=settings.DEVICE_COMMAND_CONN_TIMEOUT_SECONDS,
-            read_timeout=settings.DEVICE_COMMAND_READ_TIMEOUT_SECONDS,
+        # 用专用池而非 asyncio.to_thread：见 _DEVICE_EXECUTOR 的说明。
+        # run_in_executor 不接受关键字参数，所以用 partial 绑定。
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _DEVICE_EXECUTOR,
+            functools.partial(
+                _run_device_command,
+                host=asset.ip_address,
+                vendor=vendor,
+                username=asset.credential_username,
+                password=password,
+                command_name=command_name,
+                definition=definition,
+                interface_name=interface_name,
+                conn_timeout=settings.DEVICE_COMMAND_CONN_TIMEOUT_SECONDS,
+                read_timeout=settings.DEVICE_COMMAND_READ_TIMEOUT_SECONDS,
+            ),
         )

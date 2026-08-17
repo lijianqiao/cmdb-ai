@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.budget import Budget
 from app.agent.compaction import (
     COMPACT_TOOL_RESULT_CHAR_LIMIT,
+    _drop_leading_orphan_tools,
     _messages_to_summarize,
     ensure_root_compaction,
 )
@@ -429,3 +430,44 @@ async def test_build_model_history_after_compaction_preserves_tool_pairs(
         if message.role == "tool":
             assert history[index - 1].role == "assistant"
             assert history[index - 1].tool_calls
+
+
+def test_drop_leading_orphan_tools_removes_unpaired_tool_rows() -> None:
+    """截断窗口切开工具单元时，开头的孤立 tool 行必须被丢弃。
+
+    ensure_root_compaction 现在按 limit 加载候选集（避免每步全量读表），
+    截断点可能落在 assistant(tool_calls)+tool 结果这个单元中间。孤立的 tool
+    消息对 OpenAI 兼容端点是非法历史，直接送进摘要请求会被拒绝。
+    """
+    rows = [
+        _message(2, "tool", tool_call_id="tc-1", content="orphan-1"),
+        _message(3, "tool", tool_call_id="tc-2", content="orphan-2"),
+        _message(4, "user", content="真正的窗口起点"),
+        _message(5, "assistant", content="回答"),
+    ]
+
+    kept = _drop_leading_orphan_tools(rows)
+
+    assert [row.id for row in kept] == [4, 5]
+    assert kept[0].role != "tool"
+
+
+def test_drop_leading_orphan_tools_keeps_intact_window() -> None:
+    """窗口本身合法时不做任何删减。"""
+    rows = [
+        _message(1, "user", content="提问"),
+        _message(2, "assistant", tool_calls=[{"id": "tc-1", "name": "query", "arguments": "{}"}]),
+        _message(3, "tool", tool_call_id="tc-1", content="result"),
+    ]
+
+    assert _drop_leading_orphan_tools(rows) == rows
+
+
+def test_drop_leading_orphan_tools_all_orphans_yields_empty() -> None:
+    """整个窗口都是孤立 tool 行时返回空，调用方据此直接跳过本轮压缩。"""
+    rows = [
+        _message(1, "tool", tool_call_id="tc-1", content="orphan-1"),
+        _message(2, "tool", tool_call_id="tc-2", content="orphan-2"),
+    ]
+
+    assert _drop_leading_orphan_tools(rows) == []

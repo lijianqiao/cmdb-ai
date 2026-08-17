@@ -263,6 +263,7 @@ async def create_session(
         },
     )
     await db.commit()
+    # created_at/updated_at 由 server_default=func.now() 生成，必须回读一次拿真实值。
     await db.refresh(session)
     return success_response(
         AgentSessionResponse.model_validate(session),
@@ -338,8 +339,10 @@ async def patch_session_approval_mode(
             target=f"agent_session:{session_id}",
             detail=f"{old_mode}→{body.approval_mode}",
         )
+    # sessionmaker 配了 expire_on_commit=False，且本端点只改 approval_mode
+    # （updated_at 走 Python 侧 onupdate），commit 后对象属性依然可读，
+    # 不需要再发一条 SELECT 回读。
     await db.commit()
-    await db.refresh(session)
     return success_response(AgentSessionResponse.model_validate(session))
 
 

@@ -21,7 +21,7 @@ pytestmark = pytest.mark.asyncio
 type Headers = dict[str, str]
 
 
-async def _grant_monitor_permissions(db_session: AsyncSession, test_user) -> None:  # noqa: ANN001
+async def _grant_monitor_permissions(db_session: AsyncSession, test_user) -> None:
     """现场创建 monitor:read + monitor:manage 并挂到 test_user 已有角色上。"""
     from sqlalchemy import select
 
@@ -40,7 +40,7 @@ async def _grant_monitor_permissions(db_session: AsyncSession, test_user) -> Non
     await db_session.commit()
 
 
-async def _grant_monitor_log_read(db_session: AsyncSession, test_user) -> None:  # noqa: ANN001
+async def _grant_monitor_log_read(db_session: AsyncSession, test_user) -> None:
     """现场创建 monitor_log:read 并挂到 test_user 已有角色上。"""
     from sqlalchemy import select
 
@@ -59,7 +59,7 @@ async def _grant_monitor_log_read(db_session: AsyncSession, test_user) -> None: 
 
 
 async def test_create_list_get_patch_delete_target(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     await _grant_monitor_permissions(db_session, test_user)
 
@@ -106,7 +106,7 @@ async def test_create_list_get_patch_delete_target(
 
 
 async def test_list_includes_latest_probe_status(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     await _grant_monitor_permissions(db_session, test_user)
     create_resp = await client.post(
@@ -128,7 +128,7 @@ async def test_list_includes_latest_probe_status(
 
 
 async def test_duplicate_ip_port_returns_409(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     await _grant_monitor_permissions(db_session, test_user)
     payload = {"ip_address": "10.0.0.5", "port": 22, "label": "SSH"}
@@ -140,7 +140,7 @@ async def test_duplicate_ip_port_returns_409(
 
 
 async def test_invalid_cmdb_asset_id_returns_422(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     await _grant_monitor_permissions(db_session, test_user)
     response = await client.post(
@@ -152,7 +152,7 @@ async def test_invalid_cmdb_asset_id_returns_422(
 
 
 async def test_create_with_existing_cmdb_asset(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     await _grant_monitor_permissions(db_session, test_user)
     asset = await cmdb_asset_crud.create(
@@ -197,7 +197,7 @@ async def test_monitor_endpoints_require_permission(
 
 
 async def test_monitor_runtime_returns_sweep_interval(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     await _grant_monitor_permissions(db_session, test_user)
     response = await client.get("/api/v1/monitor/runtime", headers=auth_headers)
@@ -206,7 +206,7 @@ async def test_monitor_runtime_returns_sweep_interval(
 
 
 async def test_monitor_logs_requires_monitor_log_read_permission(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     """仅有 monitor:read 时访问监控日志必须 403。"""
     await _grant_monitor_permissions(db_session, test_user)
@@ -215,7 +215,7 @@ async def test_monitor_logs_requires_monitor_log_read_permission(
 
 
 async def test_monitor_logs_filters_by_target_id_and_status(
-    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers  # noqa: ANN001
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
     """有 monitor_log:read 时可按 target_id 与 status 筛到 down 行。"""
     await _grant_monitor_log_read(db_session, test_user)

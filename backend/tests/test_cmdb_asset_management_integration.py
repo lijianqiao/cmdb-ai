@@ -12,7 +12,7 @@ pytestmark = pytest.mark.asyncio
 type Headers = dict[str, str]
 
 
-async def _grant_cmdb_permissions(db_session: AsyncSession, test_user) -> None:  # noqa: ANN001
+async def _grant_cmdb_permissions(db_session: AsyncSession, test_user) -> None:
     """现场创建 cmdb:read + cmdb:manage 并挂到 test_user 已有角色上（同 Task 5 的写法）。"""
     from sqlalchemy import select
 
@@ -36,7 +36,7 @@ async def _grant_cmdb_permissions(db_session: AsyncSession, test_user) -> None: 
 async def test_full_lifecycle_with_encrypted_credential_round_trips(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_user,  # noqa: ANN001
+    test_user,
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -66,12 +66,19 @@ async def kb_grep(
     args = ["rg", "--line-number", "--no-heading"]
     if context_lines:
         args += ["-C", str(context_lines)]
-    args += [pattern, str(search_root)]
+    # pattern 由模型生成，可能受知识库文档内容的间接注入影响。必须同时用
+    # -e 和 --：
+    #   -e 显式声明「下一个 argv 是模式」，即使它以 - 开头也不会被当成选项；
+    #   -- 终止选项解析，后面只可能是路径。
+    # 少了这层隔离，pattern="-f/etc/passwd" 会让 ripgrep 从任意文件读取模式，
+    # 并把无法解析的行原样写进 stderr——而 stderr 会被下面回灌给模型，
+    # 等于把宿主机文件内容泄漏出去。
+    args += ["-e", pattern, "--", str(search_root)]
 
+    proc = await asyncio.create_subprocess_exec(
+        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_RIPGREP_TIMEOUT_SECONDS)
     except TimeoutError:
         proc.kill()
@@ -107,6 +114,10 @@ async def kb_semantic_search(
         embedding_result = await embed(embedding_model_key, [query], db=db)
     except LlmRequestError as exc:
         return ToolResult(control="failed", content=f"embedding 失败: {exc}")
+
+    # provider 返回结构合法但 data 为空时 vectors 也是空的，直接取 [0] 会 IndexError。
+    if not embedding_result.vectors:
+        return ToolResult(control="failed", content="embedding 服务未返回向量")
 
     results = await knowledge_chunk_crud.search_similar(
         db, query_embedding=embedding_result.vectors[0], category_id=category_id, top_k=top_k
