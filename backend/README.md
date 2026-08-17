@@ -1,141 +1,132 @@
-# Backend — fastapi-admin
+# Backend — ent-agent
 
 [中文文档](./README_zh.md) · [Root README](../README.md)
 
-Async FastAPI service for the RBAC admin console (auth, users/roles/permissions, audit, dashboard) plus the ops Agent stack (session REST, WebSocket, HITL approvals, knowledge base).
+Async **FastAPI** backend service for the **ent-agent** platform. It provides enterprise RBAC, infrastructure asset management, TCP liveness monitoring, Netmiko network automation, and a multi-turn LLM Operations Agent runtime with Human-In-The-Loop (HITL) safety gates.
 
-See [docs/AGENT_ARCHITECTURE.md](../docs/AGENT_ARCHITECTURE.md) for the architecture overview.
+---
 
-## Stack
+## Architecture Overview
 
-- Python **3.14**, FastAPI, Uvicorn (including WebSocket)
-- SQLAlchemy **2** (async) + **PostgreSQL** (psycopg) + Alembic
-- JWT access tokens + persistent refresh session families
-- Argon2id (pwdlib) with bcrypt verify/migrate for legacy hashes
-- LLM calls go through `app.core.llm` (OpenAI-compatible HTTP); tools/HITL live under `app/agent/`
-- Tooling: **uv**, ruff, mypy, pytest
-
-## Project layout
+See [docs/AGENT_ARCHITECTURE.md](../docs/AGENT_ARCHITECTURE.md) and [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) for full architectural specifications.
 
 ```text
 backend/
 ├── app/
-│   ├── api/v1/          # Routes (agent_sessions / agent_ws / hitl / knowledge)
-│   ├── agent/           # Agent core: loop, chat_turn, ws_hub, HITL, tools
-│   ├── core/            # Config, DB, security, deps, llm
-│   ├── crud/            # Data access
-│   ├── models/          # SQLAlchemy models
-│   ├── schemas/         # Pydantic models (incl. agent_ws / agent_session)
-│   ├── services/        # Auth sessions, cleanup, rate limits, knowledge ingest
-│   └── main.py          # ASGI app factory
-├── alembic/             # Migrations
-├── tests/
-├── init_db.py           # Superuser + permission seed
-├── main.py              # Windows-safe uvicorn entry
-└── .env.example
+│   ├── api/v1/              # HTTP and WebSocket routers (auth, agent, cmdb, monitor, hitl, ...)
+│   ├── agent/               # Agent runtime: loop, chat_turn, ws_hub, HITL, tools, Netmiko executors
+│   ├── core/                # App config, async DB session, security (Argon2id/JWT), Fernet encryption, LLM client
+│   ├── crud/                # Data access layer (SQLAlchemy 2 async queries)
+│   ├── models/              # Declarative ORM models (PostgreSQL + pgvector)
+│   ├── schemas/             # Pydantic schemas for request/response validation & WS events
+│   ├── services/            # Business logic: auth session rotation, TCP monitor sweep, CMDB diff, knowledge ingest
+│   ├── utils/               # Audit logger and helper utilities
+│   └── main.py              # FastAPI ASGI factory, middlewares, exception handlers & Lifespan
+├── alembic/                 # Database schema migrations
+├── knowledge/               # Local file storage for uploaded knowledge documents
+├── tests/                   # 955+ automated pytest test cases
+├── init_db.py               # Superuser & 24 system permissions seeder
+├── main.py                  # Windows-safe uvicorn startup entry (SelectorEventLoop)
+├── pyproject.toml           # Project dependencies managed via uv
+└── .env.example             # Configuration template
 ```
 
-## Setup
+---
+
+## Key Modules & Systems
+
+### 1. Agent Runtime (`app/agent/`)
+- **Core Loop (`loop.py`)**: General-purpose tool execution loop with step (`max_steps`) and cost (`max_cost_usd`) hard budgets.
+- **Chat Turn (`chat_turn.py`)**: Root ops agent conversation orchestrator. Injects the system prompt, streams SSE tokens from the LLM, dispatches tools, and broadcasts live events over WebSocket.
+- **Context Compaction (`compaction.py`)**: Automatically summarizes older conversation windows using a lightweight background LLM call when token thresholds are reached.
+- **HITL Security Gate (`hitl_gate.py` & `hitl_execution.py`)**: Intercepts state-changing and sensitive commands (`notify`, `device_control`, `query_device_command`). Enforces the `PENDING → APPROVED → EXECUTING → EXECUTED / UNKNOWN` lifecycle.
+- **Netmiko Device Executor (`executors.py`)**: Handles SSH/CLI automation across Cisco, Huawei, H3C, Juniper, and Linux switches and servers.
+- **Sub-Agent Spawn System (`spawn.py` & `orchestration.py`)**: Manages bounded concurrent sub-agents for specialized roles (`classifier`, `investigator`, `reviewer`).
+- **WebSocket Broadcast Hub (`ws_hub.py`)**: Filters sensitive action payloads and pushes safe event streams to connected clients.
+
+### 2. Infrastructure & Monitoring
+- **CMDB Asset & Dependency Management (`app/crud/cmdb_asset*.py`)**: Stores IT assets, IP addresses, vendor platform mappings, and directed dependency graphs. Static credentials are encrypted with `CMDB_CREDENTIAL_KEY` (Fernet).
+- **Device Command Policy Engine (`app/crud/device_command_policy.py`)**: Evaluates whitelist/blacklist rules by asset type or asset ID.
+- **TCP Liveness Prober (`app/services/monitor_sweep.py`)**: High-concurrency async TCP sweep checking port availability and latency. Broadcasts real-time state-flip alerts.
+- **Knowledge Base RAG (`app/services/knowledge_ingestion.py`)**: Parses markdown/text documents, generates CJK-friendly chunks, and queries vector embeddings with PostgreSQL `pgvector`.
+
+### 3. Authentication & Security (`app/core/` & `app/services/auth.py`)
+- **Dual-Token Scheme**: Short-lived in-memory Access Tokens (15–30 min) + HttpOnly SameSite=Strict Refresh Cookies (7 days).
+- **Session Family Rotation**: Detects and revokes replayed refresh tokens immediately.
+- **Password Hashing**: Modern Argon2id via `pwdlib`, with automatic transparent migration from legacy Bcrypt hashes.
+- **Origin Validation**: Strict CORS and CSRF origin verification on state-changing endpoints.
+
+---
+
+## API Routes Summary (`/api/v1`)
+
+| Prefix | Method / Scope | Purpose | Required Permission |
+| --- | --- | --- | --- |
+| `/auth` | POST | Login, refresh token rotation, logout, registration | Public / Authenticated |
+| `/me` | GET, PATCH, PUT | User profile, personal password change, permission list | Authenticated |
+| `/users` | CRUD, trash, reset-pwd | User accounts and role assignments | `user:*` |
+| `/roles` | CRUD, trash, assign | Role management and permission binding | `role:*` |
+| `/permissions` | GET, CRUD | Permission tree and custom permission definitions | `permission:*` |
+| `/cmdb` | CRUD, dependencies | Asset inventory, topology graph, credential preview | `cmdb:*` |
+| `/device-command-policies` | CRUD, trash | Whitelist/blacklist command execution policies | `device_command_policy:*` |
+| `/monitor` | GET, CRUD | Target health status, probe configuration, history logs | `monitor:*` |
+| `/knowledge` | GET, POST | Category creation and document vector upload | `knowledge:*` |
+| `/hitl` | GET, POST | Pending proposals, approve/reject decisions, retry | `agent:hitl_approve` |
+| `/agent` | CRUD, POST | Chat session management, snapshot restore, message turns | `agent:use` |
+| `/ws/agent/{session_id}` | WS | Real-time token streaming and status event broadcasts | `agent:use` |
+| `/system-config` | GET, PUT | Dynamic LLM model, price rates, and monitoring settings | `system_config:*` |
+| `/audit-logs` | GET | Comprehensive administrative and execution audit trail | `audit:read` |
+
+---
+
+## Development & Setup
+
+### Requirements
+- Python **3.14**
+- [uv](https://github.com/astral-sh/uv)
+- PostgreSQL **≥ 14** with `pgvector` and `pg_trgm`
+
+### Installation & Run
 
 ```bash
 cd backend
 cp .env.example .env
+
+# Install dependencies into uv virtualenv
 uv sync
-```
 
-Minimum `.env` for local development:
-
-```ini
-DATABASE_URL=postgresql+psycopg://USER:PASSWORD@localhost:5432/fastapi_admin
-ENVIRONMENT=development
-BACKEND_CORS_ORIGINS=http://localhost:5173,http://localhost:3000
-ALLOWED_HOSTS=localhost,127.0.0.1
-```
-
-Ops Assistant chat also needs a chat model (real calls → cost/quota):
-
-```ini
-LLM_CHAT_BASE_URL=...
-LLM_CHAT_API_KEY=...
-LLM_CHAT_MODEL=...
-```
-
-Knowledge upload / semantic search need embedding settings (see `.env.example`).
-
-First-time bootstrap (optional but recommended):
-
-```ini
-INIT_SUPERUSER_USERNAME=admin
-INIT_SUPERUSER_EMAIL=admin@example.com
-INIT_SUPERUSER_PASSWORD=your-strong-password
-```
-
-```bash
+# Run database migrations
 uv run alembic upgrade head
+
+# Seed superuser & system permissions
 uv run python init_db.py
-```
 
-`init_db.py` idempotently seeds **24** system permissions aligned with `require_permission` / the frontend `PERMISSIONS` constants. It does **not** create roles or assignments. Superuser creation is skipped if one already exists.
-
-## Run
-
-Prefer the project entry (SelectorEventLoop on Windows for async psycopg):
-
-```bash
+# Start application server
 uv run python main.py
 ```
 
-- API base: `http://localhost:8000/api/v1`
-- OpenAPI: `http://localhost:8000/docs`
+- API Base: `http://localhost:8000/api/v1`
+- Swagger UI: `http://localhost:8000/docs`
 
-Useful flags in `.env`:
+---
 
-| Variable | Purpose |
-| --- | --- |
-| `LOG_LEVEL` | Root log level (`info` default) |
-| `SQL_ECHO` | Set `true` only while debugging SQL |
-| `REGISTRATION_ENABLED` | Public self-registration (off by default) |
-| `LLM_CHAT_*` / `LLM_EMBEDDING_*` | Chat and embedding models |
-| `AGENT_*` | Child-agent concurrency/depth/cost caps (see `.env.example`) |
+## Quality Assurance & Testing
 
-## Main API modules (`/api/v1`)
-
-| Prefix | Purpose |
-| --- | --- |
-| `/auth` `/users` `/roles` `/permissions` `/me` `/dashboard` `/audit-logs` | RBAC admin |
-| `/knowledge` | Categories + document upload (`.md`/`.txt`) |
-| `/hitl` | HITL proposal list/get/`decide` (`agent:hitl_approve`) |
-| `/agent` | Session CRUD + `POST .../messages` → `run_chat_turn` |
-| `/ws/agent/{session_id}` | Ops Assistant WebSocket (`access_token` query; safe HITL summary only — no raw `action_payload`) |
-
-Sessions and WS enforce ownership: only the session owner may read/write/connect. Sending a message runs the Agent loop — tests must mock `chat`; confirm model config/cost before live debugging.
-
-## Permission codes (seeded)
-
-| Module | Codes |
-| --- | --- |
-| Users | `user:read` `user:create` `user:update` `user:delete` `user:assign` `user:reset_password` |
-| Roles | `role:read` `role:create` `role:update` `role:delete` `role:assign` |
-| Permissions | `permission:read` `permission:create` `permission:update` `permission:delete` |
-| Audit | `audit:read` |
-| Knowledge | `knowledge:read` `knowledge:upload` `knowledge:manage` |
-| CMDB | `cmdb:read` `cmdb:manage` |
-| Monitor | `monitor:read` `monitor:manage` |
-| Agent | `agent:hitl_approve` |
-
-The Ops Assistant Chat page is available to any logged-in user. Upload UI needs `knowledge:upload` (listing categories also needs `knowledge:read`). HITL approve/reject needs `agent:hitl_approve`.
-
-## Quality
+The backend adheres to a strict zero-warning policy:
 
 ```bash
+# Code formatting and linting
 uv run ruff check .
+
+# Strict static type checking (120+ files)
 uv run mypy app
+
+# Run complete test suite (955+ tests)
 uv run pytest
 ```
 
-Ops-assistant-focused tests: `tests/test_agent_ws_*.py`, `test_agent_sessions_api.py`, `test_chat_turn.py`, `test_hitl_api.py`, `test_ops_assistant_integration.py`.
+---
 
-## More
+## License
 
-- Architecture & WS contract: [docs/AGENT_ARCHITECTURE.md](../docs/AGENT_ARCHITECTURE.md)
-- Production hardening, DB roles, and proxy settings: [docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md)
+[MIT](../LICENSE) © lijianqiao

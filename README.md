@@ -1,96 +1,129 @@
-# fastapi-admin
+# ent-agent
 
 [中文文档](./README_zh.md)
 
-A full-stack **RBAC admin console** built with FastAPI and React. Manage users, roles, and permissions with JWT dual-token auth, revocable refresh sessions, and API-level permission checks.
+An enterprise-grade, full-stack **AI Operations Agent & RBAC Management Platform** built with **FastAPI** and **React 19**.
 
-![Login](./docs/images/login.png)
+Interact with your IT infrastructure through natural language: query CMDB assets, probe device health, execute network commands via Netmiko, manage whitelist/blacklist policies, and perform secure Human-In-The-Loop (HITL) change approvals.
 
-## Screenshots
+---
 
-| Dashboard | Users |
-| --- | --- |
-| ![Dashboard](./docs/images/dashboard.png) | ![Users](./docs/images/users.png) |
+## Product Demo
 
-| Roles | Permissions |
-| --- | --- |
-| ![Roles](./docs/images/roles.png) | ![Permissions](./docs/images/permissions.png) |
+[![Watch the product demo](./docs/images/product_demo_poster.jpg)](./docs/images/product_demo.mp4)
 
-![Audit logs](./docs/images/audit.png)
+The demo covers:
+1. Superuser login and the dashboard overview;
+2. CMDB asset management and dependency topology;
+3. Device command policy configuration (whitelist bypass / blacklist block);
+4. Ops Assistant conversation:
+   - Querying a switch running-config (triggers automated execution plus an AI-generated summary);
+   - Attempting a device reboot (blocked by the blacklist policy with a safety notice).
 
-## Features
+---
 
-- **RBAC**: users ↔ roles ↔ permissions, soft delete, module-grouped permission codes (`user:read`, `role:assign`, …)
-- **Auth**: Argon2id passwords, short-lived access tokens, HttpOnly refresh cookies, session-family rotation with replay revocation
-- **API guards**: `require_permission("…")` on protected endpoints; `/me` returns a flat permission list for the UI
-- **Admin UX**: dashboard, user/role/permission CRUD, role assignment, admin password reset, audit trail
-- **Bootstrap**: Alembic migrations + `init_db.py` seeds the 16 system permissions (roles/assignments stay in the UI)
+## Key Features
 
-## Tech stack
+- **🤖 Ops Assistant (AI Agent)**:
+  - Natural language troubleshooting, CMDB lookups, TCP port probes, and device configuration inspection.
+  - Multi-vendor network automation via Netmiko (Cisco IOS-XE, Cisco Small Business, Huawei VRP, HP Comware, Juniper Junos, Linux).
+  - Streaming responses over WebSocket with Turn-grouped execution processes, collapsible thinking traces, and sticky copy buttons.
+- **🛡️ Human-In-The-Loop (HITL) Security**:
+  - Strict approval gate for state-changing/sensitive actions with `PENDING → APPROVED → EXECUTING → EXECUTED / UNKNOWN` state machine.
+  - Global auto-popup modal with 6-digit `InputOTP` credential input for dynamic-password protected assets.
+  - Idempotent AI configuration summarization for large device command outputs.
+- **🗄️ CMDB & Credential Management**:
+  - Unified inventory for network switches, routers, and servers with subnet CIDR and topological dependency graphs.
+  - Fernet symmetric encryption (`CMDB_CREDENTIAL_KEY`) for static passwords, plus support for dynamic one-time credentials.
+- **⚡ Device Command Policies**:
+  - Fine-grained whitelist and blacklist rules by asset type or specific device to bypass or enforce approval workflows.
+- **📡 TCP Liveness Monitoring**:
+  - Async concurrent TCP probing, latency tracking, state-flip alert broadcast, and historical event logs.
+- **📚 Knowledge Base & RAG**:
+  - Document upload (`.md`, `.txt`), intelligent CJK text chunking, and vector similarity search powered by `pgvector`.
+- **🔐 Enterprise RBAC & Security**:
+  - Users ↔ Roles ↔ Permissions with module grouping and soft deletion/trash bin support.
+  - Dual-token authentication: in-memory short-lived Access Token + HttpOnly Refresh Cookie with session-family rotation and replay protection.
+- **⚙️ Dynamic Runtime Configuration**:
+  - Database-backed LLM/Embedding provider settings and monitoring parameters with secret masking and `.env` fallback.
+
+---
+
+## Tech Stack
 
 | Layer | Stack |
 | --- | --- |
-| Backend | Python 3.14, FastAPI, SQLAlchemy 2 (async), PostgreSQL, Alembic, JWT, uv |
-| Frontend | React 19, TypeScript, Vite, Tailwind CSS 4, shadcn/ui (Base UI), Zustand, React Router 7 |
-| Quality | ruff, mypy, pytest / ESLint, Prettier, `tsc -b` |
+| **Backend** | Python 3.14, FastAPI, SQLAlchemy 2 (async), PostgreSQL + pgvector, Alembic, Netmiko, JWT, uv |
+| **Frontend** | React 19, TypeScript, Vite 8, Tailwind CSS 4, shadcn/ui (Base UI), Zustand, React Router 7 |
+| **Quality** | Ruff, mypy (strict), pytest (955+ tests) / ESLint, Prettier, Vitest (134+ tests) |
 
-## Repository layout
+---
+
+## Repository Layout
 
 ```text
-fastapi-admin/
-├── backend/          # FastAPI API (see backend/README.md)
-├── frontend/         # React SPA (see frontend/README.md)
-├── docs/             # PRD, architecture, deployment, screenshots
-├── README.md         # English (this file)
-└── README_zh.md      # Chinese
+ent-agent/
+├── backend/          # FastAPI API service (see backend/README.md)
+├── frontend/         # React SPA client (see frontend/README.md)
+├── docs/             # PRD, architecture, deployment, diagrams, demo video
+├── README.md         # English documentation (this file)
+└── README_zh.md      # Chinese documentation
 ```
 
-## Quick start
+---
+
+## Quick Start
 
 ### Prerequisites
 
-- Python **3.14**
-- Node.js **≥ 18** (pnpm or npm)
-- PostgreSQL **≥ 14** (`pg_trgm` extension recommended)
-- [uv](https://github.com/astral-sh/uv)
+- **Python 3.14** & [uv](https://github.com/astral-sh/uv)
+- **Node.js ≥ 20** (npm or pnpm)
+- **PostgreSQL ≥ 14** (with `pgvector` and `pg_trgm` extensions enabled)
+- (Optional) Local embedding engine (e.g. llama.cpp) or remote OpenAI-compatible API key
 
-### 1. Backend
+### 1. Backend Setup
 
 ```bash
 cd backend
 cp .env.example .env
-# Edit DATABASE_URL and (for first bootstrap) INIT_SUPERUSER_*
+
+# Edit DATABASE_URL, CMDB_CREDENTIAL_KEY, and LLM_CHAT_* / LLM_EMBEDDING_* in .env
 uv sync
 uv run alembic upgrade head
 uv run python init_db.py
 uv run python main.py
 ```
 
-API: `http://localhost:8000` · OpenAPI: `http://localhost:8000/docs`
+- API Base: `http://localhost:8000/api/v1`
+- OpenAPI Docs: `http://localhost:8000/docs`
 
-### 2. Frontend
+### 2. Frontend Setup
 
 ```bash
 cd frontend
 cp .env.example .env
-# VITE_API_BASE_URL=http://localhost:8000/api/v1
-pnpm install   # or: npm install
-pnpm run dev   # or: npm run dev
+npm install
+npm run dev
 ```
 
-App: `http://localhost:5173`
+- Web App: `http://localhost:5173`
 
-Sign in with the superuser created by `init_db.py`, then create roles and assign permissions in the UI.
+Sign in with the default administrator credentials created by `init_db.py` (`admin` / `admin123`).
+
+---
 
 ## Documentation
 
-| Doc | Description |
+| Document | Description |
 | --- | --- |
-| [docs/PRD.md](./docs/PRD.md) | Product requirements |
-| [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | System design |
-| [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) | Production deployment |
-| [backend/README.md](./backend/README.md) | Backend guide ([中文](./backend/README_zh.md)) |
-| [frontend/README.md](./frontend/README.md) | Frontend guide ([中文](./frontend/README_zh.md)) |
+| [docs/AGENT_ARCHITECTURE.md](./docs/AGENT_ARCHITECTURE.md) | Agent platform architecture & WS contracts |
+| [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | System layering & database architecture |
+| [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) | Production deployment & security hardening |
+| [docs/SYSTEM_CONFIG.md](./docs/SYSTEM_CONFIG.md) | Runtime configuration & key management |
+| [backend/README.md](./backend/README.md) | Backend service guide ([中文](./backend/README_zh.md)) |
+| [frontend/README.md](./frontend/README.md) | Frontend client guide ([中文](./frontend/README_zh.md)) |
+
+---
 
 ## License
 

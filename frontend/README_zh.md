@@ -1,96 +1,150 @@
-# 前端 — fastapi-admin
+# 前端 — ent-agent
 
 [English](./README.md) · [根目录说明](../README_zh.md)
 
-RBAC 管理后台的 React SPA：登录、仪表盘、用户/角色/权限、操作日志、个人中心，以及**运维助手** Chat（会话列表、WebSocket 实时事件、HITL 审批卡、知识库上传）。
+**ent-agent** 平台的现代 **React 19 单页应用（SPA）** 前端项目。基于 **TypeScript**、**Vite 8**、**Tailwind CSS 4** 与 **shadcn/ui（Base UI）** 构建。
 
-![仪表盘](../docs/images/dashboard.png)
+---
 
-架构与 WS 契约见 [docs/AGENT_ARCHITECTURE.md](../docs/AGENT_ARCHITECTURE.md)。
+## 架构总览
 
-## 技术栈
-
-- React **19** + TypeScript + Vite **8**
-- Tailwind CSS **4** + shadcn/ui（**Base UI** / `@base-ui/react`）
-- Hugeicons（经 `@/lib/icons`）、TanStack Table、React Hook Form + Zod
-- Zustand 认证状态、React Router **7**、Axios
-- Vitest（WS envelope / chat reducer 等纯函数）
-- 启动时通过 refresh Cookie 恢复会话
-
-## 目录结构
+详细架构契约见 [docs/AGENT_ARCHITECTURE.md](../docs/AGENT_ARCHITECTURE.md)。
 
 ```text
 frontend/
 ├── src/
 │   ├── components/
-│   │   ├── layout/           # Sidebar、PageHeader
-│   │   ├── ops-assistant/    # Chat UI、HITL 卡、知识上传、监控告警条
-│   │   └── ui/               # shadcn 组件
-│   ├── hooks/                # useAuth、usePermission、useAgentWs、useOpsChat
-│   ├── lib/                  # api、agent-api、agent-ws、hitl-api、knowledge-api、常量、图标
-│   ├── pages/                # 含 OpsAssistantPage（/ops-assistant）
-│   ├── store/                # Zustand
-│   └── types/
-├── vite.config.ts            # 开发态 /api（含 WS）代理到后端
-├── .env.example
-└── package.json
+│   │   ├── auth/             # ProtectedRoute 权限与登录态路由守卫
+│   │   ├── cmdb/             # CMDB 资产表单弹窗、厂商选择器与依赖管理
+│   │   ├── common/           # DataTable（TanStack Table 数据表格）、确认弹窗、分页器、错误边界
+│   │   ├── device-command-policies/ # 命令白名单/黑名单免审策略表单
+│   │   ├── layout/           # AppLayout 布局、侧边栏导航、带明暗主题切换的 Header、PageHeader
+│   │   ├── monitor/          # 监控目标与探活参数表单及校验 Schema
+│   │   ├── ops-assistant/    # 【核心】运维助手 AI 对话组件树、问答轮次列表、HITL 弹窗与审批卡片
+│   │   ├── permissions/      # 权限管理弹窗组件
+│   │   ├── roles/            # 角色管理与权限分配弹窗组件
+│   │   ├── system-config/    # LLM/Embedding 大模型与运维运行参数配置卡片
+│   │   ├── ui/               # 32 个 shadcn/ui（Base UI）原子级基础组件
+│   │   └── users/            # 用户增删改查、角色分配与密码重置弹窗
+│   ├── hooks/                # 核心自定义 Hook（useOpsChat、useAgentWs、useAuth、usePermission 等）
+│   ├── lib/                  # Axios HTTP 客户端、WebSocket 纯函数、API 请求模块、常量定义、Hugeicons 图标
+│   ├── pages/                # 页面级视图组件（100% 通过 React.lazy 实现代码分割懒加载）
+│   ├── store/                # Zustand 内存级认证状态管理
+│   ├── types/                # 严格的 TypeScript 类型定义（Agent、CMDB、Auth、Monitor、权限等）
+│   ├── App.tsx               # 应用根组件、启动时会话自动恢复（bootstrap）与路由树注册
+│   ├── index.css             # Tailwind CSS 4 主题变量与全局样式
+│   └── main.tsx              # React 挂载入口，注入 ThemeProvider、TooltipProvider 与 Sonner Toast
+├── vite.config.ts            # Vite 8 配置文件（含开发态 `/api` 与 WebSocket 代理）
+├── package.json              # 依赖与脚本声明
+└── tsconfig.json             # 严格 TypeScript 编译选项
 ```
 
-## 环境准备
+---
+
+## 运维助手交互与组件架构 (`components/ops-assistant/`)
+
+运维助手交互体验针对多轮 AI 推理、工具透明执行与人机协同安全审批进行了系统化设计：
+
+1. **问答轮次时间线 (`ChatMessageList.tsx`)**：
+   - 将 WebSocket 扁平事件流归组为以用户提问划分的结构化 `Turn` 轮次；
+   - 每一轮由三部分组成：(1) 超长自动折叠的用户提问气泡、(2) 可折叠的中间思考与执行过程、(3) 助手最终 Markdown 回答；
+   - 用户提问与最终回答均配置**粘性悬浮复制图标**（`CopyButton.tsx`），向下滚动长内容时始终吸附在右上角可视区域。
+2. **中间思考与执行过程折叠面板 (`ExecutionProcessCollapsible.tsx`)**：
+   - 聚合呈现模型思考文本、`tool_call` 工具调用徽标、子 Agent 运行卡片以及 HITL 审批卡片；
+   - 生成中或等待审批时默认展开展示实时动态；最终回答生成完毕后自动折叠，保持页面清爽。
+3. **全局主动审批弹窗 (`HitlApprovalDialog.tsx`)**：
+   - 当收到 `PENDING` 审批提案时，在屏幕中央主动弹出模态窗口；
+   - 针对动态凭据设备，集成官方 **Shadcn `InputOTP`** 6 位分格口令输入框，支持密码掩码与自动聚焦；
+   - 点击“批准并执行”或“拒绝”后立即关闭弹窗，不阻塞后台设备执行与后续流式输出。
+4. **时间线审批卡片 (`HitlApprovalCard.tsx`)**：
+   - 在时间线内常驻保留精简审批记录；
+   - 针对 `device_query` 查询大文本配置，提供抽屉展开查看完整回显，并支持一键**恢复 AI 总结**。
+5. **子 Agent 状态卡片 (`ChildAgentStatusCard.tsx`)**：
+   - 实时展示动态 Spawn 的子任务角色、简述、进度状态徽标（`RUNNING`/`COMPLETED`/`FAILED`）与结果回执。
+6. **流式富文本渲染 (`ChatMarkdown.tsx`)**：
+   - 定制 GFM Markdown 渲染器，针对代码块、表格、引用与状态标签进行视觉调优。
+
+---
+
+## 状态管理与网络通信
+
+- **`use-ops-chat.ts`**：核心对话状态管理 Hook。切换会话时，先通过 REST API 拉取完整快照，待数据稳定后再建立 WebSocket 连接，彻底规避并发数据覆盖竞态；通过纯 Reducer 合并增量流。
+- **`use-agent-ws.ts`**：管理 WebSocket 生命周期，携带内存 Access Token 进行鉴权，断线采用指数退避算法（1s–30s）自动重连。
+- **`use-auth.ts` 与 `store/auth.ts`**：双 Token 架构。Access Token 纯内存存放；页面刷新时由 `bootstrap()` 通过 HttpOnly Cookie 自动换取新 Token 恢复登录态，杜绝页面闪烁。
+- **`use-permission.ts`**：细粒度 RBAC 权限判断（`hasPermission` 等），超级管理员直接放行所有功能。
+- **`src/lib/api.ts`**：Axios 全局实例，内置 401 拦截器与并发请求队列，支持无感静默刷新 Token 并重放失败请求。
+
+---
+
+## 页面路由与权限映射
+
+所有业务视图均通过 `React.lazy()` 独立打包与按需加载：
+
+| 访问路径 | 对应组件 | 页面功能 | 所需权限 |
+| --- | --- | --- | --- |
+| `/login` | `LoginPage` | 账号登录界面 | 公开访问 |
+| `/` | `DashboardPage` | 控制台运行大盘与汇总指标 | 需登录 |
+| `/ops-assistant` | `OpsAssistantPage` | 运维助手智能对话与审批处理 | 需登录 (`agent:use`) |
+| `/cmdb` | `CmdbAssetsPage` | CMDB 资产列表与上下游依赖拓扑图 | `cmdb:read` |
+| `/cmdb/trash` | `CmdbAssetsTrashPage` | 已软删除资产回收站 | `cmdb:manage` |
+| `/device-command-policies` | `DeviceCommandPoliciesPage` | 设备命令白名单/黑名单免审批策略 | `device_command_policy:read` |
+| `/monitor-targets` | `MonitorTargetsPage` | TCP 探活监控目标与实时延迟 | `monitor:read` |
+| `/monitor-logs` | `MonitorLogsPage` | 探活健康事件历史日志 | `monitor_log:read` |
+| `/users` | `UsersPage` | 用户列表、角色分配与重置密码 | `user:read` |
+| `/roles` | `RolesPage` | 角色管理与权限绑定配置 | `role:read` |
+| `/permissions` | `PermissionsPage` | 系统模块权限树与权限点管理 | `permission:read` |
+| `/system-config` | `SystemConfigPage` | 大模型厂商、费率与运维探活运行配置 | `system_config:manage` |
+| `/audit` | `AuditLogsPage` | 系统审计操作日志多维查询 | `audit:read` |
+| `/profile` | `ProfilePage` | 个人资料与修改登录密码 | 需登录 |
+
+---
+
+## 本地启动与开发
+
+### 安装依赖
 
 ```bash
 cd frontend
 cp .env.example .env
-pnpm install   # 或 npm install
+
+# 安装依赖
+npm install  # 或 pnpm install
 ```
 
-`.env`：
-
-```ini
-VITE_API_BASE_URL=http://localhost:8000/api/v1
-```
-
-请确保后端已启动，且 CORS 包含 `http://localhost:5173`。
-
-开发时 `vite.config.ts` 会把 `/api`（含 WebSocket upgrade）代理到 `http://127.0.0.1:8000`，因此本地也可用相对路径连 WS，避免跨域。
-
-## 常用脚本
+### 启动开发服务器
 
 ```bash
-pnpm run dev         # http://localhost:5173
-pnpm run build       # tsc -b && vite build
-pnpm run typecheck   # tsc -b --force
-pnpm run test        # vitest run
-pnpm run lint
-pnpm run preview
+npm run dev
 ```
 
-## 运维助手（`/ops-assistant`）
+浏览器访问 `http://localhost:5173`。Vite 会将 `/api` 请求及 WebSocket 连接透明代理至后端的 `http://127.0.0.1:8000`。
 
-- 侧栏「运维助手」：登录即可见（无额外权限码）
-- 会话 REST：`/agent/sessions`；发消息 `POST .../messages`（超时约 300s，因可能跑完整 Agent turn）
-- WebSocket：`/api/v1/ws/agent/{session_id}?access_token=...`，承载 `assistant_delta` / `tool_call` / `hitl_*` / `monitor_alert` / `error` 等；断线指数退避重连（上限 30s），恢复后不自动重放进行中的 turn
-- **HITL**：WS 只含安全摘要；有 `agent:hitl_approve` 时再 HTTP 拉完整 payload，并调用 `/hitl/proposals/{id}/decide`
-- **知识上传**：按钮需 `knowledge:upload`；分类列表需 `knowledge:read`（仅有 upload 无 read 时会提示，不会白屏）
+---
 
-相关实现：`pages/OpsAssistantPage.tsx`、`hooks/use-ops-chat.ts`、`hooks/use-agent-ws.ts`、`components/ops-assistant/*`。
+## 脚本与质量基线
 
-## 认证与权限（前端）
+```bash
+# 启动 Vite 开发调试服务
+npm run dev
 
-- access token 存放于内存；refresh token 使用 HttpOnly Cookie
-- 启动时 `bootstrap()` 单飞刷新一次会话，再请求 `/me`
-- 菜单与操作按钮使用 `src/lib/constants.ts` 中的 `PERMISSIONS` / `ROUTES`
-- 超管在前端绕过权限展示限制；真正鉴权仍在后端接口完成
+# 运行全量 Vitest 单元测试（134+ 用例全部通过）
+npm test
 
-权限码与后端种子一致（含 `knowledge:*`、`cmdb:*`、`monitor:*`、`agent:hitl_approve`）。
+# 执行严格 TypeScript 类型检查
+npm run typecheck
 
-## 截图
+# 代码格式规范与 ESLint 检查
+npm run lint
 
-完整界面预览见 [根目录 README](../README_zh.md#界面预览)（`docs/images/`）。
+# 生产环境打包构建（主入口 chunk 经优化 < 500KB）
+npm run build
 
-## 说明
+# 本地预览生产构建产物
+npm run preview
+```
 
-- 组件遵循已安装的 shadcn Base UI 用法（按需使用 `render=`，而非 Radix 的 `asChild`）
-- 表单建议使用 registry 的 `field` 组件，以便正确展示校验错误
-- 图标统一从 `@/lib/icons` 引入，不要直接散落 `@hugeicons/...`
-- 颜色/字体走语义 token；布局用 flex + gap，避免装饰性卡片堆叠
+---
+
+## 许可证
+
+[MIT](../LICENSE) © lijianqiao

@@ -1,96 +1,150 @@
-# Frontend — fastapi-admin
+# Frontend — ent-agent
 
 [中文文档](./README_zh.md) · [Root README](../README.md)
 
-React SPA for the RBAC admin console: login, dashboard, users/roles/permissions, audit logs, profile, plus the **Ops Assistant** chat (sessions, WebSocket events, HITL approval cards, knowledge upload).
+Modern **React 19 Single Page Application (SPA)** client for the **ent-agent** platform. Built with **TypeScript**, **Vite 8**, **Tailwind CSS 4**, and **shadcn/ui (Base UI)**.
 
-![Dashboard](../docs/images/dashboard.png)
+---
 
-Architecture & WS contract: [docs/AGENT_ARCHITECTURE.md](../docs/AGENT_ARCHITECTURE.md).
+## Architecture Overview
 
-## Stack
-
-- React **19** + TypeScript + Vite **8**
-- Tailwind CSS **4** + shadcn/ui (**Base UI** / `@base-ui/react`)
-- Hugeicons (via `@/lib/icons`), TanStack Table, React Hook Form + Zod
-- Zustand auth store, React Router **7**, Axios
-- Vitest (pure helpers: WS envelope / chat reducer)
-- Session restore via refresh cookie on app bootstrap
-
-## Project layout
+See [docs/AGENT_ARCHITECTURE.md](../docs/AGENT_ARCHITECTURE.md) for full architectural contracts.
 
 ```text
 frontend/
 ├── src/
 │   ├── components/
-│   │   ├── layout/           # Sidebar, PageHeader
-│   │   ├── ops-assistant/    # Chat UI, HITL card, knowledge upload, monitor banner
-│   │   └── ui/               # shadcn primitives
-│   ├── hooks/                # useAuth, usePermission, useAgentWs, useOpsChat
-│   ├── lib/                  # api, agent-api, agent-ws, hitl-api, knowledge-api, constants, icons
-│   ├── pages/                # includes OpsAssistantPage (/ops-assistant)
-│   ├── store/                # Zustand
-│   └── types/
-├── vite.config.ts            # Dev proxy /api (incl. WS) → backend
-├── .env.example
-└── package.json
+│   │   ├── auth/             # ProtectedRoute permission & authentication guard
+│   │   ├── cmdb/             # CMDB asset dialogs, vendor selectors & forms
+│   │   ├── common/           # DataTable (TanStack Table), ConfirmDialog, Pagination, ErrorBoundary
+│   │   ├── device-command-policies/ # Whitelist/blacklist command policy form dialogs
+│   │   ├── layout/           # AppLayout, Sidebar navigation, Header with theme toggle, PageHeader
+│   │   ├── monitor/          # Monitor target form dialogs and schemas
+│   │   ├── ops-assistant/    # [Core] AI Chat components, Turn grouped timeline, HITL approval dialog/cards
+│   │   ├── permissions/      # Permission management form dialogs
+│   │   ├── roles/            # Role management and permission assignment dialogs
+│   │   ├── system-config/    # LLM/Embedding model & operations configuration cards
+│   │   ├── ui/               # 32 atomic shadcn/ui (Base UI) primitive components
+│   │   └── users/            # User CRUD, role assignment, and password reset dialogs
+│   ├── hooks/                # Custom hooks (useOpsChat, useAgentWs, useAuth, usePermission, usePaginatedQuery)
+│   ├── lib/                  # Axios HTTP client, WebSocket helpers, API modules, constants, Hugeicons
+│   ├── pages/                # Route view components (100% lazy-loaded with React.lazy)
+│   ├── store/                # Zustand in-memory authentication state store
+│   ├── types/                # Strict TypeScript contract definitions (Agent, CMDB, Auth, Monitor, etc.)
+│   ├── App.tsx               # App entry point, session bootstrap, and route configuration
+│   ├── index.css             # Tailwind CSS 4 theme variables and global styles
+│   └── main.tsx              # React DOM mounting with ThemeProvider and Sonner Toaster
+├── vite.config.ts            # Vite 8 config with development `/api` & WebSocket proxy
+├── package.json              # Project dependencies and script declarations
+└── tsconfig.json             # Strict TypeScript configuration
 ```
 
-## Setup
+---
+
+## Ops Assistant UI Architecture (`components/ops-assistant/`)
+
+The Ops Assistant chat experience is engineered for multi-turn AI reasoning, tool execution visibility, and seamless Human-In-The-Loop safety workflows:
+
+1. **Turn-Grouped Message Timeline (`ChatMessageList.tsx`)**:
+   - Converts flat WebSocket message streams into logical question-and-answer `Turn`s.
+   - Each turn consists of: (1) Collapsible user question bubble, (2) Collapsible intermediate execution trace, and (3) Assistant final Markdown answer.
+   - User questions and assistant answers feature **sticky floating copy buttons** (`CopyButton.tsx`) that follow the viewport during long text scrolling.
+2. **Intermediate Execution Traces (`ExecutionProcessCollapsible.tsx`)**:
+   - Aggregates internal model thoughts, tool call badges, sub-agent statuses, and HITL approval states.
+   - Expands automatically while generating or awaiting approval; collapses cleanly once the final answer is rendered.
+3. **HITL Global Approval Modal (`HitlApprovalDialog.tsx`)**:
+   - Automatically pops up centered on the screen when a `PENDING` proposal is received.
+   - Integrates the official **Shadcn `InputOTP`** 6-digit credential input for dynamic-password protected assets.
+   - Instantly dismisses upon decision submission without blocking background streaming.
+4. **HITL Timeline Card (`HitlApprovalCard.tsx`)**:
+   - Embedded record within the timeline history.
+   - Supports viewing full device configuration outputs in an expandable drawer with one-click **AI Summary Recovery**.
+5. **Sub-Agent Lifecycle Cards (`ChildAgentStatusCard.tsx`)**:
+   - Displays real-time progress, role indicators, and completion receipts for dynamically spawned child agents.
+6. **Streaming Rich Text (`ChatMarkdown.tsx`)**:
+   - Custom GFM Markdown renderer with optimized styling for code blocks, tables, lists, and quotes.
+
+---
+
+## State Management & Networking
+
+- **`use-ops-chat.ts`**: Core conversation state machine. Loads initial state via REST snapshot before establishing the WebSocket connection to eliminate race conditions. Uses a pure Reducer to merge streaming events.
+- **`use-agent-ws.ts`**: Manages WebSocket connection lifecycle, JWT query parameter authentication, and exponential backoff auto-reconnection (1s to 30s).
+- **`use-auth.ts` & `store/auth.ts`**: In-memory token storage. On page reload, `bootstrap()` transparently exchanges the HttpOnly refresh cookie for a fresh access token without user interruption.
+- **`use-permission.ts`**: Granular RBAC permission checks (`hasPermission`, `hasAnyPermission`, `hasAllPermissions`). Superusers automatically bypass client-side restrictions.
+- **`src/lib/api.ts`**: Central Axios client with response interceptor queueing 401 unauthorized requests and performing seamless token refresh.
+
+---
+
+## Available Pages & Routing
+
+All routes are split into lightweight dynamic chunks via `React.lazy()`:
+
+| Route Path | View Component | Description | Required Permission |
+| --- | --- | --- | --- |
+| `/login` | `LoginPage` | Authentication login page | Public |
+| `/` | `DashboardPage` | Metrics dashboard and quick overview | Authenticated |
+| `/ops-assistant` | `OpsAssistantPage` | AI operations chat assistant | Authenticated (`agent:use`) |
+| `/cmdb` | `CmdbAssetsPage` | CMDB asset table & dependency topology | `cmdb:read` |
+| `/cmdb/trash` | `CmdbAssetsTrashPage` | Soft-deleted asset recycling bin | `cmdb:manage` |
+| `/device-command-policies` | `DeviceCommandPoliciesPage` | Whitelist/blacklist execution rules | `device_command_policy:read` |
+| `/monitor-targets` | `MonitorTargetsPage` | TCP probe targets and live latency | `monitor:read` |
+| `/monitor-logs` | `MonitorLogsPage` | Health probe event history logs | `monitor_log:read` |
+| `/users` | `UsersPage` | User accounts and role assignments | `user:read` |
+| `/roles` | `RolesPage` | Roles and permission bindings | `role:read` |
+| `/permissions` | `PermissionsPage` | System permission catalog tree | `permission:read` |
+| `/system-config` | `SystemConfigPage` | LLM, prices, and operations settings | `system_config:manage` |
+| `/audit` | `AuditLogsPage` | Administrative audit trail logs | `audit:read` |
+| `/profile` | `ProfilePage` | Personal user profile & password update | Authenticated |
+
+---
+
+## Getting Started
+
+### Installation
 
 ```bash
 cd frontend
 cp .env.example .env
-pnpm install   # or: npm install
+
+# Install dependencies
+npm install  # or: pnpm install
 ```
 
-`.env`:
-
-```ini
-VITE_API_BASE_URL=http://localhost:8000/api/v1
-```
-
-Ensure the backend is running and CORS includes `http://localhost:5173`.
-
-In dev, `vite.config.ts` proxies `/api` (including WebSocket upgrades) to `http://127.0.0.1:8000`, so the browser can use same-origin WS paths.
-
-## Scripts
+### Development Server
 
 ```bash
-pnpm run dev         # http://localhost:5173
-pnpm run build       # tsc -b && vite build
-pnpm run typecheck   # tsc -b --force
-pnpm run test        # vitest run
-pnpm run lint
-pnpm run preview
+npm run dev
 ```
 
-## Ops Assistant (`/ops-assistant`)
+Application runs at `http://localhost:5173`. The Vite development server automatically proxies `/api` and WebSocket connections to the backend at `http://127.0.0.1:8000`.
 
-- Sidebar entry: visible to any logged-in user (no extra permission code)
-- Session REST: `/agent/sessions`; send via `POST .../messages` (~300s timeout for a full Agent turn)
-- WebSocket: `/api/v1/ws/agent/{session_id}?access_token=...` carries `assistant_delta` / `tool_call` / `hitl_*` / `monitor_alert` / `error`; exponential reconnect (cap 30s); does not auto-replay an in-flight turn after reconnect
-- **HITL**: WS carries a safe summary only; with `agent:hitl_approve`, HTTP fetches the full payload and calls `/hitl/proposals/{id}/decide`
-- **Knowledge upload**: button gated by `knowledge:upload`; category list needs `knowledge:read` (upload-only users get a clear toast/hint, not a blank dialog)
+---
 
-Implementation: `pages/OpsAssistantPage.tsx`, `hooks/use-ops-chat.ts`, `hooks/use-agent-ws.ts`, `components/ops-assistant/*`.
+## Scripts & Quality Standards
 
-## Auth & permissions (UI)
+```bash
+# Start local Vite development server
+npm run dev
 
-- Access token is kept in memory; refresh token lives in an HttpOnly cookie
-- On startup, `bootstrap()` refreshes once (single-flight) then loads `/me`
-- Menu items and action buttons use `PERMISSIONS` / `ROUTES` from `src/lib/constants.ts`
-- Superusers bypass permission checks in the UI; API still enforces rules server-side
+# Run full Vitest unit test suite (134+ tests)
+npm test
 
-Permission codes match the backend seed (including `knowledge:*`, `cmdb:*`, `monitor:*`, `agent:hitl_approve`).
+# Type-check TypeScript codebase
+npm run typecheck
 
-## Screenshots
+# Code style and ESLint validation
+npm run lint
 
-See the [root README](../README.md#screenshots) gallery (`docs/images/`).
+# Production build (chunk size optimized < 500KB)
+npm run build
 
-## Notes
+# Preview production build locally
+npm run preview
+```
 
-- Prefer Base UI patterns from the installed shadcn components (`render=` instead of Radix `asChild` where applicable)
-- Forms should use the registry `field` components so validation messages surface correctly
-- Icons go through `@/lib/icons` — do not import `@hugeicons/...` ad hoc in pages
-- Use semantic color/typography tokens; prefer flex + gap layouts over decorative card stacks
+---
+
+## License
+
+[MIT](../LICENSE) © lijianqiao
