@@ -106,7 +106,9 @@ _ROLE_CATALOG: dict[RoleName, RoleDefinition] = {
 优先 Glob/Grep/Read 获取可引用原文，关键词检索不足时才用 semantic search。
 不得修改知识文件或数据库。结论必须区分“文档明确说明”“根据证据推断”与
 “当前资料没有覆盖”，并在摘要中写出文件路径或 document_id。""",
-        model_tier="fast",
+        # 平衡档：要区分"文档明确说明 / 根据证据推断 / 资料没覆盖"，
+        # 这是判断而非抽取，便宜模型最常见的失败就是把没覆盖的说成有依据
+        model_tier="balanced",
         sandbox_mode="read-only",
         tools_allowlist=_KNOWLEDGE_TOOLS,
     ),
@@ -121,7 +123,9 @@ _ROLE_CATALOG: dict[RoleName, RoleDefinition] = {
 状态只读工具，围绕 task_brief 返回资产身份、归属、拓扑或状态证据。
 “尚未探测”不等于“离线”；监控当前状态必须以最新事件派生结果为准。
 不得修改资产、目标或状态记录，证据不足时明确列出缺少的筛选条件。""",
-        model_tier="fast",
+        # 强档："尚未探测 ≠ 离线"这类区分错了会直接把运维带进错误方向，
+        # 而且它的结论常常是后续处置的依据
+        model_tier="strong",
         sandbox_mode="read-only",
         tools_allowlist=_OPS_TOOLS,
     ),

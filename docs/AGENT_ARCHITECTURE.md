@@ -286,8 +286,8 @@ classDiagram
 | :--------------------------- | :--------------------- | :------------------------------ | :-------------------------------------------------------- |
 | `root`（主循环，非子 Agent） | 对话模型（登记表可配） | read-only + 可发起 HITL 提案    | 面向用户，常规问答；判断是否需要 spawn                    |
 | `classifier`                 | 快/便宜                | read-only，仅 `knowledge/`      | 批量文档上传后并行归类                                    |
-| `kb_explorer`                | 快                     | read-only，仅 `knowledge/`      | 知识检索（Grep/Glob/Read/SemanticSearch）                 |
-| `ops_explorer`               | 快                     | read-only，仅 CMDB/监控查询工具 | 单一数据源的结构化取证                                    |
+| `kb_explorer`                | 中等推理（`balanced`） | read-only，仅 `knowledge/`      | 知识检索（Grep/Glob/Read/SemanticSearch）                 |
+| `ops_explorer`               | 高推理（`strong`）     | read-only，仅 CMDB/监控查询工具 | 单一数据源的结构化取证                                    |
 | `investigator`               | 中等推理（`balanced`） | read-only，跨数据源只读工具全开 | 根因排查中的一个假设分支（可多个并行）                    |
 | `reviewer`                   | 高推理（`strong`）     | read-only                       | 复核 `classifier` 分类冲突 / 复核 `investigator` 结论汇总 |
 

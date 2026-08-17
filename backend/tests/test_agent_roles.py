@@ -57,8 +57,8 @@ def test_no_role_allows_execution_tools() -> None:
 
 def test_role_model_tiers_match_architecture() -> None:
     assert get_role("classifier").model_tier == "fast"
-    assert get_role("kb_explorer").model_tier == "fast"
-    assert get_role("ops_explorer").model_tier == "fast"
+    assert get_role("kb_explorer").model_tier == "balanced"
+    assert get_role("ops_explorer").model_tier == "strong"
     assert get_role("investigator").model_tier == "balanced"
     # 架构文档写的是"高推理"；配置层的档位键统一叫 strong（LLM_CHAT_STRONG_*）
     assert get_role("reviewer").model_tier == "strong"

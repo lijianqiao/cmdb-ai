@@ -272,34 +272,44 @@ async def agent_session_ws(
             await _close_ws(websocket, _CLOSE_UNAUTHORIZED, "未提供有效认证凭据")
             return
 
+        # 只在 session 块里做判定，**关闭动作留到块外**：给套接字发关闭帧是网络 I/O，
+        # 在它之前必须先把数据库会话还回连接池（本文件开头第 5 条就是这个约定）。
+        # 客户端收到关闭帧的瞬间就会拆掉自己那一侧，如果那时服务端还压着一个待
+        # 归还的会话，连接的 rollback 会在对端已经开始收尾的环境里执行——
+        # 测试里表现为 StaticPool 单连接被 terminate 掉，后面的用例集体遭殃。
+        rejection: tuple[int, str] | None = None
+        payload = None
+        can_read_monitor = False
         async with _auth_db_session(websocket) as db:
             resolved = await _authenticate_and_authorize_user(db, token)
             if resolved is None:
-                await _close_ws(websocket, _CLOSE_UNAUTHORIZED, "Token 无效或已过期")
-                return
-            authorized, payload = resolved
-            if not authorized.user.is_superuser and not authorized.has_permission:
-                await _close_ws(
-                    websocket,
-                    _CLOSE_FORBIDDEN,
-                    f"无权限执行此操作（需要权限：{_AGENT_USE_PERMISSION}）",
-                )
-                return
-            user = authorized.user
+                rejection = (_CLOSE_UNAUTHORIZED, "Token 无效或已过期")
+            else:
+                authorized, payload = resolved
+                user = authorized.user
+                if not user.is_superuser and not authorized.has_permission:
+                    rejection = (
+                        _CLOSE_FORBIDDEN,
+                        f"无权限执行此操作（需要权限：{_AGENT_USE_PERMISSION}）",
+                    )
+                else:
+                    session = await agent_session_crud.get(db, session_id)
+                    if session is None:
+                        rejection = (_CLOSE_NOT_FOUND, "会话不存在")
+                    elif session.user_id != user.id or session.status != "active":
+                        rejection = (_CLOSE_FORBIDDEN, "无权访问该会话")
+                    else:
+                        can_read_monitor = await _can_read_monitor(
+                            db,
+                            user_id=user.id,
+                            family_id=payload.sid,
+                            token_version=payload.ver,
+                        )
 
-            session = await agent_session_crud.get(db, session_id)
-            if session is None:
-                await _close_ws(websocket, _CLOSE_NOT_FOUND, "会话不存在")
-                return
-            if session.user_id != user.id or session.status != "active":
-                await _close_ws(websocket, _CLOSE_FORBIDDEN, "无权访问该会话")
-                return
-            can_read_monitor = await _can_read_monitor(
-                db,
-                user_id=user.id,
-                family_id=payload.sid,
-                token_version=payload.ver,
-            )
+        if rejection is not None or payload is None:
+            code, reason = rejection or (_CLOSE_UNAUTHORIZED, "Token 无效或已过期")
+            await _close_ws(websocket, code, reason)
+            return
 
         await hub.connect(session_id, websocket, can_read_monitor=can_read_monitor)
         registered = True
