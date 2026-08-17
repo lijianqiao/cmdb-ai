@@ -150,7 +150,12 @@ async def upload_document(
         )
     except DuplicateDocumentError as exc:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=f"内容重复的文档已存在: id={exc.document_id}"
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"这份内容已存在：《{exc.title}》(ID {exc.document_id})。"
+                "知识库按正文去重，同一份内容换个分类重传也会命中；"
+                "如果确实要替换，请先删除原文档。"
+            ),
         ) from exc
 
     await log_audit(
@@ -308,6 +313,10 @@ async def classify_documents_endpoint(
     )
     await db.commit()
     return success_response(
-        KnowledgeClassifyResponse(suggested=outcome.suggested, skipped=outcome.skipped),
+        KnowledgeClassifyResponse(
+            suggested=outcome.suggested,
+            skipped=outcome.skipped,
+            unchanged=outcome.unchanged,
+        ),
         message=f"已生成 {outcome.suggested} 份建议",
     )

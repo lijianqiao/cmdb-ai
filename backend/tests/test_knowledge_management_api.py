@@ -310,7 +310,7 @@ async def test_classify_single_document_writes_suggestion_without_spawning(
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["data"] == {"suggested": 1, "skipped": 0}
+    assert response.json()["data"] == {"suggested": 1, "skipped": 0, "unchanged": 0}
 
     listed = await client.get(
         "/api/v1/knowledge/documents",
@@ -349,7 +349,7 @@ async def test_classify_skips_unknown_category_from_model(
         headers=auth_headers,
     )
 
-    assert response.json()["data"] == {"suggested": 0, "skipped": 1}
+    assert response.json()["data"] == {"suggested": 0, "skipped": 1, "unchanged": 0}
 
 
 async def test_classify_strips_markdown_fence_from_model_output(
@@ -365,9 +365,12 @@ async def test_classify_strips_markdown_fence_from_model_output(
     await _grant_knowledge_permissions(db_session, test_user)
     monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
     await _create_category(client, auth_headers, "sop")
+    await _create_category(client, auth_headers, "topology")
+    # 文档放在 topology、模型答 sop：这样围栏被正确剥掉时结果才是一条真建议，
+    # 而不是「维持原分类」——否则本用例会被 unchanged 分支掩盖掉解析失败
     document = await _upload(
         client, auth_headers, title="围栏", filename="h.md",
-        content=b"fenced", category_code="sop",
+        content=b"fenced", category_code="topology",
     )
     _stub_chat(
         monkeypatch,
@@ -380,7 +383,7 @@ async def test_classify_strips_markdown_fence_from_model_output(
         headers=auth_headers,
     )
 
-    assert response.json()["data"] == {"suggested": 1, "skipped": 0}
+    assert response.json()["data"] == {"suggested": 1, "skipped": 0, "unchanged": 0}
 
 
 async def test_classify_requires_manage_permission(
@@ -501,3 +504,78 @@ async def test_document_content_requires_read_permission_and_404s_when_missing(
         "/api/v1/knowledge/documents/999999/content", headers=auth_headers
     )
     assert missing.status_code == 404
+
+
+async def test_classify_does_not_persist_a_suggestion_equal_to_current_category(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    stub_embedding: None,
+) -> None:
+    """模型认为当前分类正确时不落库，单独计入 unchanged。
+
+    落一条「建议 == 现分类」的记录会在管理页留下一个死结：应用它分类不会变，
+    不应用它又一直挂在「待确认」里清不掉。
+    """
+    await _grant_knowledge_permissions(db_session, test_user)
+    monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
+    await _create_category(client, auth_headers, "sop")
+    document = await _upload(
+        client, auth_headers, title="已经归好类", filename="s.md",
+        content=b"sop content", category_code="sop",
+    )
+    # 模型给出的正是它当前所在的分类
+    _stub_chat(
+        monkeypatch,
+        '{"category":"sop","confidence":0.95,"reason":"就是 SOP"}',
+    )
+
+    response = await client.post(
+        "/api/v1/knowledge/documents/classify",
+        json={"document_ids": [document["id"]]},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"] == {"suggested": 0, "skipped": 0, "unchanged": 1}
+
+    row = await knowledge_document_crud.get(db_session, int(document["id"]))
+    assert row is not None
+    await db_session.refresh(row)
+    assert row.suggested_category_id is None
+
+
+async def test_duplicate_upload_error_names_the_conflicting_document(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    stub_embedding: None,
+) -> None:
+    """重复上传要说清撞的是哪一份，只报 id 等于没报。"""
+    await _grant_knowledge_permissions(db_session, test_user)
+    monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
+    await _create_category(client, auth_headers, "sop")
+    await _upload(
+        client, auth_headers, title="交换机重启手册", filename="a.md",
+        content=b"identical body", category_code="sop",
+    )
+
+    # 同样内容、不同文件名、换个分类，仍应命中去重（去重是全库范围的）
+    await _create_category(client, auth_headers, "topology")
+    duplicate = await client.post(
+        "/api/v1/knowledge/documents",
+        data={"title": "另一个名字", "category_code": "topology"},
+        files={"file": ("b.md", b"identical body", "text/markdown")},
+        headers=auth_headers,
+    )
+
+    assert duplicate.status_code == 409, duplicate.text
+    detail = duplicate.text
+    assert "交换机重启手册" in detail
+    assert "换个分类" in detail

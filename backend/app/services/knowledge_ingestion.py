@@ -22,11 +22,21 @@ _DEFAULT_CHUNK_OVERLAP = 100
 
 
 class DuplicateDocumentError(ValueError):
-    """Raised when a document with identical content already exists (active, not deleted)."""
+    """Raised when a document with identical content already exists (active, not deleted).
 
-    def __init__(self, document_id: int) -> None:
+    去重是**全库范围**的，不按分类隔离：同一份内容换个分类再传一次，检索时会命中
+    两份一模一样的切片，等于稀释召回质量。
+
+    带上标题是因为只报 id 等于没报——用户看到 "id=4" 无从知道撞的是哪一份，
+    也就无法判断该放弃上传还是该先删掉旧的那份。
+    """
+
+    def __init__(self, document_id: int, title: str = "") -> None:
         self.document_id = document_id
-        super().__init__(f"a document with identical content already exists: id={document_id}")
+        self.title = title
+        super().__init__(
+            f"a document with identical content already exists: id={document_id}"
+        )
 
 
 def chunk_text(
@@ -78,7 +88,7 @@ async def ingest_document(
     content_hash = hashlib.sha256(content).hexdigest()
     existing = await knowledge_document_crud.get_by_content_hash(db, content_hash)
     if existing is not None:
-        raise DuplicateDocumentError(existing.id)
+        raise DuplicateDocumentError(existing.id, existing.title)
 
     document = await knowledge_document_crud.create(
         db,

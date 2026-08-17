@@ -130,6 +130,8 @@ export async function applyDocumentCategory(
 export interface KnowledgeClassifyResult {
   suggested: number
   skipped: number
+  /** 模型认为当前分类就是对的：不是失败，也不会产生可应用的建议 */
+  unchanged: number
 }
 
 /**

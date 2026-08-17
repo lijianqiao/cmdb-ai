@@ -85,13 +85,14 @@ describe("KnowledgePage", () => {
     expect(categoryTrigger).not.toHaveTextContent("__all__")
   })
 
-  it("「应用本页建议」只统计真正会改变归属的建议", async () => {
-    // 建议等于当前分类时应用了也不会有任何变化，却会把建议清空——
-    // 先前批量按钮把这种也算进计数，用户点完看到分类没变、建议也没了
+  it("批量计数与行内「应用」按钮的可用性完全一致", async () => {
+    // 这两处先前各写了一套判定，批量把「建议 == 当前分类」也算进计数，
+    // 点下去每份都被 PATCH 成它本来就在的分类：分类没变、建议却被清空了。
+    // 现在共用 isApplicableSuggestion，这条断言把「两边必须一致」钉死。
     vi.mocked(usePaginatedQuery).mockReturnValue({
       items: [
         buildDocument({ id: 1, category_id: 1, suggested_category_id: 2 }),
-        buildDocument({ id: 2, category_id: 1, suggested_category_id: 1 }),
+        buildDocument({ id: 2, category_id: 1, suggested_category_id: 3 }),
         buildDocument({ id: 3, category_id: 1, suggested_category_id: null }),
       ],
       total: 3,
@@ -105,9 +106,15 @@ describe("KnowledgePage", () => {
 
     render(<KnowledgePage />)
 
-    expect(
-      await screen.findByRole("button", { name: /应用本页建议（1）/ }),
-    ).toBeInTheDocument()
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /应用本页建议（2）/ }),
+      ).toBeInTheDocument(),
+    )
+    const applyButtons = screen
+      .getAllByRole("button", { name: "应用" })
+      .filter((button) => !button.hasAttribute("disabled"))
+    expect(applyButtons).toHaveLength(2)
   })
 
   it("列表每一行都提供预览入口", async () => {

@@ -49,17 +49,18 @@ const ALL_CATEGORIES = "__all__"
 const MAX_CLASSIFY_BATCH = 50
 
 /**
- * 这条建议应用之后会真的改变归属吗？
+ * 这条建议可以应用吗？
  *
- * 行内「应用」按钮和「应用本页建议」必须用**同一个**判定：先前行内按钮排除了
- * 「建议 == 当前分类」而批量计数没排除，于是按钮显示可点、点下去每份都被 PATCH
- * 成它本来就在的分类——分类纹丝不动，建议却被清空了，用户完全看不出发生了什么。
+ * 行内「应用」按钮和「应用本页建议」必须用**同一个**判定，两边各写一套是先前
+ * 那个「点了没反应」bug 的直接原因。
+ *
+ * 判定就是「有没有建议」：后端已经不再落库「建议 == 当前分类」的记录
+ * （见 SuggestionOutcome.unchanged），所以只要存在建议，应用就一定会改变归属。
+ * 早于该修复写入的历史行仍可能建议等于现分类，对它们点应用相当于确认并清除建议——
+ * 也是合理的出口，总好过留一个永远灰着、又清不掉的死结。
  */
 function isApplicableSuggestion(document: KnowledgeDocument): boolean {
-  return (
-    document.suggested_category_id != null &&
-    document.suggested_category_id !== document.category_id
-  )
+  return document.suggested_category_id != null
 }
 
 export function KnowledgePage() {
@@ -159,13 +160,21 @@ export function KnowledgePage() {
     setIsClassifying(true)
     try {
       const result = await classifyDocuments(selectedIds)
+      // unchanged 不是失败：模型认为当前分类就是对的，所以没有建议可应用。
+      // 不单独说明的话，用户会以为是分析失败了。
+      const details = [
+        result.unchanged > 0 ? `${result.unchanged} 份维持原分类` : "",
+        result.skipped > 0 ? `${result.skipped} 份未能给出建议` : "",
+      ].filter(Boolean)
+      const suffix = details.length > 0 ? `（${details.join("，")}）` : ""
       if (result.suggested === 0) {
-        toast.warning("没有生成任何建议，请检查分类是否已配置或稍后重试")
-      } else {
-        toast.success(
-          `已生成 ${result.suggested} 份建议` +
-            (result.skipped > 0 ? `，${result.skipped} 份未能给出建议` : ""),
+        toast.warning(
+          details.length > 0
+            ? `没有需要调整的分类${suffix}`
+            : "没有生成任何建议，请检查分类是否已配置或稍后重试",
         )
+      } else {
+        toast.success(`已生成 ${result.suggested} 份建议${suffix}`)
       }
       setSelectedIds([])
       await refetch()

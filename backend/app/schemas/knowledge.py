@@ -64,6 +64,8 @@ class KnowledgeClassifyResponse(ApiModel):
 
     suggested: int
     skipped: int
+    # 模型认为当前分类就是对的：既不是建议也不是失败，单列一档才说得清
+    unchanged: int = 0
 
 
 class KnowledgeDocumentContentResponse(ApiModel):

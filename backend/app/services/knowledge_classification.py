@@ -21,6 +21,7 @@ kb_semantic_search 的召回都依赖分类范围。让人过一眼的成本远�
 import json
 import logging
 from dataclasses import dataclass
+from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,12 +48,18 @@ _SINGLE_DOC_SYSTEM_PROMPT = """你是运维知识文档分类器。
 {"category":"code 或空字符串","confidence":0到1的小数,"reason":"一句有正文依据的中文理由"}"""
 
 
+type SuggestionKind = Literal["suggested", "unchanged", "skipped"]
+
+
 @dataclass(frozen=True, slots=True)
 class SuggestionOutcome:
     """一次建议请求的结果统计，用于给调用方组装响应消息。"""
 
     suggested: int
     skipped: int
+    # 模型认为当前分类就是对的。这不是失败，也不落库——落一条「建议 = 现分类」
+    # 的记录只会在管理页留下一个点了没反应、又清不掉的死结。
+    unchanged: int = 0
 
 
 def _category_menu(categories: list[KnowledgeCategory]) -> str:
@@ -97,18 +104,18 @@ async def _suggest_one(
     db: AsyncSession,
     document: KnowledgeDocument,
     categories: list[KnowledgeCategory],
-) -> bool:
+) -> SuggestionKind:
     """为单份文档生成建议；直接调 llm.chat，不 spawn。
 
     Returns:
-        True 表示已写入建议；False 表示本次没拿到可用建议（正文读不到、
-        模型输出无法解析、或建议的 code 不在候选里）。
+        "suggested" 已写入建议；"unchanged" 模型认为当前分类正确（不落库）；
+        "skipped" 没拿到可用建议（正文读不到、输出无法解析、code 不在候选里）。
     """
     try:
         excerpt = read_document_file(document.file_path, limit=_CLASSIFY_EXCERPT_CHARS)
     except (FileNotFoundError, OSError):
         logger.warning("分类建议跳过：正文读取失败 document_id=%s", document.id)
-        return False
+        return "skipped"
 
     result = await chat(
         # 便宜档：与 classifier 子 Agent（批量入口）保持同档，
@@ -130,11 +137,11 @@ async def _suggest_one(
     )
     if result.finish_reason == "error":
         logger.warning("分类建议跳过：模型调用失败 document_id=%s", document.id)
-        return False
+        return "skipped"
 
     parsed = _parse_single_suggestion(result.content)
     if parsed is None:
-        return False
+        return "skipped"
     code, confidence, reason = parsed
 
     by_code = {category.code: category for category in categories}
@@ -142,7 +149,10 @@ async def _suggest_one(
     if target is None:
         # 模型编了一个不存在的 code。不落库，避免管理页出现指向空分类的建议。
         logger.info("分类建议跳过：模型给出未知分类 code=%r document_id=%s", code, document.id)
-        return False
+        return "skipped"
+
+    if target.id == document.category_id:
+        return "unchanged"
 
     await knowledge_document_crud.save_suggestion(
         db,
@@ -151,7 +161,7 @@ async def _suggest_one(
         confidence=confidence,
         reason=reason,
     )
-    return True
+    return "suggested"
 
 
 async def _suggest_batch(
@@ -160,8 +170,8 @@ async def _suggest_batch(
     categories: list[KnowledgeCategory],
     *,
     actor_user_id: int,
-) -> int:
-    """两份及以上走 classify_documents 编排工作流；返回写入建议的份数。
+) -> tuple[int, int]:
+    """两份及以上走 classify_documents 编排工作流；返回 (写入建议数, 维持原分类数)。
 
     工作流需要一个真实 AgentSession（AgentRegistry 外键约束），这里临时建一个、
     跑完即删。建议已经落到文档行，子 Agent 的对话记录没有保留价值，留着只会
@@ -211,10 +221,15 @@ async def _suggest_batch(
         logger.warning("批量分类工作流失败：%s", outcome.workflow_failure)
 
     suggested = 0
+    unchanged = 0
     for item in outcome.suggestions:
         document = by_id.get(item.document_id)
         target = by_code.get(item.recommended_category)
         if document is None or target is None:
+            continue
+        if target.id == document.category_id:
+            # 与单份路径同样处理：建议等于现分类就不落库，见 SuggestionOutcome.unchanged
+            unchanged += 1
             continue
         await knowledge_document_crud.save_suggestion(
             db,
@@ -224,7 +239,7 @@ async def _suggest_batch(
             reason=item.reason,
         )
         suggested += 1
-    return suggested
+    return suggested, unchanged
 
 
 async def suggest_categories(
@@ -264,10 +279,18 @@ async def suggest_categories(
         return SuggestionOutcome(suggested=0, skipped=len(documents))
 
     if len(documents) == 1:
-        ok = await _suggest_one(db, documents[0], categories)
-        return SuggestionOutcome(suggested=int(ok), skipped=int(not ok))
+        kind = await _suggest_one(db, documents[0], categories)
+        return SuggestionOutcome(
+            suggested=int(kind == "suggested"),
+            skipped=int(kind == "skipped"),
+            unchanged=int(kind == "unchanged"),
+        )
 
-    suggested = await _suggest_batch(
+    suggested, unchanged = await _suggest_batch(
         db, documents, categories, actor_user_id=actor_user_id
     )
-    return SuggestionOutcome(suggested=suggested, skipped=len(documents) - suggested)
+    return SuggestionOutcome(
+        suggested=suggested,
+        skipped=len(documents) - suggested - unchanged,
+        unchanged=unchanged,
+    )
