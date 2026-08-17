@@ -37,7 +37,12 @@ function formatTarget(policy: DeviceCommandPolicy): string {
       ASSET_TYPE_LABELS[policy.asset_type ?? ""] ?? policy.asset_type
     return `类型：${label}`
   }
-  return `资产 #${policy.asset_id}`
+  if (policy.asset) {
+    const typeLabel =
+      ASSET_TYPE_LABELS[policy.asset.asset_type] ?? policy.asset.asset_type
+    return `${policy.asset.hostname} (${policy.asset.ip_address}) · ${typeLabel}`
+  }
+  return `设备 #${policy.asset_id}`
 }
 
 export function DeviceCommandPoliciesTrashPage() {
@@ -97,15 +102,55 @@ export function DeviceCommandPoliciesTrashPage() {
       {
         id: "target",
         header: "目标",
-        cell: ({ row }) => (
-          <span className="font-medium">{formatTarget(row.original)}</span>
-        ),
+        cell: ({ row }) => {
+          const policy = row.original
+          if (policy.scope === "asset_type") {
+            const label =
+              ASSET_TYPE_LABELS[policy.asset_type ?? ""] ?? policy.asset_type
+            return (
+              <span
+                className="block max-w-[200px] truncate font-medium text-foreground"
+                title={`类型：${label}`}
+              >
+                类型：{label}
+              </span>
+            )
+          }
+          if (policy.asset) {
+            const typeLabel =
+              ASSET_TYPE_LABELS[policy.asset.asset_type] ?? policy.asset.asset_type
+            return (
+              <div
+                className="flex flex-col min-w-0 max-w-[220px]"
+                title={`${policy.asset.hostname} (${policy.asset.ip_address}) · ${typeLabel}`}
+              >
+                <span className="truncate font-medium text-foreground">
+                  {policy.asset.hostname}
+                </span>
+                <span className="truncate font-mono text-xs text-muted-foreground">
+                  {policy.asset.ip_address} · {typeLabel}
+                </span>
+              </div>
+            )
+          }
+          return (
+            <span
+              className="block max-w-[180px] truncate font-medium text-foreground"
+              title={`设备 #${policy.asset_id}`}
+            >
+              设备 #{policy.asset_id}
+            </span>
+          )
+        },
       },
       {
         accessorKey: "command_name",
         header: "命令名",
         cell: ({ row }) => (
-          <code className="rounded bg-muted px-1.5 py-0.5 text-sm">
+          <code
+            className="inline-block max-w-[220px] truncate rounded bg-muted px-1.5 py-0.5 text-xs font-mono"
+            title={row.original.command_name}
+          >
             {row.original.command_name}
           </code>
         ),
@@ -116,7 +161,14 @@ export function DeviceCommandPoliciesTrashPage() {
         cell: ({ row }) => {
           const isWhitelist = row.original.decision === "whitelist"
           return (
-            <Badge variant={isWhitelist ? "default" : "destructive"}>
+            <Badge
+              variant={isWhitelist ? "secondary" : "destructive"}
+              className={
+                isWhitelist
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-medium"
+                  : undefined
+              }
+            >
               {isWhitelist ? "白名单" : "黑名单"}
             </Badge>
           )
@@ -125,8 +177,11 @@ export function DeviceCommandPoliciesTrashPage() {
       {
         accessorKey: "updated_at",
         header: "删除时间",
-        cell: ({ row }) =>
-          dayjs(row.original.updated_at).format("YYYY-MM-DD HH:mm"),
+        cell: ({ row }) => (
+          <span className="whitespace-nowrap text-xs text-muted-foreground">
+            {dayjs(row.original.updated_at).format("YYYY-MM-DD HH:mm")}
+          </span>
+        ),
       },
       {
         id: "actions",

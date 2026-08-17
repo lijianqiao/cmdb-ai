@@ -72,19 +72,34 @@ export function RolesTrashPage() {
         accessorKey: "name",
         header: "角色名",
         cell: ({ row }) => (
-          <span className="font-medium">{row.original.name}</span>
+          <span
+            className="block max-w-[160px] truncate font-medium"
+            title={row.original.name}
+          >
+            {row.original.name}
+          </span>
         ),
       },
       {
         accessorKey: "description",
         header: "描述",
-        cell: ({ row }) => row.original.description || "-",
+        cell: ({ row }) => (
+          <span
+            className="block max-w-xs line-clamp-2 text-sm text-muted-foreground"
+            title={row.original.description || undefined}
+          >
+            {row.original.description || "-"}
+          </span>
+        ),
       },
       {
         accessorKey: "updated_at",
         header: "删除时间",
-        cell: ({ row }) =>
-          dayjs(row.original.updated_at).format("YYYY-MM-DD HH:mm"),
+        cell: ({ row }) => (
+          <span className="whitespace-nowrap text-xs text-muted-foreground">
+            {dayjs(row.original.updated_at).format("YYYY-MM-DD HH:mm")}
+          </span>
+        ),
       },
       {
         id: "actions",

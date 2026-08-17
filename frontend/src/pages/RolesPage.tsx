@@ -148,13 +148,25 @@ export function RolesPage() {
         accessorKey: "name",
         header: "角色名",
         cell: ({ row }) => (
-          <span className="font-medium">{row.original.name}</span>
+          <span
+            className="block max-w-[160px] truncate font-medium"
+            title={row.original.name}
+          >
+            {row.original.name}
+          </span>
         ),
       },
       {
         accessorKey: "description",
         header: "描述",
-        cell: ({ row }) => row.original.description || "-",
+        cell: ({ row }) => (
+          <span
+            className="block max-w-xs line-clamp-2 text-sm text-muted-foreground"
+            title={row.original.description || undefined}
+          >
+            {row.original.description || "-"}
+          </span>
+        ),
       },
       {
         id: "permission_count",

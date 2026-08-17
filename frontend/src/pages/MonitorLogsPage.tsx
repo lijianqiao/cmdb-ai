@@ -79,7 +79,10 @@ export function MonitorLogsPage() {
         accessorKey: "label",
         header: "标签",
         cell: ({ row }) => (
-          <span className="font-medium">
+          <span
+            className="block max-w-[180px] truncate font-medium"
+            title={row.original.label || `${row.original.ip_address}:${row.original.port}`}
+          >
             {row.original.label || `${row.original.ip_address}:${row.original.port}`}
           </span>
         ),
@@ -106,7 +109,7 @@ export function MonitorLogsPage() {
         accessorKey: "latency_ms",
         header: "延迟",
         cell: ({ row }) => (
-          <span className="text-sm">
+          <span className="font-mono text-sm">
             {row.original.latency_ms == null
               ? "—"
               : `${row.original.latency_ms} ms`}
@@ -117,7 +120,10 @@ export function MonitorLogsPage() {
         accessorKey: "detail",
         header: "详情",
         cell: ({ row }) => (
-          <span className="text-sm text-muted-foreground">
+          <span
+            className="block max-w-xs line-clamp-2 text-sm text-muted-foreground"
+            title={row.original.detail || undefined}
+          >
             {row.original.detail || "-"}
           </span>
         ),
@@ -125,8 +131,11 @@ export function MonitorLogsPage() {
       {
         accessorKey: "checked_at",
         header: "探测时间",
-        cell: ({ row }) =>
-          dayjs(row.original.checked_at).format("YYYY-MM-DD HH:mm:ss"),
+        cell: ({ row }) => (
+          <span className="whitespace-nowrap text-xs text-muted-foreground">
+            {dayjs(row.original.checked_at).format("YYYY-MM-DD HH:mm:ss")}
+          </span>
+        ),
       },
     ],
     [],

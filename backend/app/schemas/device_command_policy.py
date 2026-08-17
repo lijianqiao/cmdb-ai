@@ -74,6 +74,17 @@ class DeviceCommandPolicyUpdate(ApiModel):
         return self
 
 
+class CmdbAssetBrief(ApiModel):
+    """关联的 CMDB 资产基础信息摘要。"""
+
+    id: int
+    hostname: str
+    ip_address: str
+    asset_type: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class DeviceCommandPolicyResponse(ApiModel):
     """Public policy representation."""
 
@@ -87,5 +98,6 @@ class DeviceCommandPolicyResponse(ApiModel):
     created_by_user_id: int | None
     created_at: datetime
     updated_at: datetime
+    asset: CmdbAssetBrief | None = None
 
     model_config = ConfigDict(from_attributes=True)

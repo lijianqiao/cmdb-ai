@@ -89,6 +89,10 @@ function getBreadcrumbs(pathname: string): Crumb[] {
       { label: "设备命令策略", path: ROUTES.DEVICE_COMMAND_POLICIES },
       { label: "回收站" },
     ],
+    [ROUTES.KNOWLEDGE]: [
+      { label: "运维管理" },
+      { label: "知识库" },
+    ],
     [ROUTES.PROFILE]: [{ label: "个人中心" }],
     [ROUTES.MONITOR_LOGS]: [
       { label: "日志管理" },

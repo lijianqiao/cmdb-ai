@@ -73,25 +73,45 @@ export function UsersTrashPage() {
         accessorKey: "username",
         header: "用户名",
         cell: ({ row }) => (
-          <span className="font-medium">{row.original.username}</span>
+          <span
+            className="block max-w-[150px] truncate font-medium"
+            title={row.original.username}
+          >
+            {row.original.username}
+          </span>
         ),
       },
       {
         accessorKey: "email",
         header: "邮箱",
+        cell: ({ row }) => (
+          <span
+            className="block max-w-[180px] truncate text-sm"
+            title={row.original.email}
+          >
+            {row.original.email}
+          </span>
+        ),
       },
       {
         accessorKey: "nickname",
         header: "昵称",
-        cell: ({ row }) => row.original.nickname || "-",
+        cell: ({ row }) => (
+          <span
+            className="block max-w-[150px] truncate text-sm text-muted-foreground"
+            title={row.original.nickname || undefined}
+          >
+            {row.original.nickname || "-"}
+          </span>
+        ),
       },
       {
         id: "roles",
         header: "角色",
         cell: ({ row }) => (
-          <div className="flex flex-wrap gap-1">
+          <div className="flex max-w-xs flex-wrap gap-1">
             {row.original.roles?.map((role) => (
-              <Badge key={role.id} variant="secondary">
+              <Badge key={role.id} variant="secondary" className="truncate max-w-[120px]">
                 {role.name}
               </Badge>
             )) ?? <span className="text-muted-foreground">-</span>}
@@ -101,8 +121,11 @@ export function UsersTrashPage() {
       {
         accessorKey: "updated_at",
         header: "删除时间",
-        cell: ({ row }) =>
-          dayjs(row.original.updated_at).format("YYYY-MM-DD HH:mm"),
+        cell: ({ row }) => (
+          <span className="whitespace-nowrap text-xs text-muted-foreground">
+            {dayjs(row.original.updated_at).format("YYYY-MM-DD HH:mm")}
+          </span>
+        ),
       },
       {
         id: "actions",

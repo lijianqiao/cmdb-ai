@@ -10,6 +10,11 @@ import { z } from "zod"
 import dayjs from "dayjs"
 import { toast } from "sonner"
 
+import {
+  UserCircleIcon,
+  ViewIcon,
+  ViewOffSlashIcon,
+} from "@/lib/icons"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -28,11 +33,19 @@ import {
   FieldTitle,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from "@/components/ui/input-group"
 import { Progress } from "@/components/ui/progress"
+import { Spinner } from "@/components/ui/spinner"
 import { PageHeader } from "@/components/layout/PageHeader"
 import api from "@/lib/api"
 import { useAuthStore } from "@/store/auth"
 import type { CurrentUser } from "@/types/user"
+import { cn } from "@/lib/utils"
 
 const profileSchema = z.object({
   nickname: z.string().max(50).optional().default(""),
@@ -78,6 +91,9 @@ export function ProfilePage() {
   })
 
   const [newPassword, setNewPassword] = useState("")
+  const [showOldPassword, setShowOldPassword] = useState(false)
+  const [showNewPassword, setShowNewPassword] = useState(false)
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false)
 
   useEffect(() => {
     const fetchProfile = async () => {
@@ -95,7 +111,7 @@ export function ProfilePage() {
         // 忽略
       }
     }
-    fetchProfile()
+    void fetchProfile()
   }, [profileForm])
 
   const handleProfileSubmit = async (data: ProfileFormData) => {
@@ -133,15 +149,53 @@ export function ProfilePage() {
   const passwordStrength = getPasswordStrength(newPassword)
 
   return (
-    <div>
-      <PageHeader title="个人中心" description="管理个人信息和密码" />
+    <div className="flex flex-col gap-6">
+      <PageHeader title="个人中心" description="管理个人资料、账号绑定角色与安全密码" />
+
+      {/* 顶部个人信息概览名片 */}
+      <div className="flex flex-col gap-4 rounded-xl border bg-card p-5 shadow-2xs sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-4">
+          <div className="flex size-14 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary [&_svg]:size-8">
+            <UserCircleIcon />
+          </div>
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <span className="text-lg font-semibold text-foreground">
+                {profile?.nickname || profile?.username || "当前用户"}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                @{profile?.username}
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {profile?.roles?.length ? (
+                profile.roles.map((role) => (
+                  <Badge key={role.id} variant="secondary" className="text-xs">
+                    {role.name}
+                  </Badge>
+                ))
+              ) : (
+                <span className="text-xs text-muted-foreground">暂无分配角色</span>
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-col gap-0.5 border-t pt-3 text-xs text-muted-foreground sm:border-t-0 sm:border-l sm:pl-6 sm:pt-0">
+          <span>注册时间</span>
+          <span className="font-mono text-foreground">
+            {profile?.created_at
+              ? dayjs(profile.created_at).format("YYYY-MM-DD HH:mm:ss")
+              : "-"}
+          </span>
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* 个人信息 */}
+        {/* 个人资料修改 */}
         <Card>
           <CardHeader>
-            <CardTitle>个人信息</CardTitle>
-            <CardDescription>修改您的个人资料</CardDescription>
+            <CardTitle>个人资料</CardTitle>
+            <CardDescription>修改您的昵称和系统联系邮箱</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={profileForm.handleSubmit(handleProfileSubmit)}>
@@ -153,7 +207,7 @@ export function ProfilePage() {
                     value={profile?.username ?? ""}
                     disabled
                   />
-                  <FieldDescription>用户名创建后不可修改。</FieldDescription>
+                  <FieldDescription>用户名创建后由系统维护，不可自行修改。</FieldDescription>
                 </Field>
                 <Controller
                   control={profileForm.control}
@@ -189,8 +243,8 @@ export function ProfilePage() {
                   )}
                 />
                 <Field>
-                  <FieldTitle>角色</FieldTitle>
-                  <div className="flex flex-wrap gap-2">
+                  <FieldTitle>所属角色</FieldTitle>
+                  <div className="flex flex-wrap gap-1.5">
                     {profile?.roles?.length ? (
                       profile.roles.map((role) => (
                         <Badge key={role.id} variant="secondary">
@@ -218,7 +272,14 @@ export function ProfilePage() {
                     disabled
                   />
                 </Field>
-                <Button type="submit" className="w-fit">
+                <Button
+                  type="submit"
+                  className="w-fit"
+                  disabled={profileForm.formState.isSubmitting}
+                >
+                  {profileForm.formState.isSubmitting && (
+                    <Spinner data-icon="inline-start" />
+                  )}
                   保存修改
                 </Button>
               </FieldGroup>
@@ -230,7 +291,7 @@ export function ProfilePage() {
         <Card>
           <CardHeader>
             <CardTitle>修改密码</CardTitle>
-            <CardDescription>定期修改密码以提高安全性</CardDescription>
+            <CardDescription>定期修改密码以保障您的账号安全</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={passwordForm.handleSubmit(handlePasswordSubmit)}>
@@ -241,14 +302,31 @@ export function ProfilePage() {
                   render={({ field, fieldState }) => (
                     <Field data-invalid={fieldState.invalid}>
                       <FieldLabel htmlFor="old-password">旧密码</FieldLabel>
-                      <Input
-                        id="old-password"
-                        type="password"
-                        autoComplete="current-password"
-                        placeholder="请输入旧密码"
-                        aria-invalid={fieldState.invalid}
-                        {...field}
-                      />
+                      <InputGroup>
+                        <InputGroupInput
+                          id="old-password"
+                          type={showOldPassword ? "text" : "password"}
+                          autoComplete="current-password"
+                          placeholder="请输入旧密码"
+                          aria-invalid={fieldState.invalid}
+                          {...field}
+                        />
+                        <InputGroupAddon align="inline-end">
+                          <InputGroupButton
+                            type="button"
+                            size="icon-xs"
+                            aria-label={showOldPassword ? "隐藏密码" : "显示密码"}
+                            aria-pressed={showOldPassword}
+                            onClick={() => setShowOldPassword((prev) => !prev)}
+                          >
+                            {showOldPassword ? (
+                              <ViewOffSlashIcon />
+                            ) : (
+                              <ViewIcon />
+                            )}
+                          </InputGroupButton>
+                        </InputGroupAddon>
+                      </InputGroup>
                       <FieldError errors={[fieldState.error]} />
                     </Field>
                   )}
@@ -259,29 +337,58 @@ export function ProfilePage() {
                   render={({ field, fieldState }) => (
                     <Field data-invalid={fieldState.invalid}>
                       <FieldLabel htmlFor="new-password">新密码</FieldLabel>
-                      <Input
-                        id="new-password"
-                        type="password"
-                        autoComplete="new-password"
-                        placeholder="至少 8 个字符"
-                        aria-invalid={fieldState.invalid}
-                        {...field}
-                        onChange={(event) => {
-                          field.onChange(event)
-                          setNewPassword(event.target.value)
-                        }}
-                      />
+                      <InputGroup>
+                        <InputGroupInput
+                          id="new-password"
+                          type={showNewPassword ? "text" : "password"}
+                          autoComplete="new-password"
+                          placeholder="至少 8 个字符"
+                          aria-invalid={fieldState.invalid}
+                          {...field}
+                          onChange={(event) => {
+                            field.onChange(event)
+                            setNewPassword(event.target.value)
+                          }}
+                        />
+                        <InputGroupAddon align="inline-end">
+                          <InputGroupButton
+                            type="button"
+                            size="icon-xs"
+                            aria-label={showNewPassword ? "隐藏密码" : "显示密码"}
+                            aria-pressed={showNewPassword}
+                            onClick={() => setShowNewPassword((prev) => !prev)}
+                          >
+                            {showNewPassword ? (
+                              <ViewOffSlashIcon />
+                            ) : (
+                              <ViewIcon />
+                            )}
+                          </InputGroupButton>
+                        </InputGroupAddon>
+                      </InputGroup>
                       {newPassword && (
-                        <div className="flex flex-col gap-1">
+                        <div className="flex flex-col gap-1.5 pt-1">
                           <Progress value={passwordStrength} />
-                          <FieldDescription>
-                            密码强度：
-                            {passwordStrength < 50
-                              ? "弱"
-                              : passwordStrength < 75
-                                ? "中"
-                                : "强"}
-                          </FieldDescription>
+                          <div className="flex items-center justify-between text-xs text-muted-foreground">
+                            <span>密码强度要求：包含大小写、数字与特殊符号</span>
+                            <span
+                              className={cn(
+                                "font-medium",
+                                passwordStrength < 50
+                                  ? "text-destructive"
+                                  : passwordStrength < 75
+                                    ? "text-amber-500"
+                                    : "text-emerald-600 dark:text-emerald-400",
+                              )}
+                            >
+                              强度：
+                              {passwordStrength < 50
+                                ? "弱"
+                                : passwordStrength < 75
+                                  ? "中"
+                                  : "强"}
+                            </span>
+                          </div>
                         </div>
                       )}
                       <FieldError errors={[fieldState.error]} />
@@ -296,19 +403,43 @@ export function ProfilePage() {
                       <FieldLabel htmlFor="confirm-password">
                         确认新密码
                       </FieldLabel>
-                      <Input
-                        id="confirm-password"
-                        type="password"
-                        autoComplete="new-password"
-                        placeholder="请再次输入新密码"
-                        aria-invalid={fieldState.invalid}
-                        {...field}
-                      />
+                      <InputGroup>
+                        <InputGroupInput
+                          id="confirm-password"
+                          type={showConfirmPassword ? "text" : "password"}
+                          autoComplete="new-password"
+                          placeholder="请再次输入新密码"
+                          aria-invalid={fieldState.invalid}
+                          {...field}
+                        />
+                        <InputGroupAddon align="inline-end">
+                          <InputGroupButton
+                            type="button"
+                            size="icon-xs"
+                            aria-label={showConfirmPassword ? "隐藏密码" : "显示密码"}
+                            aria-pressed={showConfirmPassword}
+                            onClick={() => setShowConfirmPassword((prev) => !prev)}
+                          >
+                            {showConfirmPassword ? (
+                              <ViewOffSlashIcon />
+                            ) : (
+                              <ViewIcon />
+                            )}
+                          </InputGroupButton>
+                        </InputGroupAddon>
+                      </InputGroup>
                       <FieldError errors={[fieldState.error]} />
                     </Field>
                   )}
                 />
-                <Button type="submit" className="w-fit">
+                <Button
+                  type="submit"
+                  className="w-fit"
+                  disabled={passwordForm.formState.isSubmitting}
+                >
+                  {passwordForm.formState.isSubmitting && (
+                    <Spinner data-icon="inline-start" />
+                  )}
                   确认修改
                 </Button>
               </FieldGroup>
@@ -319,3 +450,4 @@ export function ProfilePage() {
     </div>
   )
 }
+

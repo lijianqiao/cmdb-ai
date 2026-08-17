@@ -7,9 +7,10 @@ app/crud/device_command_policy.py::resolve_policy。
 """
 
 from sqlalchemy import Boolean, ForeignKey, Integer, String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+from app.models.cmdb_asset import CmdbAsset
 
 
 class DeviceCommandPolicy(Base, TimestampMixin):
@@ -30,6 +31,10 @@ class DeviceCommandPolicy(Base, TimestampMixin):
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+
+    asset: Mapped[CmdbAsset | None] = relationship(
+        "CmdbAsset", lazy="joined", foreign_keys=[asset_id]
+    )
 
     def __repr__(self) -> str:
         return (

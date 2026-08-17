@@ -148,8 +148,30 @@ export function CmdbAssetsPage() {
 
   const columns = useMemo<ColumnDef<CmdbAsset>[]>(
     () => [
-      { accessorKey: "hostname", header: "主机名" },
-      { accessorKey: "ip_address", header: "IP 地址" },
+      {
+        accessorKey: "hostname",
+        header: "主机名",
+        cell: ({ row }) => (
+          <span
+            className="block max-w-[180px] truncate font-medium"
+            title={row.original.hostname}
+          >
+            {row.original.hostname}
+          </span>
+        ),
+      },
+      {
+        accessorKey: "ip_address",
+        header: "IP 地址",
+        cell: ({ row }) => (
+          <span
+            className="block max-w-[160px] truncate font-mono text-sm"
+            title={row.original.ip_address}
+          >
+            {row.original.ip_address}
+          </span>
+        ),
+      },
       {
         accessorKey: "asset_type",
         header: "类型",
@@ -169,7 +191,14 @@ export function CmdbAssetsPage() {
       {
         accessorKey: "business_system",
         header: "业务系统",
-        cell: ({ row }) => row.original.business_system || "-",
+        cell: ({ row }) => (
+          <span
+            className="block max-w-[160px] truncate text-sm text-muted-foreground"
+            title={row.original.business_system || undefined}
+          >
+            {row.original.business_system || "-"}
+          </span>
+        ),
       },
       {
         id: "credential",
@@ -192,8 +221,11 @@ export function CmdbAssetsPage() {
       {
         accessorKey: "created_at",
         header: "创建时间",
-        cell: ({ row }) =>
-          dayjs(row.original.created_at).format("YYYY-MM-DD HH:mm"),
+        cell: ({ row }) => (
+          <span className="whitespace-nowrap text-xs text-muted-foreground">
+            {dayjs(row.original.created_at).format("YYYY-MM-DD HH:mm")}
+          </span>
+        ),
       },
       {
         id: "actions",

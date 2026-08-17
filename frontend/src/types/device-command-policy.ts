@@ -14,6 +14,12 @@ export interface DeviceCommandPolicy {
   created_by_user_id: number | null
   created_at: string
   updated_at: string
+  asset?: {
+    id: number
+    hostname: string
+    ip_address: string
+    asset_type: string
+  } | null
 }
 
 export interface DeviceCommandPolicyCreate {

@@ -77,15 +77,34 @@ export function CmdbAssetsTrashPage() {
         accessorKey: "hostname",
         header: "主机名",
         cell: ({ row }) => (
-          <span className="font-medium">{row.original.hostname}</span>
+          <span
+            className="block max-w-[180px] truncate font-medium"
+            title={row.original.hostname}
+          >
+            {row.original.hostname}
+          </span>
         ),
       },
-      { accessorKey: "ip_address", header: "IP 地址" },
+      {
+        accessorKey: "ip_address",
+        header: "IP 地址",
+        cell: ({ row }) => (
+          <span
+            className="block max-w-[160px] truncate font-mono text-sm"
+            title={row.original.ip_address}
+          >
+            {row.original.ip_address}
+          </span>
+        ),
+      },
       {
         accessorKey: "updated_at",
         header: "删除时间",
-        cell: ({ row }) =>
-          dayjs(row.original.updated_at).format("YYYY-MM-DD HH:mm"),
+        cell: ({ row }) => (
+          <span className="whitespace-nowrap text-xs text-muted-foreground">
+            {dayjs(row.original.updated_at).format("YYYY-MM-DD HH:mm")}
+          </span>
+        ),
       },
       {
         id: "actions",
