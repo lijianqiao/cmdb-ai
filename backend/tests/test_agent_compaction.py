@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.budget import Budget
 from app.agent.compaction import (
     COMPACT_TOOL_RESULT_CHAR_LIMIT,
+    TOOL_RESULT_UNTRUSTED_PREFIX,
     _drop_leading_orphan_tools,
     _messages_to_summarize,
     ensure_root_compaction,
@@ -229,7 +230,15 @@ async def test_compaction_truncates_long_tool_results(
     sent = captured["messages"]
     tool_texts = [m.content for m in sent if m.role == "tool"]
     assert tool_texts
-    assert all(len(t or "") <= COMPACT_TOOL_RESULT_CHAR_LIMIT for t in tool_texts)
+    for text in tool_texts:
+        body = text or ""
+        # 不可信标记必须在截断**之后**加：先加再截会把标记本身切掉，防护就没了。
+        # 所以断言的是「正文部分」不超限，而不是整条消息。
+        assert body.startswith(TOOL_RESULT_UNTRUSTED_PREFIX)
+        assert (
+            len(body.removeprefix(TOOL_RESULT_UNTRUSTED_PREFIX))
+            <= COMPACT_TOOL_RESULT_CHAR_LIMIT
+        )
 
 
 @pytest.mark.asyncio

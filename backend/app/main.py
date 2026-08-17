@@ -32,6 +32,7 @@ from app.crud.role import RoleInUseError
 from app.crud.user import LastActiveSuperuserError
 from app.services.cmdb_diff import run_cmdb_diff_loop
 from app.services.monitor_sweep import run_monitor_sweep_loop
+from app.services.session_cleanup import run_session_cleanup_loop
 
 
 def configure_logging() -> None:
@@ -124,7 +125,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     monitor_task = asyncio.create_task(run_monitor_sweep_loop(), name="monitor_sweep")
     diff_task = asyncio.create_task(run_cmdb_diff_loop(), name="cmdb_diff")
     gc_task = asyncio.create_task(run_receipt_gc_loop(spawn_manager), name="receipt_gc")
-    background_tasks = (monitor_task, diff_task, gc_task)
+    cleanup_task = asyncio.create_task(run_session_cleanup_loop(), name="session_cleanup")
+    background_tasks = (monitor_task, diff_task, gc_task, cleanup_task)
     for task in background_tasks:
         task.add_done_callback(_warn_on_background_task_death)
     yield

@@ -109,6 +109,17 @@ class Settings(BaseSettings):
         default=120.0, gt=0, allow_inf_nan=False
     )
     AGENT_CLOSE_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    # turn 租约超时。超过这个时长的租约会被下一次请求接管，避免进程存活但 turn
+    # 任务已经消失时会话被永久锁死（进程重启有 recover_active_turns 兜底，
+    # 但进程不重启就没人清）。
+    #
+    # ⚠️ 这个值必须**大于**单轮最坏耗时，否则会抢占一个还在正常执行的 turn，
+    # 造成两个 turn 并发写同一份 transcript——那比卡住更糟。
+    # 最坏耗时 ≈ AGENT_CHILD_MAX_STEPS × (LLM 超时 + DEVICE_COMMAND_CONN + READ)
+    #          = 20 × (60 + 15 + 60) = 2700 秒。默认 3600 留出余量。
+    AGENT_TURN_LEASE_TIMEOUT_SECONDS: float = Field(default=3600.0, gt=0, le=86_400)
+    # refresh 会话历史清理的轮询间隔（后台循环，见 services/session_cleanup.py）
+    SESSION_CLEANUP_INTERVAL_SECONDS: float = Field(default=3600.0, ge=60, le=86_400)
     AGENT_TERMINAL_RECEIPT_TTL_SECONDS: float = Field(
         default=300.0, ge=0, allow_inf_nan=False
     )

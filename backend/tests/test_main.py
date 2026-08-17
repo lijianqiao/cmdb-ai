@@ -49,6 +49,7 @@ async def test_lifespan_orders_reconcile_background_tasks_and_shutdown(
     monitor_started = asyncio.Event()
     diff_started = asyncio.Event()
     gc_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
     real_create_task = asyncio.create_task
 
     def tracking_create_task(
@@ -98,6 +99,14 @@ async def test_lifespan_orders_reconcile_background_tasks_and_shutdown(
             events.append("gc-cancelled")
             raise
 
+    async def fake_cleanup_loop() -> None:
+        cleanup_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("cleanup-cancelled")
+            raise
+
     class _FakeEngine:
         async def dispose(self) -> None:
             events.append("engine-dispose")
@@ -117,6 +126,7 @@ async def test_lifespan_orders_reconcile_background_tasks_and_shutdown(
     monkeypatch.setattr(main_module, "run_monitor_sweep_loop", fake_monitor_loop)
     monkeypatch.setattr(main_module, "run_cmdb_diff_loop", fake_diff_loop)
     monkeypatch.setattr(main_module, "run_receipt_gc_loop", fake_gc_loop)
+    monkeypatch.setattr(main_module, "run_session_cleanup_loop", fake_cleanup_loop)
     monkeypatch.setattr(main_module, "validate_single_worker_environment", fake_validate_workers)
     monkeypatch.setattr(main_module, "reconcile_executing_proposals", fake_hitl_reconcile)
     monkeypatch.setattr(main_module, "AsyncSessionLocal", _FakeSessionContext)
@@ -133,7 +143,10 @@ async def test_lifespan_orders_reconcile_background_tasks_and_shutdown(
         # gets a chance to execute at all.
         async with asyncio.timeout(1):
             await asyncio.gather(
-                monitor_started.wait(), diff_started.wait(), gc_started.wait()
+                monitor_started.wait(),
+                diff_started.wait(),
+                gc_started.wait(),
+                cleanup_started.wait(),
             )
 
     assert events.index("validate-workers") < events.index("hitl-reconcile")
@@ -142,8 +155,22 @@ async def test_lifespan_orders_reconcile_background_tasks_and_shutdown(
     assert events.index("reconcile") < events.index("yielded")
     assert events.index("gc-cancelled") < events.index("spawn-shutdown")
     assert events.index("spawn-shutdown") < events.index("engine-dispose")
-    assert {"monitor-cancelled", "diff-cancelled", "gc-cancelled"} <= set(events)
+    assert {
+        "monitor-cancelled",
+        "diff-cancelled",
+        "gc-cancelled",
+        "cleanup-cancelled",
+    } <= set(events)
 
-    assert len(created_tasks) == 3
-    assert all(task.done() for task in created_tasks)
-    assert all(task.cancelled() for task in created_tasks)
+    # 按名字筛选而不是数原始条数：tracking_create_task 替换的是全局
+    # asyncio.create_task，会捕获进程里其它来源（如 SQLAlchemy greenlet 桥）
+    # 创建的 task，用裸计数会随无关实现变化而误报。
+    lifespan_tasks = [
+        task
+        for task in created_tasks
+        if task.get_name()
+        in {"monitor_sweep", "cmdb_diff", "receipt_gc", "session_cleanup"}
+    ]
+    assert len(lifespan_tasks) == 4
+    assert all(task.done() for task in lifespan_tasks)
+    assert all(task.cancelled() for task in lifespan_tasks)
