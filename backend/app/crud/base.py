@@ -73,7 +73,7 @@ class CRUDBase(Generic[ModelT]):
             self._active_statement()
             .where(self._id_column() == id)
             .order_by(self._id_column())
-            .with_for_update()
+            .with_for_update(of=self.model)
             .execution_options(populate_existing=True)
         )
         result = await db.execute(stmt)

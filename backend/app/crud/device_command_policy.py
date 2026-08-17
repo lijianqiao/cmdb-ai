@@ -102,7 +102,7 @@ class CRUDDeviceCommandPolicy(CRUDBase[DeviceCommandPolicy]):
         stmt = (
             select(DeviceCommandPolicy)
             .where(DeviceCommandPolicy.id == id, DeviceCommandPolicy.is_deleted.is_(True))
-            .with_for_update()
+            .with_for_update(of=DeviceCommandPolicy)
             .execution_options(populate_existing=True)
         )
         policy = (await db.execute(stmt)).scalar_one_or_none()
@@ -131,7 +131,7 @@ class CRUDDeviceCommandPolicy(CRUDBase[DeviceCommandPolicy]):
         stmt = (
             select(DeviceCommandPolicy)
             .where(DeviceCommandPolicy.id == id, DeviceCommandPolicy.is_deleted.is_(True))
-            .with_for_update()
+            .with_for_update(of=DeviceCommandPolicy)
             .execution_options(populate_existing=True)
         )
         policy = (await db.execute(stmt)).scalar_one_or_none()

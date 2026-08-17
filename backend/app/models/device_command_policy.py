@@ -33,7 +33,7 @@ class DeviceCommandPolicy(Base, TimestampMixin):
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
 
     asset: Mapped[CmdbAsset | None] = relationship(
-        "CmdbAsset", lazy="joined", foreign_keys=[asset_id]
+        "CmdbAsset", lazy="selectin", foreign_keys=[asset_id]
     )
 
     def __repr__(self) -> str:
