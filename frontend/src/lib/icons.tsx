@@ -47,6 +47,7 @@ import {
   AiChat01Icon as AiChat01,
   BubbleChatIcon as BubbleChat,
   SentIcon as Sent,
+  StopIcon as Stop,
   Alert02Icon as Alert02,
   Upload01Icon as Upload01,
   ServerStack02Icon as Server02,
@@ -114,6 +115,7 @@ export const ViewOffSlashIcon = makeIcon(ViewOffSlash)
 export const AiChat01Icon = makeIcon(AiChat01)
 export const BubbleChatIcon = makeIcon(BubbleChat)
 export const SentIcon = makeIcon(Sent)
+export const StopIcon = makeIcon(Stop)
 export const Alert02Icon = makeIcon(Alert02)
 export const Upload01Icon = makeIcon(Upload01)
 export const Server02Icon = makeIcon(Server02)

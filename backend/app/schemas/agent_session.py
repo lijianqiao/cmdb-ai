@@ -56,6 +56,16 @@ class AgentChatTurnResponse(ApiModel):
     control: str | None = None
 
 
+class AgentTurnCancelResponse(ApiModel):
+    """撤回请求的结果。
+
+    cancelled=False 表示当时没有正在跑的 turn（已经答完、或已经被停过一次），
+    这不是错误：用户连点两次「停止」不该看到报错。
+    """
+
+    cancelled: bool
+
+
 class AgentMessageResponse(ApiModel):
     """根 transcript 中的一条消息（已落库字段）。"""
 

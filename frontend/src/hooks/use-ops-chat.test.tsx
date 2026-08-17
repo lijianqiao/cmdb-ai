@@ -15,6 +15,7 @@ import { useOpsChat } from "./use-ops-chat"
 vi.mock("@/lib/agent-api", () => ({
   getAgentSessionSnapshot: vi.fn(),
   postAgentMessage: vi.fn(),
+  cancelAgentTurn: vi.fn(),
 }))
 
 vi.mock("@/hooks/use-agent-ws", () => ({
@@ -29,6 +30,7 @@ vi.mock("sonner", () => ({
 }))
 
 import {
+  cancelAgentTurn,
   getAgentSessionSnapshot,
   postAgentMessage,
 } from "@/lib/agent-api"
@@ -36,6 +38,7 @@ import { useAgentWs } from "@/hooks/use-agent-ws"
 
 const mockGetSnapshot = vi.mocked(getAgentSessionSnapshot)
 const mockPostMessage = vi.mocked(postAgentMessage)
+const mockCancelTurn = vi.mocked(cancelAgentTurn)
 const mockUseAgentWs = vi.mocked(useAgentWs)
 
 function deferred<T>() {
@@ -396,5 +399,51 @@ describe("useOpsChat snapshot recovery", () => {
     rerender({ sessionId: 8 })
 
     await waitFor(() => expect(result.current.isLoadingOlder).toBe(false))
+  })
+
+  it("生成中调用 cancelTurn 会撤回本轮请求", async () => {
+    mockGetSnapshot.mockResolvedValue(buildSnapshot())
+    const pendingPost = deferred<{
+      reason: string
+      final_answer: null
+      control: null
+    }>()
+    mockPostMessage.mockReturnValueOnce(pendingPost.promise)
+    mockCancelTurn.mockResolvedValue(true)
+
+    const { result } = renderHook(() => useOpsChat({ sessionId: 9 }))
+    await waitFor(() => expect(mockGetSnapshot).toHaveBeenCalledTimes(1))
+
+    let sendPromise!: Promise<void>
+    act(() => {
+      sendPromise = result.current.sendMessage("查一下核心交换机")
+    })
+    await waitFor(() => expect(result.current.isSending).toBe(true))
+
+    await act(async () => {
+      await result.current.cancelTurn()
+    })
+    expect(mockCancelTurn).toHaveBeenCalledWith(9)
+
+    // 收尾仍由那条 POST 自己完成：解除 isSending 并重新拉快照
+    pendingPost.resolve({ reason: "cancelled", final_answer: null, control: null })
+    await act(async () => {
+      await sendPromise
+    })
+    expect(result.current.isSending).toBe(false)
+    expect(mockGetSnapshot).toHaveBeenCalledTimes(2)
+  })
+
+  it("没有正在生成的回答时 cancelTurn 不发请求", async () => {
+    mockGetSnapshot.mockResolvedValue(buildSnapshot())
+
+    const { result } = renderHook(() => useOpsChat({ sessionId: 10 }))
+    await waitFor(() => expect(mockGetSnapshot).toHaveBeenCalledTimes(1))
+
+    await act(async () => {
+      await result.current.cancelTurn()
+    })
+
+    expect(mockCancelTurn).not.toHaveBeenCalled()
   })
 })

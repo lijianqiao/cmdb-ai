@@ -22,6 +22,7 @@
    用一次批量 ID 查询计算，正文绝不进入快照。
 """
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -38,7 +39,9 @@ from app.agent.device_result_summary import (
     SummaryInProgressError,
     deliver_device_query_summary,
 )
+from app.agent.loop import LoopOutcome
 from app.agent.session import append_user_message
+from app.agent.turn_registry import turn_registry
 from app.agent.ws_hub import BufferedWsHitlEventPublisher, hub
 from app.core.database import get_db
 from app.core.deps import require_permission
@@ -61,6 +64,7 @@ from app.schemas.agent_session import (
     AgentSessionCreate,
     AgentSessionResponse,
     AgentSessionSnapshotResponse,
+    AgentTurnCancelResponse,
     ChildAgentSnapshotResponse,
     DeviceQueryResultResponse,
     HitlProposalSafeResponse,
@@ -494,6 +498,37 @@ async def get_session_snapshot(
     )
 
 
+async def _finalize_turn(db: AsyncSession, session_id: int, turn_token: str) -> None:
+    """丢弃本轮未提交内容并释放 turn 租约，任何失败都不让异常盖掉响应。
+
+    正常路径就是原来的 rollback → release → commit 三步。
+
+    多一层兜底是因为取消可能正好打断一次数据库操作，SQLAlchemy 明确说明这种情况下
+    连接状态不可预期，`db` 后续可能整个不可用。租约释放不了的话，用户要一直等到
+    AGENT_TURN_LEASE_TIMEOUT_SECONDS 超时才能再发消息——而「停下来马上重问」正是
+    点停止的人想做的事，所以这里换一个独立会话再试一次。
+    """
+    try:
+        await db.rollback()
+        await agent_session_crud.release_turn(db, session_id, turn_token)
+        await db.commit()
+        return
+    except Exception:
+        logger.warning(
+            "会话 %s 释放租约时原会话不可用，改用独立会话重试", session_id, exc_info=True
+        )
+
+    engine = db.bind
+    if engine is None:
+        return
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as fresh_db:
+            await agent_session_crud.release_turn(fresh_db, session_id, turn_token)
+            await fresh_db.commit()
+    except Exception:
+        logger.exception("会话 %s 释放租约彻底失败，只能等租约超时兜底", session_id)
+
+
 @router.post(
     "/sessions/{session_id}/messages",
     response_model=ResponseEnvelope[AgentChatTurnResponse],
@@ -523,13 +558,44 @@ async def post_session_message(
     try:
         await append_user_message(db, session_id, body.content)
         await db.commit()
-        outcome = await run_chat_turn(
-            db,
-            session_id=session_id,
-            actor_user_id=current_user.id,
-            publisher=hitl_publisher,
+        # 包成 task 才能被取消端点拿到句柄。await task 本身被取消时（客户端断开、
+        # 进程关停）asyncio 会把取消传进 task，所以这层包装不改变断开时的既有行为。
+        #
+        # **必须等用户消息提交之后再起 task**：create_task 之后的第一个 await 就会
+        # 把控制权交给它，提前起会让它和上面两行同时用同一个 db 会话，而 AsyncSession
+        # 不是并发安全的（症状是 "Session.add() ... within the execution stage of
+        # the flush process" 然后整轮 500）。
+        turn_task = asyncio.create_task(
+            run_chat_turn(
+                db,
+                session_id=session_id,
+                actor_user_id=current_user.id,
+                publisher=hitl_publisher,
+            ),
+            name=f"turn:{session_id}",
         )
+        turn_registry.register(session_id, turn_token, turn_task)
+        outcome = await turn_task
         await db.commit()
+    except asyncio.CancelledError:
+        # 只有用户主动点「停止」才转成正常响应；客户端断开或进程关停必须原样传播，
+        # 吞掉那种取消会让关停挂住、或留下一个永远返回不了的请求。
+        if not turn_registry.was_cancelled_by_user(session_id, turn_token):
+            raise
+        # C2：本轮已产出的 assistant/tool 消息随 finally 的 rollback 一并丢弃，
+        # 不保留、不写取消标记（项目所有者决定，见 design-turn-cancellation.md §10）。
+        outcome = LoopOutcome(reason="cancelled", final_answer=None)
+        # 先 flush 再播 turn_done：取消如果正好打断一次自动批准的执行，
+        # execute_approved_proposal 会在它自己的短会话里把提案落成 UNKNOWN 并
+        # 经同一个 publisher 发事件，前端要先收到那张卡片的更新再收到「本轮结束」。
+        await hitl_publisher.flush()
+        await hub.broadcast(
+            session_id,
+            AgentWsServerMessage(
+                type="turn_done",
+                payload={"reason": "cancelled", "control": None},
+            ),
+        )
     except Exception as exc:
         await db.rollback()
         await hitl_publisher.flush()
@@ -538,9 +604,8 @@ async def post_session_message(
             detail="本轮对话处理失败，请稍后重试",
         ) from exc
     finally:
-        await db.rollback()
-        await agent_session_crud.release_turn(db, session_id, turn_token)
-        await db.commit()
+        turn_registry.unregister(session_id, turn_token)
+        await _finalize_turn(db, session_id, turn_token)
 
     await hitl_publisher.flush()
     return success_response(
@@ -550,4 +615,29 @@ async def post_session_message(
             control=outcome.control,
         ),
         message="处理完成",
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/turn/cancel",
+    response_model=ResponseEnvelope[AgentTurnCancelResponse],
+)
+async def cancel_session_turn(
+    session_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("agent:use")),
+) -> ResponseEnvelope[AgentTurnCancelResponse]:
+    """
+    撤回本次提问，立即中止正在跑的这一轮回答。
+
+    本轮已经生成但未提交的助手消息与工具结果全部丢弃，会话回到发消息之前的样子；
+    租约随即释放，用户可以马上重新提问。
+
+    幂等：没有正在跑的 turn 时返回 200 + cancelled=false，不报错。
+    """
+    await _owned_session_or_404(db, session_id, current_user.id)
+    outcome = turn_registry.request_cancel(session_id, by_user_id=current_user.id)
+    return success_response(
+        AgentTurnCancelResponse(cancelled=outcome.cancelled),
+        message="已停止本轮回答" if outcome.cancelled else "本轮回答已经结束",
     )

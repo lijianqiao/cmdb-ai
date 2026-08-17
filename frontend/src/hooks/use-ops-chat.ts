@@ -9,6 +9,7 @@ import { toast } from "sonner"
 
 import {
   getAgentSessionSnapshot,
+  cancelAgentTurn,
   postAgentMessage,
 } from "@/lib/agent-api"
 import { useAgentWs, type AgentWsStatus } from "@/hooks/use-agent-ws"
@@ -573,6 +574,8 @@ export interface UseOpsChatResult {
   monitorAlert: Record<string, unknown> | null
   clearMonitorAlert: () => void
   sendMessage: (content: string) => Promise<void>
+  /** 撤回本轮请求，立即停止这次回答 */
+  cancelTurn: () => Promise<void>
   reloadSnapshot: () => Promise<void>
   loadOlder: () => Promise<void>
   hasMore: boolean
@@ -885,6 +888,18 @@ export function useOpsChat({
     [sessionId, isSending, reloadSnapshot],
   )
 
+  const cancelTurn = useCallback(async (): Promise<void> => {
+    if (sessionId == null || !isSending) return
+    try {
+      // 只发一个撤回请求就够了：真正的收尾（丢弃本轮内容、解除 isSending、
+      // 重新拉快照）由那条还挂着的 POST 在它自己的 finally 里完成。
+      const cancelled = await cancelAgentTurn(sessionId)
+      if (cancelled) toast.success("已停止本轮回答")
+    } catch {
+      toast.error("停止失败，请稍后重试")
+    }
+  }, [sessionId, isSending])
+
   const clearMonitorAlert = useCallback(() => {
     setMonitorAlert(null)
   }, [])
@@ -899,6 +914,7 @@ export function useOpsChat({
     monitorAlert,
     clearMonitorAlert,
     sendMessage,
+    cancelTurn,
     reloadSnapshot,
     loadOlder,
     hasMore,

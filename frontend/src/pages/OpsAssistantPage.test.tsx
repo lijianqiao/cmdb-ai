@@ -184,6 +184,7 @@ describe("OpsAssistantPage 完整配置会话隔离", () => {
       monitorAlert: null,
       clearMonitorAlert: vi.fn(),
       sendMessage: vi.fn(),
+      cancelTurn: vi.fn(),
       reloadSnapshot: vi.fn(),
       loadOlder: vi.fn(),
       hasMore: false,

@@ -168,6 +168,25 @@ export async function postAgentMessage(
   return response.data.data
 }
 
+/**
+ * 撤回本次提问，立即中止正在跑的这一轮回答。
+ *
+ * 本轮已生成但未提交的助手消息全部丢弃；用户自己那条提问保留。
+ * 幂等：本轮已经结束时返回 cancelled=false，不是错误。
+ *
+ * Args:
+ *   sessionId: 会话 ID
+ *
+ * Returns:
+ *   是否真的中止了一轮正在跑的回答
+ */
+export async function cancelAgentTurn(sessionId: number): Promise<boolean> {
+  const response = await api.post<ApiResponse<{ cancelled: boolean }>>(
+    `/agent/sessions/${sessionId}/turn/cancel`,
+  )
+  return response.data.data.cancelled
+}
+
 /** 点击展开后按会话归属读取已保存的完整设备查询结果。 */
 export async function getDeviceQueryResult(
   sessionId: number,

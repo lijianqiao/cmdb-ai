@@ -3,9 +3,9 @@
  * InputGroup：左侧审批档位选择器 + Textarea + 发送按钮同一行、等高对齐；Enter 发送、Shift+Enter 换行。
  */
 
-import { useState, type KeyboardEvent } from "react"
+import { useEffect, useState, type KeyboardEvent } from "react"
 
-import { SentIcon } from "@/lib/icons"
+import { SentIcon, StopIcon } from "@/lib/icons"
 import {
   InputGroup,
   InputGroupAddon,
@@ -36,10 +36,14 @@ export interface ChatInputProps {
   approvalMode: ApprovalMode | null
   onApprovalModeSelect: (mode: ApprovalMode) => void
   onSend: (content: string) => void | Promise<void>
+  onCancel?: () => void | Promise<void>
 }
 
 /**
  * 聊天输入与发送按钮（单行、等高）。
+ *
+ * 生成中时鼠标移到按钮上会变成红色的停止按钮：不额外占位置，又能让人发现
+ * 「这一轮可以停掉」。没传 onCancel 时保持原来的纯展示态。
  *
  * Args:
  *   disabled: 禁用输入（无会话或发送中由页面传入）
@@ -48,6 +52,7 @@ export interface ChatInputProps {
  *   approvalMode: 当前会话已保存的审批档位
  *   onApprovalModeSelect: 用户选择新档位（由页面处理 PATCH / 确认弹窗）
  *   onSend: 提交非空正文
+ *   onCancel: 撤回本轮请求；传了才会出现停止态
  */
 export function ChatInput({
   disabled = false,
@@ -56,8 +61,19 @@ export function ChatInput({
   approvalMode,
   onApprovalModeSelect,
   onSend,
+  onCancel,
 }: ChatInputProps) {
   const [value, setValue] = useState("")
+  const [hovered, setHovered] = useState(false)
+
+  const canStop = isSending && onCancel != null
+  const showStop = canStop && hovered
+
+  // 本轮结束后按钮会变回「发送」，此时若鼠标仍停在原处，mouseleave 不会再触发，
+  // 悬停态就会一直挂着，下一轮刚开始就直接显示成停止按钮。
+  useEffect(() => {
+    if (!isSending) setHovered(false)
+  }, [isSending])
 
   const submit = async (): Promise<void> => {
     const trimmed = value.trim()
@@ -120,19 +136,33 @@ export function ChatInput({
       >
         <InputGroupButton
           type="button"
-          variant="default"
+          variant={showStop ? "destructive" : "default"}
           size="xs"
           className="h-8 gap-1.5 rounded-md px-2.5 text-sm"
-          disabled={disabled || isSending || (!isSending && !value.trim())}
-          onClick={() => void submit()}
-          aria-label={isSending ? "生成中" : "发送"}
+          disabled={
+            canStop ? false : disabled || isSending || !value.trim()
+          }
+          onMouseEnter={() => setHovered(true)}
+          onMouseLeave={() => setHovered(false)}
+          onFocus={() => setHovered(true)}
+          onBlur={() => setHovered(false)}
+          onClick={() => {
+            if (showStop) {
+              void onCancel?.()
+              return
+            }
+            void submit()
+          }}
+          aria-label={showStop ? "停止生成" : isSending ? "生成中" : "发送"}
         >
-          {isSending ? (
+          {showStop ? (
+            <StopIcon data-icon="inline-start" />
+          ) : isSending ? (
             <Spinner data-icon="inline-start" />
           ) : (
             <SentIcon data-icon="inline-start" />
           )}
-          {isSending ? "生成中..." : "发送"}
+          {showStop ? "停止" : isSending ? "生成中..." : "发送"}
         </InputGroupButton>
       </InputGroupAddon>
     </InputGroup>

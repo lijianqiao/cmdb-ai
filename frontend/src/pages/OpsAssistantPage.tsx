@@ -95,6 +95,7 @@ export function OpsAssistantPage() {
     monitorAlert,
     clearMonitorAlert,
     sendMessage,
+    cancelTurn,
     reloadSnapshot,
     loadOlder,
     hasMore,
@@ -518,6 +519,8 @@ export function OpsAssistantPage() {
                   approvalMode={approvalMode}
                   onApprovalModeSelect={handleApprovalModeSelect}
                   onSend={sendMessage}
+                  // HITL 执行中不给停止入口：那一轮不是 chat turn，停不掉
+                  onCancel={isExecutingHitl ? undefined : cancelTurn}
                 />
               </div>
             </>

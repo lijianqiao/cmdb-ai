@@ -64,9 +64,15 @@ async def _default_after_tool_call(
 
 @dataclass(frozen=True, slots=True)
 class LoopOutcome:
-    """Why the loop stopped, and its final text if it produced one."""
+    """Why the loop stopped, and its final text if it produced one.
 
-    reason: Literal["final_answer", "budget_exceeded", "early_exit", "llm_error"]
+    `cancelled` 不由 run_loop 自己产生——它是用户主动中止时由 API 层构造的，
+    放在同一个枚举里是为了让 AgentChatTurnResponse 只有一个 reason 字段。
+    """
+
+    reason: Literal[
+        "final_answer", "budget_exceeded", "early_exit", "llm_error", "cancelled"
+    ]
     final_answer: str | None
     control: ToolControl | None = None
 
