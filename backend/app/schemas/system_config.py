@@ -46,31 +46,63 @@ def normalize_base_url(value: str) -> str:
     return trimmed
 
 
-class LlmSystemConfigUpdate(ApiModel):
-    """更新 LLM 与 Embedding 运行配置。"""
+type ChatTier = Literal["fast", "balanced", "strong"]
 
-    chat_base_url: str = Field(min_length=1, max_length=2048)
-    chat_api_key: SecretStr | None = Field(default=None, max_length=4096)
-    clear_chat_api_key: bool = False
-    chat_model: str = Field(min_length=1, max_length=200)
-    chat_input_cost_per_million_usd: float = Field(ge=0, allow_inf_nan=False)
-    chat_output_cost_per_million_usd: float = Field(ge=0, allow_inf_nan=False)
+CHAT_TIERS: tuple[ChatTier, ...] = ("fast", "balanced", "strong")
+
+
+class ChatTierUpdate(ApiModel):
+    """单个 chat 档位的配置更新。
+
+    便宜档与强档允许 base_url / model 留空——那表示"这一档没配"，
+    运行时整档回退到平衡档。平衡档不允许留空，由 LlmSystemConfigUpdate 统一校验：
+    它是回退目标，空了就没有任何一档可用。
+    """
+
+    base_url: str = Field(default="", max_length=2048)
+    api_key: SecretStr | None = Field(default=None, max_length=4096)
+    clear_api_key: bool = False
+    model: str = Field(default="", max_length=200)
+    input_cost_per_million_usd: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    output_cost_per_million_usd: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+
+    @field_validator("base_url", mode="before")
+    @classmethod
+    def validate_base_url(cls, value: object) -> str:
+        """校验并规范化 Base URL；空串直接放行，代表这一档未配置。"""
+        text = str(value).strip()
+        return normalize_base_url(text) if text else ""
+
+    @model_validator(mode="after")
+    def reject_conflicting_api_key_update(self) -> Self:
+        """禁止同一次请求同时提交新 Key 与清空标志。"""
+        if self.clear_api_key and self.api_key is not None:
+            raise ValueError("不能同时提交新的 api_key 与 clear_api_key=true")
+        return self
+
+
+class LlmSystemConfigUpdate(ApiModel):
+    """更新 LLM 三档 chat 与 Embedding 运行配置。"""
+
+    chat_fast: ChatTierUpdate = Field(default_factory=ChatTierUpdate)
+    chat_balanced: ChatTierUpdate
+    chat_strong: ChatTierUpdate = Field(default_factory=ChatTierUpdate)
     embedding_base_url: str = Field(min_length=1, max_length=2048)
     embedding_api_key: SecretStr | None = Field(default=None, max_length=4096)
     clear_embedding_api_key: bool = False
     embedding_model: str = Field(min_length=1, max_length=200)
 
-    @field_validator("chat_base_url", "embedding_base_url", mode="before")
+    @field_validator("embedding_base_url", mode="before")
     @classmethod
     def validate_base_url(cls, value: object) -> str:
         """校验并规范化 Base URL。"""
         return normalize_base_url(str(value))
 
     @model_validator(mode="after")
-    def reject_conflicting_api_key_updates(self) -> Self:
-        """禁止同一次请求同时提交新 Key 与清空标志。"""
-        if self.clear_chat_api_key and self.chat_api_key is not None:
-            raise ValueError("不能同时提交新的 chat_api_key 与 clear_chat_api_key=true")
+    def require_balanced_tier_and_reject_conflicts(self) -> Self:
+        """平衡档必填；禁止同时提交新 Key 与清空标志。"""
+        if not self.chat_balanced.base_url or not self.chat_balanced.model:
+            raise ValueError("平衡档的 Base URL 与模型名必填，它是其它档位的回退目标")
         if self.clear_embedding_api_key and self.embedding_api_key is not None:
             raise ValueError(
                 "不能同时提交新的 embedding_api_key 与 clear_embedding_api_key=true"
@@ -87,15 +119,30 @@ class OperationsSystemConfigUpdate(ApiModel):
     monitor_event_retention_days: int = Field(ge=1, le=90)
 
 
+class ChatTierResponse(ApiModel):
+    """单个 chat 档位的有效配置，不包含 API Key 明文或密文。
+
+    `configured=False` 时下面的连接信息与单价全部是平衡档的值——
+    管理页要据此显示「未配置，当前回退到平衡档」，否则用户会以为便宜档在生效、
+    实际上钱按平衡档在花。
+    """
+
+    base_url: str
+    model: str
+    input_cost_per_million_usd: float
+    output_cost_per_million_usd: float
+    api_key_configured: bool
+    api_key_source: ConfigValueSource
+    configured: bool
+    effective_tier: ChatTier
+
+
 class LlmSystemConfigResponse(ApiModel):
     """LLM 有效配置响应，不包含 API Key 明文或密文。"""
 
-    chat_base_url: str
-    chat_model: str
-    chat_input_cost_per_million_usd: float
-    chat_output_cost_per_million_usd: float
-    chat_api_key_configured: bool
-    chat_api_key_source: ConfigValueSource
+    chat_fast: ChatTierResponse
+    chat_balanced: ChatTierResponse
+    chat_strong: ChatTierResponse
     embedding_base_url: str
     embedding_model: str
     embedding_api_key_configured: bool

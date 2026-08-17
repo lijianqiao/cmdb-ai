@@ -443,7 +443,7 @@ async def test_decide_device_query_with_password_executes(
         messages: list[ChatMessage],
         **kwargs: Any,
     ) -> ChatResult:
-        assert model_key == "local-chat"
+        assert model_key == "chat-fast"
         assert kwargs.get("db") is not None
         model_messages.append(messages)
         return _chat_result(fixed_summary)

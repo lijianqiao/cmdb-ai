@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.data_encryption import DataDecryptError, DataEncryptionKeyMissingError
+from app.schemas.system_config import ChatTier
 from app.services.system_config import get_effective_llm_config
 
 logger = logging.getLogger(__name__)
@@ -43,14 +44,35 @@ class ModelConfig:
 
 
 MODELS: dict[str, ModelConfig] = {
-    "local-chat": ModelConfig(
-        name="local-chat",
+    # chat 分三档：便宜（摘要/分类）、平衡（日常对话）、强（关键判断）。
+    # 这里的字段只是进程启动时的 .env 兜底；真正生效的值在 _resolve_model_config
+    # 里被数据库配置覆盖，三档未配置时整档回退到平衡档。
+    "chat-fast": ModelConfig(
+        name="chat-fast",
+        capability="chat",
+        base_url=settings.LLM_CHAT_FAST_BASE_URL,
+        api_key=settings.llm_chat_fast_api_key,
+        request_model=settings.LLM_CHAT_FAST_MODEL,
+        input_cost_per_million_usd=settings.LLM_CHAT_FAST_INPUT_COST_PER_MILLION_USD,
+        output_cost_per_million_usd=settings.LLM_CHAT_FAST_OUTPUT_COST_PER_MILLION_USD,
+    ),
+    "chat-balanced": ModelConfig(
+        name="chat-balanced",
         capability="chat",
         base_url=settings.LLM_CHAT_BASE_URL,
         api_key=settings.llm_chat_api_key,
         request_model=settings.LLM_CHAT_MODEL,
         input_cost_per_million_usd=settings.LLM_CHAT_INPUT_COST_PER_MILLION_USD,
         output_cost_per_million_usd=settings.LLM_CHAT_OUTPUT_COST_PER_MILLION_USD,
+    ),
+    "chat-strong": ModelConfig(
+        name="chat-strong",
+        capability="chat",
+        base_url=settings.LLM_CHAT_STRONG_BASE_URL,
+        api_key=settings.llm_chat_strong_api_key,
+        request_model=settings.LLM_CHAT_STRONG_MODEL,
+        input_cost_per_million_usd=settings.LLM_CHAT_STRONG_INPUT_COST_PER_MILLION_USD,
+        output_cost_per_million_usd=settings.LLM_CHAT_STRONG_OUTPUT_COST_PER_MILLION_USD,
     ),
     "local-embedding": ModelConfig(
         name="local-embedding",
@@ -59,6 +81,18 @@ MODELS: dict[str, ModelConfig] = {
         api_key=settings.llm_embedding_api_key,
         request_model=settings.LLM_EMBEDDING_MODEL,
     ),
+}
+
+# local-chat 是平衡档的历史键名，必须一直认：
+# 1. agent_registry.model 列里有已落库的 "local-chat"（在途子 Agent 的行）
+# 2. agent_messages.usage_by_model 里的历史 JSON 键是 "local-chat"
+_MODEL_KEY_ALIASES: dict[str, str] = {"local-chat": "chat-balanced"}
+
+# 哪个登记键属于哪一档，供数据库配置覆盖时查表
+_CHAT_TIER_BY_KEY: dict[str, ChatTier] = {
+    "chat-fast": "fast",
+    "chat-balanced": "balanced",
+    "chat-strong": "strong",
 }
 
 
@@ -91,6 +125,10 @@ class ChatResult:
     prompt_tokens: int
     completion_tokens: int
     cost_usd: float = 0.0
+    # **实际生效**的模型登记键。请求 chat-fast 但那一档没配时这里是 chat-balanced，
+    # 用量明细据此归属——否则界面会显示"便宜档跑了 3 次"，而钱是按平衡档花的。
+    # finish_reason="error" 时为空串（那条路径没有 config 可读，也不会记账）。
+    model_key: str = ""
 
 
 class LlmRequestError(RuntimeError):
@@ -223,9 +261,10 @@ async def _resolve_model_config(
     """
     按模型键解析本次请求应使用的 ModelConfig。
 
-    有 db 时读取数据库有效配置覆盖 local-chat / local-embedding；
-    无 db 或未知键时回退 MODELS 登记表。
+    有 db 时读取数据库有效配置覆盖三档 chat 与 local-embedding；
+    无 db 时回退 MODELS 登记表（.env 兜底）。未知键一律抛错，不静默兜底。
     """
+    model_key = _MODEL_KEY_ALIASES.get(model_key, model_key)
     base = MODELS.get(model_key)
     if base is None:
         raise LlmRequestError(
@@ -239,14 +278,19 @@ async def _resolve_model_config(
     except (DataDecryptError, DataEncryptionKeyMissingError) as exc:
         raise LlmRequestError("读取系统 LLM 配置失败，请检查密钥加密设置") from exc
 
-    if model_key == "local-chat":
+    tier = _CHAT_TIER_BY_KEY.get(model_key)
+    if tier is not None:
+        resolved = effective.chat_tier(tier)
+        # name 用生效档位命名：这一档没配时 resolved 整份来自平衡档，
+        # 用量明细里也就如实记成 chat-balanced，而不是谎称跑了便宜档
         return replace(
             base,
-            base_url=effective.chat_base_url,
-            api_key=effective.chat_api_key,
-            request_model=effective.chat_model,
-            input_cost_per_million_usd=effective.chat_input_cost_per_million_usd,
-            output_cost_per_million_usd=effective.chat_output_cost_per_million_usd,
+            name=f"chat-{resolved.effective_tier}",
+            base_url=resolved.base_url,
+            api_key=resolved.api_key,
+            request_model=resolved.model,
+            input_cost_per_million_usd=resolved.input_cost_per_million_usd,
+            output_cost_per_million_usd=resolved.output_cost_per_million_usd,
         )
     if model_key == "local-embedding":
         return replace(
@@ -387,6 +431,7 @@ async def _consume_chat_sse(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         cost_usd=_cost_usd(config, prompt_tokens, completion_tokens),
+        model_key=config.name,
     )
 
 

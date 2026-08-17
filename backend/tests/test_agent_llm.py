@@ -207,9 +207,9 @@ async def test_chat_and_embedding_models_use_independent_connection_settings() -
     values specifically so this test fails if the two registry entries ever
     collapse back onto one shared base_url/api_key pair.
     """
-    assert MODELS["local-chat"].base_url == settings.LLM_CHAT_BASE_URL
+    assert MODELS["chat-balanced"].base_url == settings.LLM_CHAT_BASE_URL
     assert MODELS["local-embedding"].base_url == settings.LLM_EMBEDDING_BASE_URL
-    assert MODELS["local-chat"].base_url != MODELS["local-embedding"].base_url
+    assert MODELS["chat-balanced"].base_url != MODELS["local-embedding"].base_url
 
 
 async def test_embed_returns_vectors_in_index_order() -> None:
@@ -620,3 +620,30 @@ async def test_injected_chat_client_works_without_db_kwarg() -> None:
             client=fake_client,
         )
     assert result.content == "mock"
+
+
+async def test_local_chat_alias_resolves_to_balanced_tier() -> None:
+    """local-chat 是平衡档的历史键名，必须一直认。
+
+    registry 表和历史 usage_by_model JSON 里都存着这个字面量，
+    不认它会让在途子 Agent 和历史用量明细一起炸。
+    """
+    from app.core.llm import _resolve_model_config
+
+    resolved = await _resolve_model_config("local-chat", None)
+    assert resolved.name == "chat-balanced"
+
+
+async def test_unknown_model_key_still_raises_instead_of_falling_back() -> None:
+    """加了别名之后，未知键仍然要抛错——静默兜底会把拼错的键变成难查的怪事。"""
+    from app.core.llm import LlmRequestError, _resolve_model_config
+
+    with pytest.raises(LlmRequestError):
+        await _resolve_model_config("chat-turbo", None)
+
+
+async def test_chat_tiers_are_independently_pointable() -> None:
+    """三档各读各的 settings，不共用同一组连接参数。"""
+    assert MODELS["chat-fast"].base_url == settings.LLM_CHAT_FAST_BASE_URL
+    assert MODELS["chat-strong"].base_url == settings.LLM_CHAT_STRONG_BASE_URL
+    assert MODELS["chat-balanced"].request_model == settings.LLM_CHAT_MODEL

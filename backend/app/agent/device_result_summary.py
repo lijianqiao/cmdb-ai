@@ -213,7 +213,8 @@ async def _call_summary_model(
     user_prompt: str,
 ) -> str:
     result = await active_chat(
-        "local-chat",
+        # 便宜档：把设备命令回显压成人看的摘要，是抽取不是判断
+        "chat-fast",
         [
             ChatMessage(role="system", content=SUMMARY_SYSTEM_PROMPT),
             ChatMessage(role="user", content=user_prompt),

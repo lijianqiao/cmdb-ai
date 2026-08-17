@@ -148,7 +148,8 @@ async def test_small_config_uses_one_tool_free_call_and_only_persists_summary(
     assert delivery.summary_status == "completed"
     assert len(calls) == 1
     model_key, messages, kwargs = calls[0]
-    assert model_key == "local-chat"
+    # 便宜档：设备回显压成摘要是抽取任务
+    assert model_key == "chat-fast"
     assert kwargs.get("tools") is None
     assert kwargs.get("db") is not None
     assert "外部不可信数据" in messages[0].content

@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = Field(default=5, ge=0, le=100)
 
     # LLM —— chat 和 embedding 各自独立配置，可以指向不同厂商/服务
+    #
+    # chat 分三档（便宜 / 平衡 / 强），三档可以是完全不同的服务商。
+    # 平衡档沿用不带档位后缀的 LLM_CHAT_*：它是既有配置，改名只会把
+    # 已经跑起来的东西弄丢，而且降级目标就是它，不带后缀反而好读。
     LLM_CHAT_BASE_URL: str = "http://127.0.0.1:8080/v1"
     LLM_CHAT_API_KEY: SecretStr | None = None
     LLM_CHAT_MODEL: str = "local-chat"
@@ -59,6 +63,25 @@ class Settings(BaseSettings):
         default=0.0, ge=0, allow_inf_nan=False
     )
     LLM_CHAT_OUTPUT_COST_PER_MILLION_USD: float = Field(
+        default=0.0, ge=0, allow_inf_nan=False
+    )
+    # 便宜档 / 强档：base_url 或 model 留空即视为未配置，运行时整档回退到平衡档
+    LLM_CHAT_FAST_BASE_URL: str = ""
+    LLM_CHAT_FAST_API_KEY: SecretStr | None = None
+    LLM_CHAT_FAST_MODEL: str = ""
+    LLM_CHAT_FAST_INPUT_COST_PER_MILLION_USD: float = Field(
+        default=0.0, ge=0, allow_inf_nan=False
+    )
+    LLM_CHAT_FAST_OUTPUT_COST_PER_MILLION_USD: float = Field(
+        default=0.0, ge=0, allow_inf_nan=False
+    )
+    LLM_CHAT_STRONG_BASE_URL: str = ""
+    LLM_CHAT_STRONG_API_KEY: SecretStr | None = None
+    LLM_CHAT_STRONG_MODEL: str = ""
+    LLM_CHAT_STRONG_INPUT_COST_PER_MILLION_USD: float = Field(
+        default=0.0, ge=0, allow_inf_nan=False
+    )
+    LLM_CHAT_STRONG_OUTPUT_COST_PER_MILLION_USD: float = Field(
         default=0.0, ge=0, allow_inf_nan=False
     )
     LLM_EMBEDDING_BASE_URL: str = "http://127.0.0.1:8080/v1"
@@ -286,6 +309,20 @@ class Settings(BaseSettings):
         if self.LLM_CHAT_API_KEY is None:
             return ""
         return self.LLM_CHAT_API_KEY.get_secret_value()
+
+    @property
+    def llm_chat_fast_api_key(self) -> str:
+        """Return the fast-tier chat API key, or an empty string when none is configured."""
+        if self.LLM_CHAT_FAST_API_KEY is None:
+            return ""
+        return self.LLM_CHAT_FAST_API_KEY.get_secret_value()
+
+    @property
+    def llm_chat_strong_api_key(self) -> str:
+        """Return the strong-tier chat API key, or an empty string when none is configured."""
+        if self.LLM_CHAT_STRONG_API_KEY is None:
+            return ""
+        return self.LLM_CHAT_STRONG_API_KEY.get_secret_value()
 
     @property
     def llm_embedding_api_key(self) -> str:

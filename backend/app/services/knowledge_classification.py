@@ -111,7 +111,9 @@ async def _suggest_one(
         return False
 
     result = await chat(
-        "local-chat",
+        # 便宜档：与 classifier 子 Agent（批量入口）保持同档，
+        # 否则会出现"传一份文档和传两份文档用的模型不一样"这种没法解释的行为
+        "chat-fast",
         [
             ChatMessage(role="system", content=_SINGLE_DOC_SYSTEM_PROMPT),
             ChatMessage(

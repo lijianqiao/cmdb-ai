@@ -288,8 +288,15 @@ classDiagram
 | `classifier`                 | 快/便宜                | read-only，仅 `knowledge/`      | 批量文档上传后并行归类                                    |
 | `kb_explorer`                | 快                     | read-only，仅 `knowledge/`      | 知识检索（Grep/Glob/Read/SemanticSearch）                 |
 | `ops_explorer`               | 快                     | read-only，仅 CMDB/监控查询工具 | 单一数据源的结构化取证                                    |
-| `investigator`               | 中等推理               | read-only，跨数据源只读工具全开 | 根因排查中的一个假设分支（可多个并行）                    |
-| `reviewer`                   | 高推理                 | read-only                       | 复核 `classifier` 分类冲突 / 复核 `investigator` 结论汇总 |
+| `investigator`               | 中等推理（`balanced`） | read-only，跨数据源只读工具全开 | 根因排查中的一个假设分支（可多个并行）                    |
+| `reviewer`                   | 高推理（`strong`）     | read-only                       | 复核 `classifier` 分类冲突 / 复核 `investigator` 结论汇总 |
+
+档位不再只是文档描述：`RoleDefinition.model_tier` 是唯一事实来源，`model_key`
+由它派生成 `chat-{tier}`，对应 `MODELS` 登记表里的三档 chat 模型。三档各自可在
+系统配置页配置 base_url / api_key / model / 输入单价 / 输出单价；某一档没配置时
+**整档回退到平衡档**（连同两个单价一起回退，否则会按便宜档的价格给平衡档记账）。
+回退状态在配置响应的 `configured` 字段里暴露，管理页据此提示，避免"以为在省钱、
+其实全走平衡档"。
 
 角色定义遵循 [guide.md 7.6](./guide.md#76-角色目录建议内置--可扩展) 要求：`description` 必须具体到"何时委派"，模糊描述等于不会被委派。
 

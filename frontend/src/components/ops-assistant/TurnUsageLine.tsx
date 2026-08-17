@@ -13,6 +13,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import type { TurnUsage } from "@/types/agent"
+import { CHAT_TIER_LABELS, type ChatTier } from "@/types/system-config"
 
 const TOKEN_FORMAT = new Intl.NumberFormat("zh-CN")
 
@@ -21,6 +22,15 @@ function formatCost(costUsd: number): string {
   if (costUsd === 0) return "$0"
   if (costUsd < 0.01) return `$${costUsd.toFixed(4)}`
   return `$${costUsd.toFixed(2)}`
+}
+
+/** 模型登记键 → 档位中文名；认不出的键原样显示，不猜 */
+function modelLabel(modelKey: string): string {
+  const tier = modelKey.startsWith("chat-") ? modelKey.slice("chat-".length) : null
+  if (tier && tier in CHAT_TIER_LABELS) {
+    return CHAT_TIER_LABELS[tier as ChatTier]
+  }
+  return modelKey
 }
 
 export interface TurnUsageLineProps {
@@ -52,7 +62,7 @@ export function TurnUsageLine({ usage }: TurnUsageLineProps) {
           <ul className="space-y-0.5 text-xs tabular-nums">
             {byModel.map(([model, item]) => (
               <li key={model}>
-                {model}：{TOKEN_FORMAT.format(item.prompt_tokens)} /{" "}
+                {modelLabel(model)}：{TOKEN_FORMAT.format(item.prompt_tokens)} /{" "}
                 {TOKEN_FORMAT.format(item.completion_tokens)} ·{" "}
                 {formatCost(item.cost_usd)}
               </li>

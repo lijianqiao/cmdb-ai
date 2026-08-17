@@ -75,8 +75,14 @@ async def test_stale_takeover_threshold_exceeds_worst_case_turn() -> None:
     """
     from app.core.llm import MODELS
 
+    # 取三档里最慢的那个：一轮对话可能落到任意一档，最坏耗时按最慢的算
+    slowest_chat_timeout = max(
+        config.timeout_seconds
+        for config in MODELS.values()
+        if config.capability == "chat"
+    )
     worst_case = Budget().max_steps * (
-        MODELS["local-chat"].timeout_seconds
+        slowest_chat_timeout
         + settings.DEVICE_COMMAND_CONN_TIMEOUT_SECONDS
         + settings.DEVICE_COMMAND_READ_TIMEOUT_SECONDS
     )

@@ -1786,7 +1786,10 @@ async def test_default_runner_completes_with_injected_chat_fn(
     assert terminal.budget.cost_used_usd == 0.02
     assert len(observed) == 1
     model_key, messages, tools = observed[0]
-    assert model_key == "local-chat"
+    # 子 Agent 用它自己角色档位对应的模型键，不再是全局唯一的那个
+    from app.agent.roles import get_role
+
+    assert model_key == get_role("kb_explorer").model_key
     assert messages[0].role == "system"
     assert messages[1] == ChatMessage(role="user", content="读取 runbook")
     assert tools is not None

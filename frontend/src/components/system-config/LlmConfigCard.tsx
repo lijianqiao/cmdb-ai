@@ -1,7 +1,12 @@
 /** LLM 与 Embedding 模型配置卡片 */
 
 import { useEffect } from "react"
-import { Controller, useForm, useWatch } from "react-hook-form"
+import {
+  Controller,
+  useForm,
+  useWatch,
+  type UseFormReturn,
+} from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { isAxiosError } from "axios"
 import { toast } from "sonner"
@@ -30,10 +35,14 @@ import {
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { updateLlmSystemConfig } from "@/lib/system-config-api"
-import type {
-  ConfigValueSource,
-  LlmSystemConfig,
-  SystemConfigData,
+import {
+  CHAT_TIER_LABELS,
+  CHAT_TIERS,
+  type ChatTier,
+  type ChatTierConfig,
+  type ConfigValueSource,
+  type LlmSystemConfig,
+  type SystemConfigData,
 } from "@/types/system-config"
 
 import {
@@ -45,6 +54,12 @@ import {
 export interface LlmConfigCardProps {
   value: LlmSystemConfig
   onSaved: (next: SystemConfigData) => void
+}
+
+const TIER_HINTS: Record<ChatTier, string> = {
+  fast: "摘要、文档分类、设备回显压缩",
+  balanced: "日常对话与普通工具调用（其它两档未配置时的回退目标）",
+  strong: "只读复核等关键判断",
 }
 
 /**
@@ -89,19 +104,169 @@ function sourceLabel(source: ConfigValueSource): string {
   }
 }
 
+/**
+ * 把一档的有效配置转成表单初值。
+ *
+ * 未配置的档回显成**空**而不是回退来源的值：把平衡档的地址填进便宜档的输入框，
+ * 用户一按保存就等于把便宜档真配成了平衡档，回退状态就此消失。
+ */
+function toTierFormValues(tier: ChatTierConfig): LlmConfigFormValues["chat_fast"] {
+  const configured = tier.configured
+  return {
+    base_url: configured ? tier.base_url : "",
+    api_key: "",
+    clear_api_key: false,
+    model: configured ? tier.model : "",
+    input_cost_per_million_usd: configured ? tier.input_cost_per_million_usd : 0,
+    output_cost_per_million_usd: configured ? tier.output_cost_per_million_usd : 0,
+  }
+}
+
 function toFormValues(value: LlmSystemConfig): LlmConfigFormValues {
   return {
-    chat_base_url: value.chat_base_url,
-    chat_api_key: "",
-    clear_chat_api_key: false,
-    chat_model: value.chat_model,
-    chat_input_cost_per_million_usd: value.chat_input_cost_per_million_usd,
-    chat_output_cost_per_million_usd: value.chat_output_cost_per_million_usd,
+    chat_fast: toTierFormValues(value.chat_fast),
+    chat_balanced: toTierFormValues(value.chat_balanced),
+    chat_strong: toTierFormValues(value.chat_strong),
     embedding_base_url: value.embedding_base_url,
     embedding_api_key: "",
     clear_embedding_api_key: false,
     embedding_model: value.embedding_model,
   }
+}
+
+interface ChatTierFieldsProps {
+  form: UseFormReturn<LlmConfigFormValues>
+  tier: ChatTier
+  value: ChatTierConfig
+}
+
+/**
+ * 一档 chat 的完整配置区：连接信息、双向单价与 API Key。
+ *
+ * 未配置的档在标题旁挂「未配置 · 回退到平衡档」徽标——没有这个提示，
+ * 用户会以为便宜档在生效、实际上钱是按平衡档在花。
+ */
+function ChatTierFields({ form, tier, value }: ChatTierFieldsProps) {
+  const prefix = `chat_${tier}` as const
+  const clearApiKey = useWatch({
+    control: form.control,
+    name: `${prefix}.clear_api_key`,
+  })
+
+  return (
+    <FieldSet>
+      <FieldLegend className="flex flex-wrap items-center gap-2">
+        {CHAT_TIER_LABELS[tier]}
+        {tier !== "balanced" && !value.configured ? (
+          <Badge variant="outline">未配置 · 回退到平衡档</Badge>
+        ) : null}
+      </FieldLegend>
+      <FieldDescription>{TIER_HINTS[tier]}</FieldDescription>
+      <FieldGroup className="gap-4">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Controller
+            control={form.control}
+            name={`${prefix}.base_url`}
+            render={({ field, fieldState }) => (
+              <Field data-invalid={fieldState.invalid}>
+                <FieldLabel htmlFor={`${tier}-base-url`}>Base URL</FieldLabel>
+                <Input
+                  id={`${tier}-base-url`}
+                  placeholder={
+                    tier === "balanced"
+                      ? "https://api.example.com/v1"
+                      : "留空表示不启用这一档"
+                  }
+                  aria-invalid={fieldState.invalid}
+                  {...field}
+                />
+                <FieldError errors={[fieldState.error]} />
+              </Field>
+            )}
+          />
+          <Controller
+            control={form.control}
+            name={`${prefix}.model`}
+            render={({ field, fieldState }) => (
+              <Field data-invalid={fieldState.invalid}>
+                <FieldLabel htmlFor={`${tier}-model`}>模型名</FieldLabel>
+                <Input
+                  id={`${tier}-model`}
+                  aria-invalid={fieldState.invalid}
+                  {...field}
+                />
+                <FieldError errors={[fieldState.error]} />
+              </Field>
+            )}
+          />
+          <Controller
+            control={form.control}
+            name={`${prefix}.input_cost_per_million_usd`}
+            render={({ field, fieldState }) => (
+              <Field data-invalid={fieldState.invalid}>
+                <FieldLabel htmlFor={`${tier}-input-cost`}>
+                  输入价格 / 百万 tokens（USD）
+                </FieldLabel>
+                <Input
+                  id={`${tier}-input-cost`}
+                  type="number"
+                  min={0}
+                  step="any"
+                  aria-invalid={fieldState.invalid}
+                  {...field}
+                />
+                <FieldError errors={[fieldState.error]} />
+              </Field>
+            )}
+          />
+          <Controller
+            control={form.control}
+            name={`${prefix}.output_cost_per_million_usd`}
+            render={({ field, fieldState }) => (
+              <Field data-invalid={fieldState.invalid}>
+                <FieldLabel htmlFor={`${tier}-output-cost`}>
+                  输出价格 / 百万 tokens（USD）
+                </FieldLabel>
+                <Input
+                  id={`${tier}-output-cost`}
+                  type="number"
+                  min={0}
+                  step="any"
+                  aria-invalid={fieldState.invalid}
+                  {...field}
+                />
+                <FieldError errors={[fieldState.error]} />
+              </Field>
+            )}
+          />
+        </div>
+        <Controller
+          control={form.control}
+          name={`${prefix}.api_key`}
+          render={({ field, fieldState }) => (
+            <ApiKeyField
+              idPrefix={tier}
+              label="API Key"
+              configured={value.api_key_configured}
+              source={value.api_key_source}
+              secretValue={field.value}
+              clearChecked={clearApiKey}
+              onSecretChange={field.onChange}
+              onClearChange={(checked) =>
+                form.setValue(`${prefix}.clear_api_key`, checked)
+              }
+              secretError={fieldState.error}
+            />
+          )}
+        />
+        <Controller
+          control={form.control}
+          name={`${prefix}.clear_api_key`}
+          render={({ fieldState }) => <FieldError errors={[fieldState.error]} />}
+        />
+      </FieldGroup>
+    </FieldSet>
+  )
 }
 
 interface ApiKeyFieldProps {
@@ -188,10 +353,6 @@ export function LlmConfigCard({ value, onSaved }: LlmConfigCardProps) {
     form.reset(toFormValues(value))
   }, [value, form])
 
-  const clearChatApiKey = useWatch({
-    control: form.control,
-    name: "clear_chat_api_key",
-  })
   const clearEmbeddingApiKey = useWatch({
     control: form.control,
     name: "clear_embedding_api_key",
@@ -201,9 +362,11 @@ export function LlmConfigCard({ value, onSaved }: LlmConfigCardProps) {
     try {
       const next = await updateLlmSystemConfig(buildLlmUpdatePayload(data))
       toast.success("模型配置已保存")
-      form.setValue("chat_api_key", "")
+      for (const tier of CHAT_TIERS) {
+        form.setValue(`chat_${tier}.api_key`, "")
+        form.setValue(`chat_${tier}.clear_api_key`, false)
+      }
       form.setValue("embedding_api_key", "")
-      form.setValue("clear_chat_api_key", false)
       form.setValue("clear_embedding_api_key", false)
       onSaved(next)
     } catch (error) {
@@ -220,112 +383,12 @@ export function LlmConfigCard({ value, onSaved }: LlmConfigCardProps) {
       <form onSubmit={form.handleSubmit(handleSubmit)}>
         <CardContent>
           <FieldGroup>
-            <FieldSet>
-              <FieldLegend>Chat</FieldLegend>
-              <FieldGroup className="gap-4">
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <Controller
-                    control={form.control}
-                    name="chat_base_url"
-                    render={({ field, fieldState }) => (
-                      <Field data-invalid={fieldState.invalid}>
-                        <FieldLabel htmlFor="chat-base-url">Base URL</FieldLabel>
-                        <Input
-                          id="chat-base-url"
-                          placeholder="https://api.example.com/v1"
-                          aria-invalid={fieldState.invalid}
-                          {...field}
-                        />
-                        <FieldError errors={[fieldState.error]} />
-                      </Field>
-                    )}
-                  />
-                  <Controller
-                    control={form.control}
-                    name="chat_model"
-                    render={({ field, fieldState }) => (
-                      <Field data-invalid={fieldState.invalid}>
-                        <FieldLabel htmlFor="chat-model">模型名</FieldLabel>
-                        <Input
-                          id="chat-model"
-                          aria-invalid={fieldState.invalid}
-                          {...field}
-                        />
-                        <FieldError errors={[fieldState.error]} />
-                      </Field>
-                    )}
-                  />
-                  <Controller
-                    control={form.control}
-                    name="chat_input_cost_per_million_usd"
-                    render={({ field, fieldState }) => (
-                      <Field data-invalid={fieldState.invalid}>
-                        <FieldLabel htmlFor="chat-input-cost">
-                          输入价格 / 百万 tokens（USD）
-                        </FieldLabel>
-                        <Input
-                          id="chat-input-cost"
-                          type="number"
-                          min={0}
-                          step="any"
-                          aria-invalid={fieldState.invalid}
-                          {...field}
-                        />
-                        <FieldError errors={[fieldState.error]} />
-                      </Field>
-                    )}
-                  />
-                  <Controller
-                    control={form.control}
-                    name="chat_output_cost_per_million_usd"
-                    render={({ field, fieldState }) => (
-                      <Field data-invalid={fieldState.invalid}>
-                        <FieldLabel htmlFor="chat-output-cost">
-                          输出价格 / 百万 tokens（USD）
-                        </FieldLabel>
-                        <Input
-                          id="chat-output-cost"
-                          type="number"
-                          min={0}
-                          step="any"
-                          aria-invalid={fieldState.invalid}
-                          {...field}
-                        />
-                        <FieldError errors={[fieldState.error]} />
-                      </Field>
-                    )}
-                  />
-                </div>
-                <Controller
-                  control={form.control}
-                  name="chat_api_key"
-                  render={({ field, fieldState }) => (
-                    <ApiKeyField
-                      idPrefix="chat"
-                      label="API Key"
-                      configured={value.chat_api_key_configured}
-                      source={value.chat_api_key_source}
-                      secretValue={field.value}
-                      clearChecked={clearChatApiKey}
-                      onSecretChange={field.onChange}
-                      onClearChange={(checked) =>
-                        form.setValue("clear_chat_api_key", checked)
-                      }
-                      secretError={fieldState.error}
-                    />
-                  )}
-                />
-                <Controller
-                  control={form.control}
-                  name="clear_chat_api_key"
-                  render={({ fieldState }) => (
-                    <FieldError errors={[fieldState.error]} />
-                  )}
-                />
-              </FieldGroup>
-            </FieldSet>
-
-            <FieldSeparator />
+            {CHAT_TIERS.map((tier) => (
+              <div key={tier}>
+                <ChatTierFields form={form} tier={tier} value={value[`chat_${tier}`]} />
+                <FieldSeparator />
+              </div>
+            ))}
 
             <FieldSet>
               <FieldLegend>Embedding</FieldLegend>

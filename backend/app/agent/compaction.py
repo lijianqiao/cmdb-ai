@@ -280,7 +280,8 @@ async def ensure_root_compaction(
         return
 
     summarizer_messages = _build_summarizer_messages(session, to_summarize)
-    result = await chat("local-chat", summarizer_messages, stream=False, db=db)
+    # 便宜档：纯摘要，而且输入是整段待压缩历史——全项目输入最长、最该省钱的一处
+    result = await chat("chat-fast", summarizer_messages, stream=False, db=db)
 
     # 无论摘要是否可用、是否超预算，这次调用的钱都已经花了，必须先记账。
     # 原实现在 record_cost 之前先判断「加上会不会超」，超了就直接 return——

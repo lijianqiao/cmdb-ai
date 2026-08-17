@@ -70,8 +70,9 @@ port_enable/port_disable 必须提供 interface_name。
 单一方面的查询不要用这两个工作流，直接调对应只读工具更快。
 任何会改变设备状态的操作只能由你通过 device_control 经 HITL 发起。"""
 
-# settings 无专用 Agent 模型键；MODELS 默认 chat 登记键为 local-chat
-_DEFAULT_MODEL_KEY = "local-chat"
+# 根对话用平衡档：日常问答 + 普通工具调用，既不该用便宜档降质量，
+# 也不该每一轮都烧强档
+_DEFAULT_MODEL_KEY = "chat-balanced"
 
 
 def _empty_model_usage() -> dict[str, float]:

@@ -2,7 +2,11 @@
 
 import { z } from "zod"
 
-import type { LlmSystemConfigUpdate } from "@/types/system-config"
+import {
+  CHAT_TIERS,
+  type ChatTierUpdate,
+  type LlmSystemConfigUpdate,
+} from "@/types/system-config"
 
 const costSchema = z.coerce.number().finite().nonnegative()
 
@@ -60,13 +64,43 @@ const httpBaseUrlSchema = z
     }
   })
 
+/** 便宜档 / 强档可以整档留空表示"不配置"，所以 base_url 允许空串 */
+const optionalHttpBaseUrlSchema = z
+  .string()
+  .max(2048)
+  .transform((value, ctx) => {
+    const trimmed = value.trim()
+    if (!trimmed) return ""
+    try {
+      return normalizeBaseUrl(trimmed)
+    } catch (error) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: error instanceof Error ? error.message : "Base URL 无效",
+      })
+      return z.NEVER
+    }
+  })
+
+const optionalChatTierSchema = z.object({
+  base_url: optionalHttpBaseUrlSchema,
+  api_key: z.string().max(4096).default(""),
+  clear_api_key: z.boolean(),
+  model: z.string().max(200),
+  input_cost_per_million_usd: costSchema,
+  output_cost_per_million_usd: costSchema,
+})
+
+/** 平衡档是其它两档的回退目标，不允许留空 */
+const requiredChatTierSchema = optionalChatTierSchema.extend({
+  base_url: httpBaseUrlSchema,
+  model: z.string().min(1, "请输入 Chat 模型名").max(200),
+})
+
 const llmConfigFormObjectSchema = z.object({
-  chat_base_url: httpBaseUrlSchema,
-  chat_api_key: z.string().max(4096).default(""),
-  clear_chat_api_key: z.boolean(),
-  chat_model: z.string().min(1, "请输入 Chat 模型名").max(200),
-  chat_input_cost_per_million_usd: costSchema,
-  chat_output_cost_per_million_usd: costSchema,
+  chat_fast: optionalChatTierSchema,
+  chat_balanced: requiredChatTierSchema,
+  chat_strong: optionalChatTierSchema,
   embedding_base_url: httpBaseUrlSchema,
   embedding_api_key: z.string().max(4096).default(""),
   clear_embedding_api_key: z.boolean(),
@@ -76,12 +110,30 @@ const llmConfigFormObjectSchema = z.object({
 /** LLM 配置表单校验 schema */
 export const llmConfigFormSchema = llmConfigFormObjectSchema.superRefine(
   (data, ctx) => {
-    if (data.clear_chat_api_key && data.chat_api_key.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["chat_api_key"],
-        message: "不能同时提交新的 chat_api_key 与 clear_chat_api_key=true",
-      })
+    for (const tier of CHAT_TIERS) {
+      const value = data[`chat_${tier}`]
+      if (value.clear_api_key && value.api_key.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [`chat_${tier}`, "api_key"],
+          message: "不能同时提交新的 api_key 与 clear_api_key=true",
+        })
+      }
+      // base_url 的 transform 失败时这里拿到的不是字符串，跳过即可——
+      // 那条错误已经报出来了，再叠一条"要么都填要么都留空"只会让人更懵
+      if (typeof value.base_url !== "string" || typeof value.model !== "string") {
+        continue
+      }
+      // 半份配置发不出请求：有地址没模型名（或反过来）比整档留空更难排查
+      const hasBaseUrl = Boolean(value.base_url.trim())
+      const hasModel = Boolean(value.model.trim())
+      if (hasBaseUrl !== hasModel) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [`chat_${tier}`, hasBaseUrl ? "model" : "base_url"],
+          message: "Base URL 与模型名要么都填，要么都留空（留空即不启用这一档）",
+        })
+      }
     }
     if (data.clear_embedding_api_key && data.embedding_api_key.trim()) {
       ctx.addIssue({
@@ -135,22 +187,31 @@ export type OperationsConfigFormValues = z.infer<
  * Returns:
  *   符合后端 LlmSystemConfigUpdate 契约的载荷
  */
+function buildTierPayload(tier: LlmConfigFormValues["chat_balanced"]): ChatTierUpdate {
+  const payload: ChatTierUpdate = {
+    base_url: tier.base_url,
+    model: tier.model,
+    input_cost_per_million_usd: tier.input_cost_per_million_usd,
+    output_cost_per_million_usd: tier.output_cost_per_million_usd,
+    clear_api_key: tier.clear_api_key,
+  }
+  const key = tier.api_key.trim()
+  if (key && !tier.clear_api_key) payload.api_key = key
+  return payload
+}
+
 export function buildLlmUpdatePayload(
   form: LlmConfigFormValues,
 ): LlmSystemConfigUpdate {
   const payload: LlmSystemConfigUpdate = {
-    chat_base_url: form.chat_base_url,
-    chat_model: form.chat_model,
-    chat_input_cost_per_million_usd: form.chat_input_cost_per_million_usd,
-    chat_output_cost_per_million_usd: form.chat_output_cost_per_million_usd,
+    chat_fast: buildTierPayload(form.chat_fast),
+    chat_balanced: buildTierPayload(form.chat_balanced),
+    chat_strong: buildTierPayload(form.chat_strong),
     embedding_base_url: form.embedding_base_url,
     embedding_model: form.embedding_model,
-    clear_chat_api_key: form.clear_chat_api_key,
     clear_embedding_api_key: form.clear_embedding_api_key,
   }
-  const chatKey = form.chat_api_key.trim()
   const embeddingKey = form.embedding_api_key.trim()
-  if (chatKey && !form.clear_chat_api_key) payload.chat_api_key = chatKey
   if (embeddingKey && !form.clear_embedding_api_key) {
     payload.embedding_api_key = embeddingKey
   }

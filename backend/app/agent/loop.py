@@ -146,7 +146,9 @@ async def run_loop(
         try:
             active_budget.record_cost(
                 result.cost_usd,
-                model_key=model_key,
+                # 用 ChatResult 回传的**生效**键，不是请求时传入的 model_key：
+                # 请求便宜档而那一档没配时实际跑的是平衡档，用量要如实归到平衡档
+                model_key=result.model_key or model_key,
                 prompt_tokens=result.prompt_tokens,
                 completion_tokens=result.completion_tokens,
             )

@@ -49,19 +49,30 @@ async def _grant_system_config_manage(db_session: AsyncSession, test_user: User)
     await db_session.commit()
 
 
-def _llm_payload(**overrides: object) -> dict[str, object]:
+def _chat_tier_payload(**overrides: object) -> dict[str, object]:
+    """一档 chat 配置的请求体。"""
     payload: dict[str, object] = {
-        "chat_base_url": "https://llm.example/v1",
-        "clear_chat_api_key": False,
-        "chat_model": "chat-model",
-        "chat_input_cost_per_million_usd": 1.5,
-        "chat_output_cost_per_million_usd": 2.5,
+        "base_url": "https://llm.example/v1",
+        "clear_api_key": False,
+        "model": "chat-model",
+        "input_cost_per_million_usd": 1.5,
+        "output_cost_per_million_usd": 2.5,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _llm_payload(**tier_overrides: object) -> dict[str, object]:
+    """只配平衡档的请求体；关键字参数覆盖平衡档字段。
+
+    便宜档与强档不传 = 未配置，运行时回退到平衡档。
+    """
+    return {
+        "chat_balanced": _chat_tier_payload(**tier_overrides),
         "embedding_base_url": "https://embedding.example/v1",
         "clear_embedding_api_key": False,
         "embedding_model": "embedding-model",
     }
-    payload.update(overrides)
-    return payload
 
 
 def _operations_payload(**overrides: object) -> dict[str, object]:
@@ -141,11 +152,11 @@ async def test_superuser_can_save_api_key_but_response_and_audit_are_redacted(
     response = await client.put(
         "/api/v1/system-config/llm",
         headers=superuser_headers,
-        json=_llm_payload(chat_api_key=secret),
+        json=_llm_payload(api_key=secret),
     )
     assert response.status_code == 200, response.text
     assert secret not in response.text
-    assert response.json()["data"]["llm"]["chat_api_key_configured"] is True
+    assert response.json()["data"]["llm"]["chat_balanced"]["api_key_configured"] is True
 
     db_session.expire_all()
     logs = (
@@ -201,10 +212,10 @@ async def test_clear_chat_api_key_writes_explicit_null_row(
     response = await client.put(
         "/api/v1/system-config/llm",
         headers=superuser_headers,
-        json=_llm_payload(clear_chat_api_key=True),
+        json=_llm_payload(clear_api_key=True),
     )
     assert response.status_code == 200, response.text
-    assert response.json()["data"]["llm"]["chat_api_key_configured"] is False
+    assert response.json()["data"]["llm"]["chat_balanced"]["api_key_configured"] is False
 
     db_session.expire_all()
     row = (
@@ -231,10 +242,10 @@ async def test_omitted_api_key_preserves_existing_ciphertext(
     response = await client.put(
         "/api/v1/system-config/llm",
         headers=superuser_headers,
-        json=_llm_payload(chat_base_url="https://updated.example/v1"),
+        json=_llm_payload(base_url="https://updated.example/v1"),
     )
     assert response.status_code == 200, response.text
-    assert response.json()["data"]["llm"]["chat_api_key_configured"] is True
+    assert response.json()["data"]["llm"]["chat_balanced"]["api_key_configured"] is True
 
     db_session.expire_all()
     row = (
@@ -316,7 +327,7 @@ async def test_missing_encryption_key_returns_422_on_llm_write(
     response = await client.put(
         "/api/v1/system-config/llm",
         headers=superuser_headers,
-        json=_llm_payload(chat_api_key="sk-new-key"),
+        json=_llm_payload(api_key="sk-new-key"),
     )
     assert response.status_code == 422
     assert "CMDB_CREDENTIAL_KEY" in response.text

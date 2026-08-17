@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal, cast
 
+from app.schemas.system_config import ChatTier
+
 type RoleName = Literal[
     "classifier",
     "kb_explorer",
@@ -27,9 +29,12 @@ type ToolName = Literal[
     "query_cmdb_dependencies",
     "query_monitor_status",
 ]
-type ModelTier = Literal["fast", "balanced", "reasoning"]
+# 与配置层的档位是同一套东西，共用一个类型避免两处枚举各自漂移。
+# 旧值 "reasoning" 已并入 "strong"（配置键是 LLM_CHAT_STRONG_*）。
+type ModelTier = ChatTier
 
-ROLE_CATALOG_VERSION = "t09-v1"
+# t09-v2：档位从"声明了但没人用的元数据"变成真正决定用哪个模型
+ROLE_CATALOG_VERSION = "t09-v2"
 
 _KNOWLEDGE_TOOLS: tuple[ToolName, ...] = (
     "kb_glob",
@@ -52,10 +57,18 @@ class RoleDefinition:
     version: str
     description: str
     instructions: str
-    model_key: str
     model_tier: ModelTier
     sandbox_mode: Literal["read-only"]
     tools_allowlist: tuple[ToolName, ...]
+
+    @property
+    def model_key(self) -> str:
+        """档位对应的 MODELS 登记键。
+
+        档位是唯一事实来源，键由它派生——两处各写一遍迟早会对不上，
+        而且这个字段以前就是"声明了却没人读"的状态，正是这么烂掉的。
+        """
+        return f"chat-{self.model_tier}"
 
 
 class UnknownAgentRoleError(ValueError):
@@ -77,7 +90,7 @@ _ROLE_CATALOG: dict[RoleName, RoleDefinition] = {
 最终回答必须是一个 JSON 对象，不要 Markdown 代码围栏：
 {"document_id":整数,"recommended_category":"code","confidence":0到1,
 "needs_review":布尔值,"reason":"有正文证据的简短理由"}。""",
-        model_key="local-chat",
+        # 便宜档：从正文里抽结构化 JSON，是分类不是判断
         model_tier="fast",
         sandbox_mode="read-only",
         tools_allowlist=("kb_glob", "kb_grep", "kb_read"),
@@ -93,7 +106,6 @@ _ROLE_CATALOG: dict[RoleName, RoleDefinition] = {
 优先 Glob/Grep/Read 获取可引用原文，关键词检索不足时才用 semantic search。
 不得修改知识文件或数据库。结论必须区分“文档明确说明”“根据证据推断”与
 “当前资料没有覆盖”，并在摘要中写出文件路径或 document_id。""",
-        model_key="local-chat",
         model_tier="fast",
         sandbox_mode="read-only",
         tools_allowlist=_KNOWLEDGE_TOOLS,
@@ -109,7 +121,6 @@ _ROLE_CATALOG: dict[RoleName, RoleDefinition] = {
 状态只读工具，围绕 task_brief 返回资产身份、归属、拓扑或状态证据。
 “尚未探测”不等于“离线”；监控当前状态必须以最新事件派生结果为准。
 不得修改资产、目标或状态记录，证据不足时明确列出缺少的筛选条件。""",
-        model_key="local-chat",
         model_tier="fast",
         sandbox_mode="read-only",
         tools_allowlist=_OPS_TOOLS,
@@ -127,7 +138,6 @@ _ROLE_CATALOG: dict[RoleName, RoleDefinition] = {
 最终回答必须是一个 JSON 对象，不要 Markdown 代码围栏：
 {"branch":"分支名","hypothesis":"被检验的假设","confidence":0到1,
 "evidence":["证据"],"gaps":["证据缺口"],"next_checks":["下一步只读检查"]}。""",
-        model_key="local-chat",
         model_tier="balanced",
         sandbox_mode="read-only",
         tools_allowlist=_KNOWLEDGE_TOOLS + _OPS_TOOLS,
@@ -144,8 +154,7 @@ _ROLE_CATALOG: dict[RoleName, RoleDefinition] = {
 必要时可调用只读知识/CMDB/监控工具复核，但不得修改数据或发起处置。
 严格按 task_brief 的 output_contract 返回一个 JSON 对象，不要 Markdown 围栏，
 并把无法验证、缺少变更日志或解析失败的内容列入 evidence_gaps。""",
-        model_key="local-chat",
-        model_tier="reasoning",
+        model_tier="strong",
         sandbox_mode="read-only",
         tools_allowlist=_KNOWLEDGE_TOOLS + _OPS_TOOLS,
     ),

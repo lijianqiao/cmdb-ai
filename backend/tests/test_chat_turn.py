@@ -788,7 +788,7 @@ async def test_turn_usage_is_written_to_the_final_assistant_message(
     assert final.completion_tokens == 50  # 20 + 30
     assert final.cost_usd == pytest.approx(0.003)
     assert final.usage_by_model == {
-        "local-chat": {
+        "chat-balanced": {
             "prompt_tokens": 250.0,
             "completion_tokens": 50.0,
             "cost_usd": pytest.approx(0.003),

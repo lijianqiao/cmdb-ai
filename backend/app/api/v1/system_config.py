@@ -16,24 +16,22 @@ from app.crud.system_config import system_config_crud
 from app.models.user import User
 from app.schemas.common import ResponseEnvelope, success_response
 from app.schemas.system_config import (
+    CHAT_TIERS,
     LlmSystemConfigUpdate,
     OperationsSystemConfigUpdate,
     SystemConfigResponse,
 )
 from app.services.system_config import (
     KEY_CMDB_DIFF_INTERVAL_SECONDS,
-    KEY_LLM_CHAT_BASE_URL,
-    KEY_LLM_CHAT_INPUT_COST_PER_MILLION_USD,
-    KEY_LLM_CHAT_MODEL,
-    KEY_LLM_CHAT_OUTPUT_COST_PER_MILLION_USD,
-    KEY_LLM_EMBEDDING_BASE_URL,
-    KEY_LLM_EMBEDDING_MODEL,
     KEY_MONITOR_EVENT_RETENTION_DAYS,
     KEY_MONITOR_PROBE_TIMEOUT_SECONDS,
     KEY_MONITOR_SWEEP_INTERVAL_SECONDS,
     LLM_CONFIG_KEYS,
     OPERATIONS_CONFIG_KEYS,
     build_system_config_response,
+    chat_tier_api_key_action,
+    chat_tier_payload,
+    llm_config_plain_values,
     save_llm_config,
     save_operations_config,
 )
@@ -70,18 +68,13 @@ async def _build_llm_audit_detail(
         不含 API Key 明文的审计详情
     """
     existing = await system_config_crud.get_by_keys(db, LLM_CONFIG_KEYS)
-    new_values = {
-        KEY_LLM_CHAT_BASE_URL: payload.chat_base_url,
-        KEY_LLM_CHAT_MODEL: payload.chat_model,
-        KEY_LLM_CHAT_INPUT_COST_PER_MILLION_USD: str(
-            payload.chat_input_cost_per_million_usd
-        ),
-        KEY_LLM_CHAT_OUTPUT_COST_PER_MILLION_USD: str(
-            payload.chat_output_cost_per_million_usd
-        ),
-        KEY_LLM_EMBEDDING_BASE_URL: payload.embedding_base_url,
-        KEY_LLM_EMBEDDING_MODEL: payload.embedding_model,
-    }
+    new_values = llm_config_plain_values(payload)
+    secret_parts: list[str] = []
+    for tier in CHAT_TIERS:
+        action = chat_tier_api_key_action(chat_tier_payload(payload, tier))
+        if action is not None:
+            secret_parts.append(f"chat_{tier}_api_key={action}")
+
     changed_keys: list[str] = []
     for key, new_value in new_values.items():
         row = existing.get(key)
@@ -93,11 +86,6 @@ async def _build_llm_audit_detail(
     if changed_keys:
         parts.append(f"变更键: {', '.join(changed_keys)}")
 
-    secret_parts: list[str] = []
-    if payload.clear_chat_api_key:
-        secret_parts.append("chat_api_key=已清空")
-    elif payload.chat_api_key is not None:
-        secret_parts.append("chat_api_key=已替换")
     if payload.clear_embedding_api_key:
         secret_parts.append("embedding_api_key=已清空")
     elif payload.embedding_api_key is not None:
