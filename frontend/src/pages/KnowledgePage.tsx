@@ -22,6 +22,7 @@ import { Input } from "@/components/ui/input"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -91,6 +92,18 @@ export function KnowledgePage() {
     for (const category of categories) map.set(category.id, category.name)
     return map
   }, [categories])
+
+  /** base-ui 的 Select 需要 items 才能在受控赋值时渲染选中项文案 */
+  const categoryItems = useMemo(
+    () => [
+      { label: "全部分类", value: ALL_CATEGORIES },
+      ...categories.map((category) => ({
+        label: category.name,
+        value: String(category.id),
+      })),
+    ],
+    [categories],
+  )
 
   const resetToFirstPage = () => {
     setPage(1)
@@ -319,6 +332,7 @@ export function KnowledgePage() {
         </Button>
 
         <Select
+          items={categoryItems}
           value={categoryFilter}
           onValueChange={(value) => {
             // Base UI 的 Select 清空选择时会传 null，回落到「全部分类」
@@ -327,15 +341,16 @@ export function KnowledgePage() {
           }}
         >
           <SelectTrigger className="w-44">
-            <SelectValue placeholder="全部分类" />
+            <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value={ALL_CATEGORIES}>全部分类</SelectItem>
-            {categories.map((category) => (
-              <SelectItem key={category.id} value={String(category.id)}>
-                {category.name}
-              </SelectItem>
-            ))}
+            <SelectGroup>
+              {categoryItems.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
+                </SelectItem>
+              ))}
+            </SelectGroup>
           </SelectContent>
         </Select>
 
