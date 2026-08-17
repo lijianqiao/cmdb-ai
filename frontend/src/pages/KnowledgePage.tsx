@@ -56,7 +56,6 @@ export function KnowledgePage() {
   const [categories, setCategories] = useState<KnowledgeCategory[]>([])
   const [categoryFilter, setCategoryFilter] = useState<string>(ALL_CATEGORIES)
   const [pendingOnly, setPendingOnly] = useState(false)
-  const [searchInput, setSearchInput] = useState("")
   const [search, setSearch] = useState("")
   const [selectedIds, setSelectedIds] = useState<number[]>([])
   const [isClassifying, setIsClassifying] = useState(false)
@@ -111,11 +110,6 @@ export function KnowledgePage() {
   const resetToFirstPage = () => {
     setPage(1)
     setSelectedIds([])
-  }
-
-  const handleSearch = () => {
-    setSearch(searchInput.trim())
-    resetToFirstPage()
   }
 
   const toggleSelected = (id: number) => {
@@ -349,17 +343,14 @@ export function KnowledgePage() {
 
       <div className="flex flex-wrap items-center gap-2">
         <Input
-          value={searchInput}
-          onChange={(event) => setSearchInput(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") handleSearch()
+          value={search}
+          onChange={(event) => {
+            setSearch(event.target.value)
+            resetToFirstPage()
           }}
-          placeholder="搜索标题或文件名"
+          placeholder="搜索标题或文件名..."
           className="w-56"
         />
-        <Button type="button" variant="outline" onClick={handleSearch}>
-          搜索
-        </Button>
 
         <Select
           items={categoryItems}
