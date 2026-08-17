@@ -9,9 +9,14 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from app.schemas.common import ApiModel
+
+# 动态凭据是一次性明文口令，用 SecretStr 而不是 str：任何 repr()、model_dump()、
+# 异常链或未来新增的日志都不会带出明文。main.py 的 422 处理器已经剥掉了校验
+# 错误里的 input 字段，这里是纵深防御的第二层。
+type DynamicCredentialPassword = SecretStr | None
 
 
 class HitlDecideRequest(BaseModel):
@@ -20,7 +25,9 @@ class HitlDecideRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     approve: bool
-    dynamic_credential_password: str | None = Field(default=None, min_length=1, max_length=256)
+    dynamic_credential_password: DynamicCredentialPassword = Field(
+        default=None, min_length=1, max_length=256
+    )
 
 
 class HitlRetryRequest(BaseModel):
@@ -28,7 +35,9 @@ class HitlRetryRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    dynamic_credential_password: str | None = Field(default=None, min_length=1, max_length=256)
+    dynamic_credential_password: DynamicCredentialPassword = Field(
+        default=None, min_length=1, max_length=256
+    )
 
 
 class HitlUnknownResolutionRequest(BaseModel):
@@ -60,3 +69,6 @@ class HitlProposalResponse(ApiModel):
     created_at: datetime
     result_excerpt: str | None = None
     asset_credential_type: str | None = None
+    # 审批成功但执行未启动时的原因。非 None 表示提案已 APPROVED、可直接重试，
+    # 前端据此把主操作从「批准」切换成「重试执行」而不是显示「批准失败」。
+    execution_error: str | None = None

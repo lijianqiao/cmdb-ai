@@ -347,6 +347,9 @@ async def gate_action(
             approve=True,
             reviewed_by_user_id=actor_user_id,
             publisher=publisher,
+            # 自动批准没有 HTTP 请求上下文，用固定标记与人工审批的真实 IP 区分开
+            actor_ip="agent",
+            auto_approval_mode=approval_mode,
         )
         return approved
 
@@ -363,6 +366,8 @@ async def decide_proposal(
     approve: bool,
     reviewed_by_user_id: int,
     publisher: HitlEventPublisher | None = None,
+    actor_ip: str = "",
+    auto_approval_mode: str | None = None,
 ) -> ProposalSafeSummary:
     """审批提案但不自动恢复执行。
 
@@ -372,6 +377,13 @@ async def decide_proposal(
         approve: True 表示批准，False 表示拒绝。
         reviewed_by_user_id: 真实审批用户 ID。
         publisher: 可选的安全事件发布器。
+        actor_ip: 审批来源 IP，写进审计。自动批准路径没有请求上下文，
+            由调用方传固定标记（见 auto_approval_mode）。
+        auto_approval_mode: 非 None 表示这是**档位自动批准**而不是人工点的批准，
+            值为触发它的会话档位（assist / full）。审计动作会写成
+            hitl_auto_approved 并在 detail 里带上档位——否则事后无法回答
+            「这条 reboot 是人工批的还是因为会话开着 full 档被自动批的」，
+            而这两件事的责任性质完全不同。
 
     Returns:
         审批后的安全提案摘要。
@@ -382,13 +394,24 @@ async def decide_proposal(
         approve=approve,
         reviewed_by_user_id=reviewed_by_user_id,
     )
-    action = "hitl_approved" if approve else "hitl_rejected"
+    if not approve:
+        action = "hitl_rejected"
+    elif auto_approval_mode is not None:
+        action = "hitl_auto_approved"
+    else:
+        action = "hitl_approved"
+
+    detail = f"动作类型：{proposal.action_type}"
+    if auto_approval_mode is not None:
+        detail = f"{detail}；审批档位：{auto_approval_mode}"
+
     await log_audit(
         db,
         reviewed_by_user_id,
         action,
         target=f"hitl_proposal:{proposal.id}",
-        detail=f"动作类型：{proposal.action_type}",
+        detail=detail,
+        ip=actor_ip,
     )
     if not approve:
         await _publish(publisher, proposal=proposal, event_type="hitl_resolved")
@@ -402,6 +425,7 @@ async def resume_proposal(
     actor_user_id: int | None = None,
     publisher: HitlEventPublisher | None = None,
     dynamic_password: str | None = None,
+    actor_ip: str = "",
 ) -> ProposalSafeSummary:
     """幂等恢复一个已批准提案，委托独立执行服务完成外部调用。
 
@@ -411,6 +435,7 @@ async def resume_proposal(
         actor_user_id: 触发恢复的用户 ID，可为空。
         publisher: 可选的安全事件发布器。
         dynamic_password: 动态凭据资产执行时的一次性明文密码，不落库。
+        actor_ip: 触发来源 IP，透传给执行阶段的审计记录。
 
     Returns:
         执行完成、预检失败或 UNKNOWN 后的安全摘要。
@@ -430,6 +455,7 @@ async def resume_proposal(
         actor_user_id=actor_user_id,
         publisher=publisher,
         dynamic_password=dynamic_password,
+        actor_ip=actor_ip,
     )
     db.expire_all()
     return summary

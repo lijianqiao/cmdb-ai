@@ -19,7 +19,8 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.device_result_summary import SummaryDelivery, deliver_device_query_summary
@@ -31,7 +32,7 @@ from app.agent.hitl import (
 )
 from app.agent.ws_hub import BufferedWsHitlEventPublisher, hub
 from app.core.database import get_db
-from app.core.deps import require_permission
+from app.core.deps import get_client_ip, require_permission
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.hitl_proposal import InvalidHitlTransitionError, hitl_proposal_crud
 from app.models.user import User
@@ -48,6 +49,16 @@ from app.utils.audit import log_audit
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _reveal_password(secret: SecretStr | None) -> str | None:
+    """在调用执行链之前解开一次性口令。
+
+    明文只在这一个位置产生，从这里往下（resume_proposal → 执行器 → Netmiko）
+    是短暂的内存传递，不落库、不进日志、不进 ExecutionResult.detail。
+    集中成一个函数是为了让「明文从哪来」在代码里只有一个可搜的答案。
+    """
+    return secret.get_secret_value() if secret is not None else None
 
 
 async def _deliver_executed_query_summary(
@@ -181,10 +192,19 @@ async def get_proposal(
 async def decide_hitl_proposal(
     proposal_id: int,
     body: HitlDecideRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("agent:hitl_approve")),
 ) -> ResponseEnvelope[HitlProposalResponse]:
-    """批准或拒绝提案；批准后触发 resume，拒绝则只更新状态。"""
+    """批准或拒绝提案；批准后触发 resume，拒绝则只更新状态。
+
+    **审批与执行是两件事**：审批一旦提交就不可回滚（执行器必须能观测到已提交的
+    EXECUTING）。因此执行阶段失败时**不返回 409**——那会让前端显示「批准失败」，
+    而提案其实已经 APPROVED，用户再点批准只会因状态已变再拿一个 409，卡死循环。
+    这里改为返回 200 + `execution_error`，让前端如实显示「已批准，执行失败」
+    并把主操作切换成「重试执行」。
+    """
+    actor_ip = get_client_ip(request)
     existing = await hitl_proposal_crud.get(db, proposal_id)
     if existing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
@@ -200,6 +220,9 @@ async def decide_hitl_proposal(
 
     publisher = BufferedWsHitlEventPublisher()
     delivery: SummaryDelivery | None = None
+    execution_error: str | None = None
+
+    # 阶段一：审批。这一段失败什么都没提交，可以如实返回 4xx。
     try:
         await decide_proposal(
             db,
@@ -207,26 +230,10 @@ async def decide_hitl_proposal(
             approve=body.approve,
             reviewed_by_user_id=current_user.id,
             publisher=publisher,
+            actor_ip=actor_ip,
         )
         await db.commit()
-        if body.approve:
-            await resume_proposal(
-                db,
-                proposal_id=proposal_id,
-                actor_user_id=current_user.id,
-                publisher=publisher,
-                dynamic_password=body.dynamic_credential_password,
-            )
-            delivery = await _deliver_executed_query_summary(
-                db,
-                proposal_id=proposal_id,
-            )
     except InvalidHitlTransitionError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(exc),
-        ) from exc
-    except HitlResumeError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
@@ -245,6 +252,29 @@ async def decide_hitl_proposal(
             ) from exc
         raise
 
+    # 阶段二：执行。此时 APPROVED 已落库不可回滚，失败只记录不抛 HTTP 错误。
+    if body.approve:
+        try:
+            await resume_proposal(
+                db,
+                proposal_id=proposal_id,
+                actor_user_id=current_user.id,
+                publisher=publisher,
+                dynamic_password=_reveal_password(body.dynamic_credential_password),
+                actor_ip=actor_ip,
+            )
+            delivery = await _deliver_executed_query_summary(
+                db,
+                proposal_id=proposal_id,
+            )
+        except HitlResumeError as exc:
+            execution_error = str(exc)
+            logger.info(
+                "HITL 审批成功但执行未启动 proposal_id=%s reason=%s",
+                proposal_id,
+                execution_error,
+            )
+
     # 编排层已写入审计记录；审批已提交，执行服务在独立短会话内完成。
     await db.commit()
     # 提交后再广播 HITL 事件，避免前端收到事件后读不到未提交的行。
@@ -254,7 +284,11 @@ async def decide_hitl_proposal(
     proposal = await hitl_proposal_crud.get(db, proposal_id)
     if proposal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
-    return success_response(await _to_response(db, proposal), message="审批完成")
+    response = await _to_response(db, proposal)
+    if execution_error is not None:
+        response = response.model_copy(update={"execution_error": execution_error})
+        return success_response(response, message="已批准，但执行未成功，可重试")
+    return success_response(response, message="审批完成")
 
 
 @router.post(
@@ -264,10 +298,18 @@ async def decide_hitl_proposal(
 async def retry_hitl_proposal(
     proposal_id: int,
     body: HitlRetryRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("agent:hitl_approve")),
 ) -> ResponseEnvelope[HitlProposalResponse]:
-    """重试执行一个已批准但执行失败的提案；EXECUTED 时幂等返回。"""
+    """重试执行一个已批准但执行失败的提案；EXECUTED 时幂等返回。
+
+    **无论成功与否都先写一条审计**：重试可能在预检阶段就失败（命令不存在、
+    动态凭据缺失、资产被删），此时提案保持 APPROVED、执行阶段的审计一条都不会写。
+    如果这里也不写，管理员就能对同一条提案反复尝试直到某次成功，而日志里只留下
+    最后成功的那条——中间试了多少次、什么时候、从哪试的全部不可见。
+    """
+    actor_ip = get_client_ip(request)
     existing = await hitl_proposal_crud.get(db, proposal_id)
     if existing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
@@ -278,7 +320,7 @@ async def retry_hitl_proposal(
             detail="只有已批准但未执行成功的提案可以重试",
         )
 
-    if existing.status == "APPROVED" and existing.action_type in ("device_query", "device_control"):
+    if existing.action_type in ("device_query", "device_control"):
         raw_asset_id = existing.action_payload.get("asset_id")
         asset = await cmdb_asset_crud.get(db, raw_asset_id) if isinstance(raw_asset_id, int) else None
         if asset is not None and asset.credential_type == "dynamic" and not body.dynamic_credential_password:
@@ -286,6 +328,20 @@ async def retry_hitl_proposal(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="该资产使用动态凭据，重试时必须提供本次登录密码",
             )
+
+    # 「有人发起了重试」是一个已经发生的事实，与执行结果无关，所以**立即单独提交**，
+    # 不能挂在后面那次 commit 上：resume_proposal 会用 db.bind 派生独立短会话，
+    # 那些会话的生命周期不由这里控制，把审计的持久性押在它们身上是脆的
+    # （测试环境的 SQLite 共用连接时就会被内层 rollback 丢掉）。
+    await log_audit(
+        db,
+        current_user.id,
+        "hitl_retry_requested",
+        target=f"hitl_proposal:{proposal_id}",
+        detail=f"动作类型：{existing.action_type}",
+        ip=actor_ip,
+    )
+    await db.commit()
 
     publisher = BufferedWsHitlEventPublisher()
     delivery: SummaryDelivery | None = None
@@ -295,7 +351,8 @@ async def retry_hitl_proposal(
             proposal_id=proposal_id,
             actor_user_id=current_user.id,
             publisher=publisher,
-            dynamic_password=body.dynamic_credential_password,
+            dynamic_password=_reveal_password(body.dynamic_credential_password),
+            actor_ip=actor_ip,
         )
         delivery = await _deliver_executed_query_summary(
             db,
@@ -324,10 +381,12 @@ async def retry_hitl_proposal(
 async def resolve_unknown_proposal(
     proposal_id: int,
     body: HitlUnknownResolutionRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("agent:hitl_approve")),
 ) -> ResponseEnvelope[HitlProposalResponse]:
     """人工处置 UNKNOWN 提案：确认已执行或允许重试。"""
+    actor_ip = get_client_ip(request)
     existing = await hitl_proposal_crud.get(db, proposal_id)
     if existing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")
@@ -362,6 +421,7 @@ async def resolve_unknown_proposal(
         else "hitl_unknown_retry_authorized",
         target=f"hitl_proposal:{proposal_id}",
         detail=body.resolution,
+        ip=actor_ip,
     )
     await db.commit()
 

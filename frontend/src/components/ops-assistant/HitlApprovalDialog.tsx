@@ -100,7 +100,13 @@ export function HitlApprovalDialog({
   const detailError = propDetailError !== undefined ? propDetailError : innerError
   const deciding = propDeciding !== undefined ? propDeciding : innerDeciding
 
-  const normalized = status.trim().toUpperCase()
+  // 状态与 detail 遵循同一优先级：拉到的详情比 prop 新。
+  // 「审批成功但执行失败」时后端返回 200 + status=APPROVED，但**不会**发
+  // hitl_resolved 事件（批准路径不发），所以 prop 里的 status 还停在 PENDING。
+  // 不在这里取 detail 的话，弹窗会一直显示「批准」按钮，用户再点又因状态已变
+  // 拿到 409，卡死循环。
+  const effectiveStatus = detail?.status ?? status
+  const normalized = effectiveStatus.trim().toUpperCase()
   const isPending = normalized === "PENDING" || normalized === ""
 
   const displayActionType = detail?.action_type || actionType
@@ -111,15 +117,15 @@ export function HitlApprovalDialog({
 
   const resolvedResultExcerpt = detail?.result_excerpt ?? resultExcerpt ?? null
   const showResultExcerpt = shouldShowResultExcerpt(
-    status,
+    effectiveStatus,
     resolvedResultExcerpt,
   )
 
   const lastError = propLastError ?? readLastError(detail?.action_payload)
-  const retryAvailable = isRetryAvailable(canApprove, status)
+  const retryAvailable = isRetryAvailable(canApprove, effectiveStatus)
   const unknownResolutionAvailable = isUnknownResolutionAvailable(
     canApprove,
-    status,
+    effectiveStatus,
   )
 
   const approveDisabled = isApproveButtonDisabled(
@@ -182,13 +188,25 @@ export function HitlApprovalDialog({
         }
         const updated = await decideHitlProposal(proposalId, body)
         setInnerDetail(updated)
-        toast.success(
-          updated.status.trim().toUpperCase() === "APPROVED" && !updated.executed_at
-            ? "已批准但未执行"
-            : "审批完成，正在执行...",
-        )
+        if (updated.execution_error) {
+          // 审批本身成功了，失败的是执行——说清楚是哪一步，并提示可重试，
+          // 否则用户会以为要重新批准一次（而那只会拿到状态冲突）。
+          toast.warning(`已批准，但执行未启动：${updated.execution_error}。可重试执行`)
+        } else if (
+          updated.status.trim().toUpperCase() === "APPROVED" &&
+          !updated.executed_at
+        ) {
+          toast.success("已批准但未执行")
+        } else {
+          toast.success("审批完成，正在执行...")
+        }
       } catch (error: unknown) {
         toast.error(readErrorMessage(error, "批准失败"))
+        // 真正的失败也要把最新状态拉回来：审批可能已经落库（部分成功），
+        // 不刷新的话弹窗会停在 PENDING，用户重复点击只会一直拿到冲突。
+        void getHitlProposal(proposalId)
+          .then(setInnerDetail)
+          .catch(() => undefined)
       } finally {
         setInnerDeciding(false)
       }

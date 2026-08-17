@@ -394,6 +394,7 @@ async def _mark_execution_unknown(
     publisher: HitlEventPublisher | None,
     actor_user_id: int | None = None,
     last_error: str | None = None,
+    actor_ip: str = "",
 ) -> ProposalSafeSummary:
     """将 EXECUTING 提案标记为 UNKNOWN 并发布安全事件。
 
@@ -423,6 +424,7 @@ async def _mark_execution_unknown(
             # 审计 detail 刻意不带异常文本（见 test_unknown_execution_writes_audit）；
             # 失败原因走 action_payload["last_error"] 与服务端日志两条通道。
             detail=f"动作类型：{unknown.action_type}",
+            ip=actor_ip,
         )
         await db.commit()
 
@@ -436,6 +438,7 @@ async def _mark_execution_unexecuted(
     publisher: HitlEventPublisher | None,
     actor_user_id: int | None = None,
     last_error: str | None = None,
+    actor_ip: str = "",
 ) -> ProposalSafeSummary:
     """确定命令未下发：把 EXECUTING 回退成 APPROVED 并发布安全事件。
 
@@ -467,6 +470,7 @@ async def _mark_execution_unexecuted(
             target=f"hitl_proposal:{reverted.id}",
             # 与 UNKNOWN 路径一致：审计 detail 不带异常文本。
             detail=f"动作类型：{reverted.action_type}",
+            ip=actor_ip,
         )
         await db.commit()
 
@@ -498,6 +502,7 @@ async def execute_approved_proposal(
     dynamic_password: str | None = None,
     notify_executor: NotifyExecutorProtocol | None = None,
     device_executor: DeviceExecutorProtocol | None = None,
+    actor_ip: str = "",
 ) -> ProposalSafeSummary:
     """执行已批准提案：复检策略、认领 EXECUTING、调用外部执行器并完成状态迁移。
 
@@ -548,6 +553,7 @@ async def execute_approved_proposal(
             publisher,
             actor_user_id=actor_user_id,
             last_error="执行被取消",
+            actor_ip=actor_ip,
         )
         raise
     except Exception as exc:
@@ -560,6 +566,7 @@ async def execute_approved_proposal(
             publisher,
             actor_user_id=actor_user_id,
             last_error=type(exc).__name__,
+            actor_ip=actor_ip,
         )
 
     if result is None or not result.ok:
@@ -572,6 +579,7 @@ async def execute_approved_proposal(
                 publisher,
                 actor_user_id=actor_user_id,
                 last_error=last_error,
+            actor_ip=actor_ip,
             )
         return await _mark_execution_unknown(
             session_factory,
@@ -579,6 +587,7 @@ async def execute_approved_proposal(
             publisher,
             actor_user_id=actor_user_id,
             last_error=last_error,
+            actor_ip=actor_ip,
         )
 
     try:
@@ -607,11 +616,12 @@ async def execute_approved_proposal(
                 "hitl_executed",
                 target=f"hitl_proposal:{finished.id}",
                 detail=f"动作类型：{finished.action_type}",
+                ip=actor_ip,
             )
             await finish_db.commit()
     except asyncio.CancelledError:
         await _mark_execution_unknown(
-            session_factory, proposal_id, publisher, actor_user_id=actor_user_id
+            session_factory, proposal_id, publisher, actor_user_id=actor_user_id, actor_ip=actor_ip
         )
         raise
     except Exception as exc:
@@ -621,7 +631,7 @@ async def execute_approved_proposal(
             type(exc).__name__,
         )
         return await _mark_execution_unknown(
-            session_factory, proposal_id, publisher, actor_user_id=actor_user_id
+            session_factory, proposal_id, publisher, actor_user_id=actor_user_id, actor_ip=actor_ip
         )
 
     await _publish_execution_summary(publisher, finished, has_full_result=has_full_result)

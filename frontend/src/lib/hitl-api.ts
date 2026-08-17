@@ -21,6 +21,8 @@ export interface HitlProposal {
   created_at: string
   result_excerpt?: string | null
   asset_credential_type?: string | null
+  /** 审批成功但执行未启动时的原因。非空表示提案已 APPROVED、可直接重试 */
+  execution_error?: string | null
 }
 
 export interface HitlDecideRequest {
