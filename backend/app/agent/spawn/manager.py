@@ -1,23 +1,18 @@
-"""进程内子 Agent Spawn 运行时。
+"""SpawnManager：子 Agent 的进程内生命周期编排。
 
-实现流程：
-1. Spawn 前在同一 session 锁内完成角色、父子关系、预算和累计配额校验，非法请求不留回执。
-2. 合法请求先持久化 REQUESTED/SPAWNING、独立 child 消息与 spawn trace，再创建进程内 task。
-3. 每个 child 使用独立数据库 session 运行受限 Agent loop，并把预算用量和固定失败分类写回终态。
-4. wait 只等待而不取消 child；send 只写 RUNNING child 的隔离消息空间；list 始终从 registry 重建快照。
-5. close 按后代优先取消 task，有限等待后可强制 detach，并在 session 锁内只释放一次并发槽。
+负责 spawn/wait/send/close/list 五个动作、并发槽与 session 锁、任务与预算的进程内状态，
+以及崩溃恢复与回执 GC。数据契约见 types，回执转换见 receipts，准入校验见 admission。
+
+注意：测试通过 monkeypatch 打桩本模块的 _create_child_task 与 build_tool_dispatcher，
+两者必须在本模块命名空间里被查找，不要改成从别处间接引用。
 """
-
-from __future__ import annotations
 
 import asyncio
 import logging
-import math
-from collections.abc import Awaitable, Callable, Coroutine, Iterable
-from dataclasses import dataclass
+from collections.abc import Coroutine, Iterable
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal
 from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -26,6 +21,26 @@ from app.agent.budget import Budget
 from app.agent.loop import ChatFn, ToolResult, run_loop
 from app.agent.roles import get_role
 from app.agent.session import append_user_message
+from app.agent.spawn.admission import depth_from_path, path_depth, validate_child_budget
+from app.agent.spawn.receipts import _budget_payload, _to_receipt
+from app.agent.spawn.types import (
+    _ACTIVE_STATUSES,
+    _SAFE_ERROR_CLASSES,
+    _TERMINAL_STATUSES,
+    ChildBudgetSnapshot,
+    ChildErrorClass,
+    ChildNotFoundError,
+    ChildReceipt,
+    ChildRunner,
+    ChildRunResult,
+    ChildRuntimeUnavailableError,
+    ChildWaitTimeoutError,
+    NoopSpawnEventPublisher,
+    SpawnEventPublisher,
+    SpawnRejectedError,
+    _ChildToolRuntimeError,
+    _SessionRuntime,
+)
 from app.agent.tool_dispatch import build_tool_dispatcher, tool_schemas_for
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
@@ -36,188 +51,6 @@ from app.models.agent_registry import AgentRegistry
 from app.models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
-
-type ChildTerminalStatus = Literal["COMPLETED", "FAILED"]
-type ChildErrorClass = Literal["model", "tool", "policy_reject", "infra", "budget_exceeded"]
-
-_ACTIVE_STATUSES = frozenset({"REQUESTED", "SPAWNING", "RUNNING"})
-_TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED", "CLOSED"})
-_SAFE_ERROR_CLASSES = frozenset(
-    {"model", "tool", "policy_reject", "infra", "budget_exceeded"}
-)
-# AgentTraceEvent.step uses PostgreSQL's signed 32-bit Integer; close adds one.
-_MAX_CHILD_STEP = 2_147_483_646
-
-
-class _ChildToolRuntimeError(RuntimeError):
-    """Marks an unexpected exception that escaped the fail-closed dispatcher."""
-
-
-@dataclass(frozen=True, slots=True)
-class ChildBudgetSnapshot:
-    """Immutable configured limits plus the latest persisted usage."""
-
-    max_steps: int
-    max_cost_usd: float
-    max_wall_time_seconds: float
-    steps_used: int = 0
-    cost_used_usd: float = 0.0
-
-
-@dataclass(frozen=True, slots=True)
-class ChildReceipt:
-    """Session-independent, immutable view of one durable registry row."""
-
-    child_id: str
-    trace_id: str
-    session_id: int
-    parent_agent_id: str | None
-    agent_path: str
-    role: str
-    role_version: str
-    model: str
-    tools_allowlist: tuple[str, ...]
-    sandbox_mode: str
-    task_brief: str
-    budget: ChildBudgetSnapshot
-    status: str
-    result_summary: str | None
-    artifacts: tuple[str, ...]
-    created_at: datetime
-    status_changed_at: datetime
-    closed_at: datetime | None
-    force_closed: bool
-
-
-@dataclass(frozen=True, slots=True)
-class ChildRunResult:
-    """Safe result returned by an injected or default child runner."""
-
-    status: ChildTerminalStatus
-    result_summary: str | None
-    artifacts: tuple[str, ...] = ()
-    error_class: ChildErrorClass | None = None
-
-
-type ChildRunner = Callable[
-    [AsyncSession, ChildReceipt, Budget], Awaitable[ChildRunResult]
-]
-
-
-class SpawnRejectedError(ValueError):
-    """A request failed preflight without creating a registry row."""
-
-    def __init__(self, reason: str, *, limit_name: str | None = None) -> None:
-        self.reason = reason
-        self.limit_name = limit_name
-        super().__init__(f"child spawn rejected: {reason}")
-
-
-class ChildNotFoundError(LookupError):
-    """The opaque child id has no durable receipt."""
-
-    def __init__(self, child_id: str) -> None:
-        self.child_id = child_id
-        super().__init__("child receipt not found")
-
-
-class ChildWaitTimeoutError(TimeoutError):
-    """A wait deadline expired while child execution continues."""
-
-    def __init__(self, child_id: str, timeout_ms: int) -> None:
-        self.child_id = child_id
-        self.timeout_ms = timeout_ms
-        super().__init__("child wait deadline expired")
-
-
-class ChildRuntimeUnavailableError(RuntimeError):
-    """A durable active row has no runnable task in this process."""
-
-    def __init__(self, child_id: str, *, reason: str = "runtime_unavailable") -> None:
-        self.child_id = child_id
-        self.reason = reason
-        super().__init__(f"child runtime unavailable: {reason}")
-
-
-class ChildReceiptCorruptionError(RuntimeError):
-    """A durable registry row cannot be converted into a safe receipt."""
-
-    def __init__(self, child_id: str, *, field: str) -> None:
-        self.child_id = child_id
-        self.field = field
-        super().__init__(f"child receipt is corrupt: {field}")
-
-
-@runtime_checkable
-class SpawnEventPublisher(Protocol):
-    """子 Agent 生命周期事件发布协议。"""
-
-    async def publish_child_status(self, receipt: ChildReceipt) -> None:
-        """在持久化状态提交后广播安全子任务摘要。"""
-        ...
-
-
-class NoopSpawnEventPublisher:
-    """默认空实现：测试与未注入 WS 时不广播。"""
-
-    async def publish_child_status(self, receipt: ChildReceipt) -> None:
-        del receipt
-
-
-@dataclass(slots=True)
-class _SessionRuntime:
-    lock: asyncio.Lock
-    slots: asyncio.BoundedSemaphore
-    held_child_ids: set[str]
-    closing_child_counts: dict[str, int]
-
-
-def _receipt_step(value: object, *, child_id: str, field: str, minimum: int) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not minimum <= value <= _MAX_CHILD_STEP
-    ):
-        raise ChildReceiptCorruptionError(child_id, field=field)
-    return value
-
-
-def _receipt_number(
-    value: object,
-    *,
-    child_id: str,
-    field: str,
-    positive: bool,
-) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ChildReceiptCorruptionError(child_id, field=field)
-    try:
-        number = float(value)
-    except (OverflowError, ValueError):
-        raise ChildReceiptCorruptionError(child_id, field=field) from None
-    if not math.isfinite(number) or (number <= 0 if positive else number < 0):
-        raise ChildReceiptCorruptionError(child_id, field=field)
-    return number
-
-
-def _receipt_strings(value: object, *, child_id: str, field: str) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        raise ChildReceiptCorruptionError(child_id, field=field)
-    strings: list[str] = []
-    for item in value:
-        if not isinstance(item, str):
-            raise ChildReceiptCorruptionError(child_id, field=field)
-        strings.append(item)
-    return tuple(strings)
-
-
-def _utc(value: datetime | None) -> datetime | None:
-    """Normalize SQLite's naive round-trip and timezone-aware DB values alike."""
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
 
 
 def _create_child_task(
@@ -240,104 +73,6 @@ async def _await_reconciliation[T](coroutine: Coroutine[Any, Any, T]) -> T:
     if cancellation is not None:
         raise cancellation
     return result
-
-
-def _to_receipt(row: AgentRegistry) -> ChildReceipt:
-    """Copy one ORM row into immutable values without retaining session state."""
-    if not isinstance(row.budget, dict):
-        raise ChildReceiptCorruptionError(row.child_id, field="budget")
-    budget = row.budget
-    budget_fields = (
-        "max_steps",
-        "max_cost_usd",
-        "max_wall_time_seconds",
-        "steps_used",
-        "cost_used_usd",
-    )
-    for field in budget_fields:
-        if field not in budget:
-            raise ChildReceiptCorruptionError(
-                row.child_id,
-                field=f"budget.{field}",
-            )
-    steps_used = _receipt_step(
-        budget["steps_used"],
-        child_id=row.child_id,
-        field="budget.steps_used",
-        minimum=0,
-    )
-    max_steps = _receipt_step(
-        budget["max_steps"],
-        child_id=row.child_id,
-        field="budget.max_steps",
-        minimum=1,
-    )
-    if steps_used > max_steps:
-        raise ChildReceiptCorruptionError(
-            row.child_id,
-            field="budget.steps_used",
-        )
-    return ChildReceipt(
-        child_id=row.child_id,
-        trace_id=row.trace_id,
-        session_id=row.session_id,
-        parent_agent_id=row.parent_agent_id,
-        agent_path=row.agent_path,
-        role=row.role,
-        role_version=row.role_version,
-        model=row.model,
-        tools_allowlist=_receipt_strings(
-            row.tools_allowlist,
-            child_id=row.child_id,
-            field="tools_allowlist",
-        ),
-        sandbox_mode=row.sandbox_mode,
-        task_brief=row.task_brief,
-        budget=ChildBudgetSnapshot(
-            max_steps=max_steps,
-            max_cost_usd=_receipt_number(
-                budget["max_cost_usd"],
-                child_id=row.child_id,
-                field="budget.max_cost_usd",
-                positive=False,
-            ),
-            max_wall_time_seconds=_receipt_number(
-                budget["max_wall_time_seconds"],
-                child_id=row.child_id,
-                field="budget.max_wall_time_seconds",
-                positive=True,
-            ),
-            steps_used=steps_used,
-            cost_used_usd=_receipt_number(
-                budget["cost_used_usd"],
-                child_id=row.child_id,
-                field="budget.cost_used_usd",
-                positive=False,
-            ),
-        ),
-        status=row.status,
-        result_summary=row.result_summary,
-        artifacts=_receipt_strings(
-            row.artifacts,
-            child_id=row.child_id,
-            field="artifacts",
-        ),
-        created_at=_utc(row.created_at),  # type: ignore[arg-type]
-        status_changed_at=_utc(row.status_changed_at),  # type: ignore[arg-type]
-        closed_at=_utc(row.closed_at),
-        force_closed=row.force_closed,
-    )
-
-
-def _budget_payload(snapshot: ChildBudgetSnapshot) -> dict[str, object]:
-    return {
-        "max_steps": snapshot.max_steps,
-        "max_cost_usd": snapshot.max_cost_usd,
-        "max_wall_time_seconds": snapshot.max_wall_time_seconds,
-        "steps_used": snapshot.steps_used,
-        "cost_used_usd": snapshot.cost_used_usd,
-    }
-
 
 class SpawnManager:
     """Own child tasks and local concurrency slots for one Python process."""
@@ -406,73 +141,6 @@ class SpawnManager:
             )
             self._session_runtimes[session_id] = runtime
         return runtime
-
-    def _validated_budget(
-        self, override: ChildBudgetSnapshot | None
-    ) -> ChildBudgetSnapshot:
-        candidate = override or ChildBudgetSnapshot(
-            max_steps=self._child_max_steps,
-            max_cost_usd=self._child_max_cost_usd,
-            max_wall_time_seconds=self._child_max_wall_time_seconds,
-        )
-        if (
-            isinstance(candidate.max_steps, bool)
-            or not isinstance(candidate.max_steps, int)
-            or not 1 <= candidate.max_steps <= self._child_max_steps
-            or candidate.max_steps > _MAX_CHILD_STEP
-        ):
-            raise SpawnRejectedError(
-                "invalid_child_budget", limit_name="child_max_steps"
-            )
-        if (
-            isinstance(candidate.max_cost_usd, bool)
-            or not isinstance(candidate.max_cost_usd, int | float)
-            or not math.isfinite(candidate.max_cost_usd)
-            or not 0 <= candidate.max_cost_usd <= self._child_max_cost_usd
-        ):
-            raise SpawnRejectedError(
-                "invalid_child_budget", limit_name="child_max_cost_usd"
-            )
-        if (
-            isinstance(candidate.max_wall_time_seconds, bool)
-            or not isinstance(candidate.max_wall_time_seconds, int | float)
-            or not math.isfinite(candidate.max_wall_time_seconds)
-            or not 0
-            < candidate.max_wall_time_seconds
-            <= self._child_max_wall_time_seconds
-        ):
-            raise SpawnRejectedError(
-                "invalid_child_budget", limit_name="child_max_wall_time_seconds"
-            )
-        if (
-            isinstance(candidate.steps_used, bool)
-            or not isinstance(candidate.steps_used, int)
-            or candidate.steps_used != 0
-        ):
-            raise SpawnRejectedError(
-                "invalid_child_budget", limit_name="steps_used"
-            )
-        if (
-            isinstance(candidate.cost_used_usd, bool)
-            or not isinstance(candidate.cost_used_usd, int | float)
-            or not math.isfinite(candidate.cost_used_usd)
-            or candidate.cost_used_usd != 0
-        ):
-            raise SpawnRejectedError(
-                "invalid_child_budget", limit_name="cost_used_usd"
-            )
-        return ChildBudgetSnapshot(
-            max_steps=candidate.max_steps,
-            max_cost_usd=float(candidate.max_cost_usd),
-            max_wall_time_seconds=float(candidate.max_wall_time_seconds),
-        )
-
-    @staticmethod
-    def _depth_from_path(agent_path: str) -> int:
-        parts = [part for part in agent_path.split("/") if part]
-        if not parts or parts[0] != "root":
-            raise SpawnRejectedError("invalid_parent_path")
-        return len(parts) - 1
 
     async def spawn_agent(
         self,
@@ -546,13 +214,18 @@ class SpawnManager:
                             raise SpawnRejectedError("parent_closed")
                         if role != "reviewer":
                             raise SpawnRejectedError("nested_role_not_allowed")
-                        depth = self._depth_from_path(parent.agent_path) + 1
+                        depth = depth_from_path(parent.agent_path) + 1
                     if depth > self._max_spawn_depth:
                         raise SpawnRejectedError(
                             "max_spawn_depth", limit_name="max_spawn_depth"
                         )
 
-                    selected_budget = self._validated_budget(budget)
+                    selected_budget = validate_child_budget(
+                        budget,
+                        max_steps=self._child_max_steps,
+                        max_cost_usd=self._child_max_cost_usd,
+                        max_wall_time_seconds=self._child_max_wall_time_seconds,
+                    )
                     cumulative_count = await agent_registry_crud.count_for_session(
                         db, session_id
                     )
@@ -1233,10 +906,6 @@ class SpawnManager:
             rows = await agent_registry_crud.list_for_session(db, session_id)
             return tuple(_to_receipt(row) for row in rows)
 
-    @staticmethod
-    def _path_depth(agent_path: str) -> int:
-        return len([part for part in agent_path.split("/") if part])
-
     async def _recover_close_one(
         self,
         child_id: str,
@@ -1290,7 +959,7 @@ class SpawnManager:
             rows = await agent_registry_crud.list_active(db)
         ordered = sorted(
             rows,
-            key=lambda row: (-self._path_depth(row.agent_path), row.created_at, row.child_id),
+            key=lambda row: (-path_depth(row.agent_path), row.created_at, row.child_id),
         )
         closed = [
             await self._recover_close_one(row.child_id, error_class="infra")

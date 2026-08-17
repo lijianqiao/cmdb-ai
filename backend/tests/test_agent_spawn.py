@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 from collections.abc import AsyncIterator
 from dataclasses import FrozenInstanceError, dataclass
 from datetime import UTC, datetime
@@ -100,6 +101,12 @@ async def spawn_db(tmp_path: Path) -> AsyncIterator[SpawnDatabase]:
             other_session_id=session_ids[1],
         )
     finally:
+        # 强制 detach 路径（close_agent 等待超时后放弃）会留下没跑完 __aexit__ 的
+        # 子 session，它持有的连接不在池里，engine.dispose() 收不到，只能等 GC。
+        # 不在这里显式回收的话，终结动作会落在后续任意一个测试的 teardown 里，
+        # 表现为跨文件的、随代码布局漂移的 StaticPool CancelledError。
+        # 在本 fixture 作用域内收干净，把这个既有泄漏关在它自己的测试里。
+        gc.collect()
         await engine.dispose()
 
 
@@ -1912,7 +1919,7 @@ async def test_create_task_failure_is_compensated_and_slot_is_reusable(
         raise RuntimeError("task factory secret")
 
     with monkeypatch.context() as patcher:
-        patcher.setattr("app.agent.spawn._create_child_task", fail_create_task)
+        patcher.setattr("app.agent.spawn.manager._create_child_task", fail_create_task)
         with pytest.raises(ChildRuntimeUnavailableError) as raised:
             await manager.spawn_agent(
                 session_id=spawn_db.session_id,
@@ -1970,7 +1977,7 @@ async def test_default_runner_maps_escaped_dispatch_exception_to_tool(
             completion_tokens=1,
         )
 
-    monkeypatch.setattr("app.agent.spawn.build_tool_dispatcher", raising_dispatcher)
+    monkeypatch.setattr("app.agent.spawn.manager.build_tool_dispatcher", raising_dispatcher)
     manager = SpawnManager(spawn_db.session_factory, chat_fn=tool_call_chat)
     child = await manager.spawn_agent(
         session_id=spawn_db.session_id,
