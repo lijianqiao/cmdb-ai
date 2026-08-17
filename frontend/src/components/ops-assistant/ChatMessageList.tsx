@@ -33,6 +33,7 @@ export interface ChatMessageListProps {
   sessionId: number
   messages: OpsChatItem[]
   isLoading?: boolean
+  isSending?: boolean
   hasMore?: boolean
   isLoadingOlder?: boolean
   onLoadOlder?: () => void
@@ -108,13 +109,16 @@ function TurnRow({
   turn,
   sessionId,
   isLastTurn,
+  isSending = false,
 }: {
   turn: ChatTurnGroup
   sessionId: number
   isLastTurn: boolean
+  isSending?: boolean
 }) {
   const isGenerating = Boolean(
     turn.assistantMessage?.streaming ||
+      (isLastTurn && isSending) ||
       (!turn.assistantMessage && isLastTurn && turn.processItems.length > 0),
   )
 
@@ -138,7 +142,7 @@ function TurnRow({
         </div>
       ) : null}
 
-      {/* 3. 助手最终回答（全轮唯一暴露在外的最终结果） */}
+      {/* 3. 助手最终回答（全轮唯一暴露在外的最终结果，或生成中占位） */}
       {turn.assistantMessage ? (
         <div className="group relative flex justify-start">
           <div className="relative max-w-[90%] rounded-2xl border bg-card px-4 py-3 text-card-foreground shadow-xs md:max-w-3xl">
@@ -172,6 +176,13 @@ function TurnRow({
             ) : null}
           </div>
         </div>
+      ) : isGenerating ? (
+        <div className="group relative flex justify-start">
+          <div className="flex items-center gap-2 rounded-2xl border bg-card px-4 py-3 text-xs text-muted-foreground shadow-xs">
+            <Spinner className="size-3.5 text-primary" />
+            <span>生成中...</span>
+          </div>
+        </div>
       ) : null}
 
       {/* 4. 错误信息 */}
@@ -193,6 +204,7 @@ export function ChatMessageList({
   sessionId,
   messages,
   isLoading = false,
+  isSending = false,
   hasMore = false,
   isLoadingOlder = false,
   onLoadOlder,
@@ -294,6 +306,7 @@ export function ChatMessageList({
             turn={turn}
             sessionId={sessionId}
             isLastTurn={index === turns.length - 1}
+            isSending={index === turns.length - 1 ? isSending : false}
           />
         ))}
         <div ref={bottomRef} />

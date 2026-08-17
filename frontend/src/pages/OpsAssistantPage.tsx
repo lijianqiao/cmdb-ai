@@ -46,6 +46,8 @@ import {
   patchAgentSession,
 } from "@/lib/agent-api"
 import { PERMISSIONS } from "@/lib/constants"
+import { decideHitlProposal } from "@/lib/hitl-api"
+import { readErrorMessage } from "@/components/ops-assistant/hitlApprovalCardUtils"
 import { cn } from "@/lib/utils"
 import type { ApprovalMode, AgentSession } from "@/types/agent"
 import { APPROVAL_MODE_LABELS } from "@/types/agent"
@@ -93,6 +95,7 @@ export function OpsAssistantPage() {
     monitorAlert,
     clearMonitorAlert,
     sendMessage,
+    reloadSnapshot,
     loadOlder,
     hasMore,
     isLoadingOlder,
@@ -218,6 +221,49 @@ export function OpsAssistantPage() {
     await patchApprovalMode(targetId, "full")
   }
 
+  const [isExecutingHitl, setIsExecutingHitl] = useState(false)
+  const isBusy = isSending || isExecutingHitl
+
+  const handleApproveHitl = async (dynamicPassword?: string): Promise<void> => {
+    if (activeHitl == null) return
+    setIsExecutingHitl(true)
+    try {
+      const body: { approve: true; dynamic_credential_password?: string } = {
+        approve: true,
+      }
+      if (dynamicPassword) {
+        body.dynamic_credential_password = dynamicPassword
+      }
+      const updated = await decideHitlProposal(activeHitl.proposalId, body)
+      toast.success(
+        updated.status.trim().toUpperCase() === "APPROVED" && !updated.executed_at
+          ? "已批准但未执行"
+          : "审批完成，正在执行与生成回答...",
+      )
+    } catch (error: unknown) {
+      toast.error(readErrorMessage(error, "批准失败"))
+    } finally {
+      setIsExecutingHitl(false)
+      await reloadSnapshot()
+    }
+  }
+
+  const handleRejectHitl = async (): Promise<boolean> => {
+    if (activeHitl == null) return false
+    setIsExecutingHitl(true)
+    try {
+      await decideHitlProposal(activeHitl.proposalId, { approve: false })
+      toast.success("已拒绝该提案")
+      return true
+    } catch (error: unknown) {
+      toast.error(readErrorMessage(error, "拒绝失败"))
+      return false
+    } finally {
+      setIsExecutingHitl(false)
+      await reloadSnapshot()
+    }
+  }
+
   const connectionLabel = wsStatusLabel(reconnecting, wsStatus)
 
   return (
@@ -272,6 +318,8 @@ export function OpsAssistantPage() {
           reason={activeHitl.reason}
           assetId={activeHitl.assetId}
           resultExcerpt={activeHitl.resultExcerpt}
+          onApprove={handleApproveHitl}
+          onReject={handleRejectHitl}
         />
       ) : null}
 
@@ -449,6 +497,7 @@ export function OpsAssistantPage() {
                 sessionId={selectedSessionId}
                 messages={messages}
                 isLoading={isLoadingHistory}
+                isSending={isBusy}
                 hasMore={hasMore}
                 isLoadingOlder={isLoadingOlder}
                 onLoadOlder={loadOlder}
@@ -460,8 +509,8 @@ export function OpsAssistantPage() {
                   onDismiss={clearMonitorAlert}
                 />
                 <ChatInput
-                  disabled={inputDisabled}
-                  isSending={isSending}
+                  disabled={inputDisabled || isExecutingHitl}
+                  isSending={isBusy}
                   approvalMode={approvalMode}
                   onApprovalModeSelect={handleApprovalModeSelect}
                   onSend={sendMessage}

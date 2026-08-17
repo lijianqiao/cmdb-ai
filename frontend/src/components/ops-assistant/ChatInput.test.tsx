@@ -38,4 +38,19 @@ describe("ChatInput", () => {
 
     expect(screen.getByLabelText("审批模式")).toHaveAttribute("disabled")
   })
+
+  it("isSending 为 true 时禁用输入框并展示'生成中...'按钮", () => {
+    render(
+      <ChatInput
+        approvalMode="ask"
+        isSending={true}
+        onApprovalModeSelect={vi.fn()}
+        onSend={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByLabelText("消息输入")).toBeDisabled()
+    expect(screen.getByRole("button", { name: "生成中" })).toBeDisabled()
+    expect(screen.getByText("生成中...")).toBeInTheDocument()
+  })
 })

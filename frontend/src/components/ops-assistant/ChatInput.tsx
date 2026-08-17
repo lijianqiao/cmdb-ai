@@ -109,7 +109,7 @@ export function ChatInput({
         onChange={(event) => setValue(event.target.value)}
         onKeyDown={handleKeyDown}
         placeholder={placeholder}
-        disabled={disabled}
+        disabled={disabled || isSending}
         rows={1}
         className="max-h-32 min-h-10 field-sizing-content py-2.5 leading-5 md:text-sm"
         aria-label="消息输入"
@@ -123,16 +123,16 @@ export function ChatInput({
           variant="default"
           size="xs"
           className="h-8 gap-1.5 rounded-md px-2.5 text-sm"
-          disabled={disabled || isSending || !value.trim()}
+          disabled={disabled || isSending || (!isSending && !value.trim())}
           onClick={() => void submit()}
-          aria-label="发送"
+          aria-label={isSending ? "生成中" : "发送"}
         >
           {isSending ? (
             <Spinner data-icon="inline-start" />
           ) : (
             <SentIcon data-icon="inline-start" />
           )}
-          发送
+          {isSending ? "生成中..." : "发送"}
         </InputGroupButton>
       </InputGroupAddon>
     </InputGroup>

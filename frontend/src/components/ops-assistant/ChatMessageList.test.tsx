@@ -237,4 +237,29 @@ describe("ChatMessageList scroll and pagination", () => {
     expect(screen.getByText("第一步：正在获取资产详情...")).toBeInTheDocument()
     expect(screen.getByText("工具调用 · list_assets")).toBeInTheDocument()
   })
+
+  it("当 isSending 为 true 且助手尚未返回最终回答时，渲染'生成中...'占位气泡", () => {
+    render(
+      <ChatMessageList
+        sessionId={10}
+        messages={[
+          { kind: "user", id: "msg:1", content: "帮我查询 10.11.210.69 配置" },
+          {
+            kind: "hitl",
+            id: "hitl:1",
+            proposalId: 1,
+            actionType: "device_query",
+            status: "APPROVED",
+            reason: "排查设备",
+            assetId: 2,
+            resultExcerpt: null,
+            hasFullResult: false,
+          },
+        ]}
+        isSending={true}
+      />,
+    )
+
+    expect(screen.getByText("生成中...")).toBeInTheDocument()
+  })
 })
