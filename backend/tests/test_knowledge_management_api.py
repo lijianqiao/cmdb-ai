@@ -392,3 +392,112 @@ async def test_classify_requires_manage_permission(
         headers=auth_headers,
     )
     assert response.status_code == 403, response.text
+
+
+async def test_classify_never_offers_uncategorized_as_a_candidate(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    stub_embedding: None,
+) -> None:
+    """「未分类」是收纳桶，不能进候选清单。
+
+    放进去就等于允许模型回答"保持原地不动"，而待归类文档本来就在未分类里——
+    那种建议落库后在管理页看着可点，点下去分类纹丝不动，只是把建议清空了。
+    """
+    await _grant_knowledge_permissions(db_session, test_user)
+    monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
+    await _create_category(client, auth_headers, "sop")
+    # 不带 category_code 上传 → 落到「未分类」
+    document = await _upload(
+        client, auth_headers, title="待归类", filename="u.md",
+        content=b"some runbook", category_code=None,
+    )
+
+    prompts: list[str] = []
+
+    async def capture_chat(
+        model_key: str, messages: list[object], **kwargs: object
+    ) -> ChatResult:
+        prompts.append("\n".join(str(m.content) for m in messages))  # type: ignore[attr-defined]
+        return ChatResult(
+            content='{"category":"sop","confidence":0.9,"reason":"是 SOP"}',
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    monkeypatch.setattr("app.services.knowledge_classification.chat", capture_chat)
+
+    response = await client.post(
+        "/api/v1/knowledge/documents/classify",
+        json={"document_ids": [document["id"]]},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert prompts, "模型未被调用"
+    assert "uncategorized" not in prompts[0]
+
+
+async def test_document_content_preview_returns_text_and_truncation_flag(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    stub_embedding: None,
+) -> None:
+    """预览接口返回正文、总长度与截断标志。"""
+    await _grant_knowledge_permissions(db_session, test_user)
+    monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
+    await _create_category(client, auth_headers, "sop")
+    document = await _upload(
+        client, auth_headers, title="交换机手册", filename="m.md",
+        content="# 标题\n\n正文内容".encode(), category_code="sop",
+    )
+
+    full = await client.get(
+        f"/api/v1/knowledge/documents/{document['id']}/content",
+        headers=auth_headers,
+    )
+    assert full.status_code == 200, full.text
+    data = full.json()["data"]
+    assert data["content"] == "# 标题\n\n正文内容"
+    assert data["total_chars"] == len("# 标题\n\n正文内容")
+    assert data["truncated"] is False
+    assert data["title"] == "交换机手册"
+    assert data["file_type"] == "md"
+
+    # 截断窗口：只取前 3 个字符，truncated 必须为真，否则前端会把片段当成全文
+    partial = await client.get(
+        f"/api/v1/knowledge/documents/{document['id']}/content",
+        params={"limit": 3},
+        headers=auth_headers,
+    )
+    assert partial.json()["data"]["content"] == "# 标"
+    assert partial.json()["data"]["truncated"] is True
+
+
+async def test_document_content_requires_read_permission_and_404s_when_missing(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+) -> None:
+    """无 knowledge:read 时 403；文档不存在时 404。"""
+    denied = await client.get(
+        "/api/v1/knowledge/documents/1/content", headers=auth_headers
+    )
+    assert denied.status_code == 403
+
+    await _grant_knowledge_permissions(db_session, test_user)
+    missing = await client.get(
+        "/api/v1/knowledge/documents/999999/content", headers=auth_headers
+    )
+    assert missing.status_code == 404

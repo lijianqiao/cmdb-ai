@@ -74,6 +74,25 @@ def read_document_file(relative_path: str, *, offset: int = 0, limit: int | None
     return text[offset : offset + limit]
 
 
+def read_document_preview(
+    relative_path: str, *, offset: int = 0, limit: int
+) -> tuple[str, int]:
+    """Read a bounded window of a document, plus its total character count.
+
+    比 read_document_file 多返回一个总长度，调用方才能判断"是否被截断"——
+    没有这个数，前端只能把截断后的正文当成全文展示。
+
+    只读一次整份文件后切片，与 read_document_file 的内存开销相同：文档限定
+    .md/.txt 且由管理员上传，实际大小是几 MB 级别。这里真正要挡住的是把几十 MB
+    正文丢给浏览器，那由 limit 负责。
+    """
+    path = resolve_safe_path(relative_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"no such document file: {relative_path}")
+    text = path.read_text(encoding="utf-8")
+    return text[offset : offset + limit], len(text)
+
+
 def glob_documents(pattern: str, *, category_code: str | None = None) -> list[str]:
     """Return paths (relative to KNOWLEDGE_ROOT) of files matching a glob pattern.
 

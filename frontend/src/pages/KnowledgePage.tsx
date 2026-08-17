@@ -14,7 +14,8 @@ import type { ColumnDef } from "@tanstack/react-table"
 import dayjs from "dayjs"
 import { toast } from "sonner"
 
-import { MagicWand01Icon, Tick02Icon, Upload01Icon } from "@/lib/icons"
+import { MagicWand01Icon, Tick02Icon, Upload01Icon, ViewIcon } from "@/lib/icons"
+import { DocumentPreviewDrawer } from "@/components/knowledge/DocumentPreviewDrawer"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -47,6 +48,20 @@ const ALL_CATEGORIES = "__all__"
 /** 后端 classify 接口单次上限，与 KnowledgeClassifyRequest 的 max_length 对齐 */
 const MAX_CLASSIFY_BATCH = 50
 
+/**
+ * 这条建议应用之后会真的改变归属吗？
+ *
+ * 行内「应用」按钮和「应用本页建议」必须用**同一个**判定：先前行内按钮排除了
+ * 「建议 == 当前分类」而批量计数没排除，于是按钮显示可点、点下去每份都被 PATCH
+ * 成它本来就在的分类——分类纹丝不动，建议却被清空了，用户完全看不出发生了什么。
+ */
+function isApplicableSuggestion(document: KnowledgeDocument): boolean {
+  return (
+    document.suggested_category_id != null &&
+    document.suggested_category_id !== document.category_id
+  )
+}
+
 export function KnowledgePage() {
   const { hasPermission } = usePermission()
   const canManage = hasPermission(PERMISSIONS.KNOWLEDGE_MANAGE)
@@ -59,6 +74,9 @@ export function KnowledgePage() {
   const [search, setSearch] = useState("")
   const [selectedIds, setSelectedIds] = useState<number[]>([])
   const [isClassifying, setIsClassifying] = useState(false)
+  const [previewDocument, setPreviewDocument] = useState<KnowledgeDocument | null>(
+    null,
+  )
 
   const params = useMemo(() => {
     const next: Record<string, unknown> = {}
@@ -170,7 +188,7 @@ export function KnowledgePage() {
   }
 
   const suggestedDocuments = useMemo(
-    () => documents.filter((item) => item.suggested_category_id != null),
+    () => documents.filter(isApplicableSuggestion),
     [documents],
   )
 
@@ -292,21 +310,30 @@ export function KnowledgePage() {
         header: "操作",
         cell: ({ row }) => {
           const document = row.original
-          const canApply =
-            canManage &&
-            document.suggested_category_id != null &&
-            document.suggested_category_id !== document.category_id
+          const canApply = canManage && isApplicableSuggestion(document)
           return (
-            <Button
-              type="button"
-              size="xs"
-              variant="outline"
-              disabled={!canApply}
-              onClick={() => void handleApply(document)}
-            >
-              <Tick02Icon />
-              应用
-            </Button>
+            <div className="flex items-center gap-1.5">
+              <Button
+                type="button"
+                size="xs"
+                variant="ghost"
+                aria-label={`预览 ${document.title}`}
+                onClick={() => setPreviewDocument(document)}
+              >
+                <ViewIcon />
+                预览
+              </Button>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                disabled={!canApply}
+                onClick={() => void handleApply(document)}
+              >
+                <Tick02Icon />
+                应用
+              </Button>
+            </div>
           )
         },
       },
@@ -427,6 +454,11 @@ export function KnowledgePage() {
         total={total}
         onPageChange={setPage}
         onPageSizeChange={onPageSizeChange}
+      />
+
+      <DocumentPreviewDrawer
+        document={previewDocument}
+        onClose={() => setPreviewDocument(null)}
       />
     </div>
   )

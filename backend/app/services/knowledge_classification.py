@@ -30,7 +30,7 @@ from app.core.llm import ChatMessage, chat
 from app.crud.agent_session import agent_session_crud
 from app.crud.knowledge_category import knowledge_category_crud
 from app.crud.knowledge_document import knowledge_document_crud
-from app.models.knowledge_category import KnowledgeCategory
+from app.models.knowledge_category import UNCATEGORIZED_CODE, KnowledgeCategory
 from app.models.knowledge_document import KnowledgeDocument
 from app.services.knowledge_storage import read_document_file
 
@@ -251,9 +251,16 @@ async def suggest_categories(
     if not documents:
         return SuggestionOutcome(suggested=0, skipped=0)
 
-    categories = await knowledge_category_crud.list_all(db)
+    # 「未分类」是收纳桶不是业务分类，必须排除出候选：把它摆进候选清单等于允许
+    # 模型回答"保持原地不动"，而绝大多数待归类文档本来就在未分类里——那种建议
+    # 落库后看着可点，点下去分类却纹丝不动，只是把建议清空了。
+    categories = [
+        category
+        for category in await knowledge_category_crud.list_all(db)
+        if category.code != UNCATEGORIZED_CODE
+    ]
     if not categories:
-        # 一个分类都没有时无从建议，直接返回而不是让模型对着空清单瞎猜。
+        # 一个可用分类都没有时无从建议，直接返回而不是让模型对着空清单瞎猜。
         return SuggestionOutcome(suggested=0, skipped=len(documents))
 
     if len(documents) == 1:

@@ -5,6 +5,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
 
+# 「未分类」是上传时没指定分类的收纳桶，不是一个真实的业务分类。
+# 常量放在模型层，是因为 API（创建兜底分类）和分类建议服务（把它排除出候选）
+# 都要用；由 API 层定义再被服务层反向 import 是层次颠倒。
+UNCATEGORIZED_CODE = "uncategorized"
+UNCATEGORIZED_NAME = "未分类"
+
 
 class KnowledgeCategory(Base, TimestampMixin):
     """One knowledge category (e.g. SOP, network topology, vendor manuals)."""

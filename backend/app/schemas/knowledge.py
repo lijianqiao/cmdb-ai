@@ -64,3 +64,19 @@ class KnowledgeClassifyResponse(ApiModel):
 
     suggested: int
     skipped: int
+
+
+class KnowledgeDocumentContentResponse(ApiModel):
+    """文档正文预览。
+
+    只读接口，正文按字符窗口返回。`truncated` 为真时前端要提示"仅预览前 N 字符"，
+    否则用户会以为文档就这么长。
+    """
+
+    document_id: int
+    title: str
+    file_type: str
+    content: str
+    total_chars: int
+    offset: int
+    truncated: bool

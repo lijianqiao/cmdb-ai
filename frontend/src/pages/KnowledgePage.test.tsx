@@ -2,11 +2,33 @@
 
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import "@testing-library/jest-dom/vitest"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { usePaginatedQuery } from "@/hooks/use-paginated-query"
+import { getDocumentContent, type KnowledgeDocument } from "@/lib/knowledge-api"
+
 import { KnowledgePage } from "./KnowledgePage"
+
+function buildDocument(
+  overrides: Partial<KnowledgeDocument> & Pick<KnowledgeDocument, "id">,
+): KnowledgeDocument {
+  return {
+    category_id: 1,
+    title: "文档",
+    original_filename: "doc.md",
+    file_path: "network/1_doc.md",
+    file_type: "md",
+    status: "ready",
+    created_at: "2026-08-18T00:00:00Z",
+    suggested_category_id: null,
+    suggestion_confidence: null,
+    suggestion_reason: "",
+    suggested_at: null,
+    ...overrides,
+  } as KnowledgeDocument
+}
 
 vi.mock("@/hooks/use-permission", () => ({
   usePermission: vi.fn(() => ({
@@ -37,6 +59,7 @@ vi.mock("@/lib/knowledge-api", () => ({
   ]),
   classifyDocuments: vi.fn(),
   applyDocumentCategory: vi.fn(),
+  getDocumentContent: vi.fn(),
 }))
 
 vi.mock("sonner", () => ({
@@ -60,5 +83,64 @@ describe("KnowledgePage", () => {
       triggers.find((el) => el.classList.contains("w-44")) ?? triggers[0]
     expect(categoryTrigger).toHaveTextContent("全部分类")
     expect(categoryTrigger).not.toHaveTextContent("__all__")
+  })
+
+  it("「应用本页建议」只统计真正会改变归属的建议", async () => {
+    // 建议等于当前分类时应用了也不会有任何变化，却会把建议清空——
+    // 先前批量按钮把这种也算进计数，用户点完看到分类没变、建议也没了
+    vi.mocked(usePaginatedQuery).mockReturnValue({
+      items: [
+        buildDocument({ id: 1, category_id: 1, suggested_category_id: 2 }),
+        buildDocument({ id: 2, category_id: 1, suggested_category_id: 1 }),
+        buildDocument({ id: 3, category_id: 1, suggested_category_id: null }),
+      ],
+      total: 3,
+      page: 1,
+      setPage: vi.fn(),
+      pageSize: 10,
+      isLoading: false,
+      onPageSizeChange: vi.fn(),
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof usePaginatedQuery>)
+
+    render(<KnowledgePage />)
+
+    expect(
+      await screen.findByRole("button", { name: /应用本页建议（1）/ }),
+    ).toBeInTheDocument()
+  })
+
+  it("列表每一行都提供预览入口", async () => {
+    vi.mocked(usePaginatedQuery).mockReturnValue({
+      items: [buildDocument({ id: 7, title: "交换机手册" })],
+      total: 1,
+      page: 1,
+      setPage: vi.fn(),
+      pageSize: 10,
+      isLoading: false,
+      onPageSizeChange: vi.fn(),
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof usePaginatedQuery>)
+
+    vi.mocked(getDocumentContent).mockResolvedValue({
+      document_id: 7,
+      title: "交换机手册",
+      file_type: "md",
+      content: "正文段落",
+      total_chars: 4,
+      offset: 0,
+      truncated: false,
+    })
+
+    render(<KnowledgePage />)
+
+    // 必须每次重新查询：listCategories 的 effect 落地会让整页重渲染，
+    // 先 findBy 拿到的节点这时已经脱离文档，点它不会触发任何 handler
+    await waitFor(() =>
+      expect(screen.getByLabelText("预览 交换机手册")).toBeInTheDocument(),
+    )
+    fireEvent.click(screen.getByLabelText("预览 交换机手册"))
+
+    await waitFor(() => expect(getDocumentContent).toHaveBeenCalledWith(7))
   })
 })

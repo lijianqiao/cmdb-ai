@@ -1,4 +1,6 @@
-"""Knowledge-base routes: category management, document upload, and AI classification."""
+"""Knowledge-base routes: category management, document upload, preview, and AI classification."""
+
+import logging
 
 from fastapi import (
     APIRouter,
@@ -17,6 +19,7 @@ from app.core.database import get_db
 from app.core.deps import get_client_ip, require_permission
 from app.crud.knowledge_category import knowledge_category_crud
 from app.crud.knowledge_document import knowledge_document_crud
+from app.models.knowledge_category import UNCATEGORIZED_CODE, UNCATEGORIZED_NAME
 from app.models.user import User
 from app.schemas.common import (
     PaginatedData,
@@ -30,19 +33,22 @@ from app.schemas.knowledge import (
     KnowledgeClassifyRequest,
     KnowledgeClassifyResponse,
     KnowledgeDocumentCategoryUpdate,
+    KnowledgeDocumentContentResponse,
     KnowledgeDocumentResponse,
 )
 from app.services.knowledge_classification import suggest_categories
 from app.services.knowledge_ingestion import DuplicateDocumentError, ingest_document
+from app.services.knowledge_storage import PathTraversalError, read_document_preview
 from app.utils.audit import log_audit
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 _SUPPORTED_FILE_TYPES = {"md", "txt"}
-# 上传时不指定分类的文档落在这里，等 AI 建议或人工归类。
-# 用固定 code 而不是迁移种子：任何部署第一次用到时按需创建，不依赖迁移顺序。
-UNCATEGORIZED_CODE = "uncategorized"
-UNCATEGORIZED_NAME = "未分类"
+# 单次预览返回的最大字符数。超出部分由前端提示"已截断"，避免把一份超大文档
+# 整个塞进 HTTP 响应和浏览器内存。
+_PREVIEW_CHAR_LIMIT = 200_000
 
 
 @router.post(
@@ -185,6 +191,53 @@ async def list_documents(
     )
     items = [KnowledgeDocumentResponse.model_validate(item) for item in documents]
     return paginated_response(items, total, page, page_size)
+
+
+@router.get(
+    "/documents/{document_id}/content",
+    response_model=ResponseEnvelope[KnowledgeDocumentContentResponse],
+)
+async def get_document_content(
+    document_id: int,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=_PREVIEW_CHAR_LIMIT, ge=1, le=_PREVIEW_CHAR_LIMIT),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("knowledge:read")),
+) -> ResponseEnvelope[KnowledgeDocumentContentResponse]:
+    """读取文档正文用于预览（只读，不改任何状态）。
+
+    只按 document_id 取，路径来自库里的记录而不是请求参数——用户无法指定路径，
+    加上 knowledge_storage 自身的 KNOWLEDGE_ROOT 包含校验，目录穿越走不通。
+    """
+    document = await knowledge_document_crud.get(db, document_id)
+    if document is None or document.is_deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文档不存在")
+
+    try:
+        content, total_chars = read_document_preview(
+            document.file_path, offset=offset, limit=limit
+        )
+    except (FileNotFoundError, OSError, PathTraversalError, UnicodeDecodeError) as exc:
+        # 记录在库里但文件读不出来：多半是磁盘上的文件被手工删了或改坏了。
+        # 对调用方是 404（这份文档现在没有可展示的正文），不是 500。
+        logger.warning(
+            "文档正文读取失败 document_id=%s path=%r", document_id, document.file_path
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="文档正文不可读"
+        ) from exc
+
+    return success_response(
+        KnowledgeDocumentContentResponse(
+            document_id=document.id,
+            title=document.title,
+            file_type=document.file_type,
+            content=content,
+            total_chars=total_chars,
+            offset=offset,
+            truncated=offset + len(content) < total_chars,
+        )
+    )
 
 
 @router.patch(

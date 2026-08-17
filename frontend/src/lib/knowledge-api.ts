@@ -153,3 +153,35 @@ export async function classifyDocuments(
   )
   return response.data.data
 }
+
+/** 文档正文预览 */
+export interface KnowledgeDocumentContent {
+  document_id: number
+  title: string
+  file_type: string
+  content: string
+  total_chars: number
+  offset: number
+  /** 为真时正文只是前一段，界面必须提示，否则用户会把片段当成全文 */
+  truncated: boolean
+}
+
+/**
+ * 读取文档正文用于预览。
+ *
+ * 需要 `knowledge:read`。只读接口，不改变任何状态。
+ *
+ * Args:
+ *   documentId: 文档 ID
+ *
+ * Returns:
+ *   正文窗口、总字符数与截断标志
+ */
+export async function getDocumentContent(
+  documentId: number,
+): Promise<KnowledgeDocumentContent> {
+  const response = await api.get<ApiResponse<KnowledgeDocumentContent>>(
+    `/knowledge/documents/${documentId}/content`,
+  )
+  return response.data.data
+}
