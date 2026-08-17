@@ -180,7 +180,10 @@ async def test_loop_returns_final_answer_when_model_calls_no_tools(
     )
     await db_session.commit()
 
-    assert outcome == LoopOutcome(reason="final_answer", final_answer="在线")
+    assert outcome.reason == "final_answer"
+    assert outcome.final_answer == "在线"
+    # 最终回复那一行的 id 要带出来，调用方才能把整轮用量补写上去
+    assert outcome.usage_message_id is not None
 
     history = await build_model_history(db_session, session_id)
     assert history[-1].role == "assistant"
@@ -650,9 +653,9 @@ async def test_loop_keeps_final_answer_that_crosses_cost_budget(
         chat_fn=expensive_chat,
     )
 
-    assert outcome == LoopOutcome(
-        reason="final_answer", final_answer="answer already incurred cost"
-    )
+    assert outcome.reason == "final_answer"
+    assert outcome.final_answer == "answer already incurred cost"
+    assert outcome.usage_message_id is not None
     root_history = await build_model_history(db_session, session_id)
     child_history = await build_model_history(db_session, session_id, agent_id="child-1")
     assert seen_messages == [[("system", "child system"), ("user", "expensive question")]]

@@ -58,7 +58,27 @@ export interface AgentMessage {
   content: string
   tool_call_id: string | null
   tool_calls: Record<string, unknown>[] | null
+  /** 整轮用量，只有每轮最后一条 assistant 消息有值 */
+  prompt_tokens: number | null
+  completion_tokens: number | null
+  cost_usd: number | null
+  usage_by_model: Record<string, TurnModelUsage> | null
   created_at: string
+}
+
+/** 单个模型在一轮里的用量（分档模型落地后会有多项） */
+export interface TurnModelUsage {
+  prompt_tokens: number
+  completion_tokens: number
+  cost_usd: number
+}
+
+/** 一轮对话的用量合计（根循环 + 子 Agent） */
+export interface TurnUsage {
+  promptTokens: number
+  completionTokens: number
+  costUsd: number
+  byModel: Record<string, TurnModelUsage> | null
 }
 
 /** 发送用户消息 */

@@ -77,6 +77,11 @@ class AgentMessageResponse(ApiModel):
     content: str
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    # 整轮用量，只有每轮最后一条 assistant 消息有值；历史消息一律为 None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    cost_usd: float | None = None
+    usage_by_model: dict[str, dict[str, float]] | None = None
     created_at: datetime
 
 

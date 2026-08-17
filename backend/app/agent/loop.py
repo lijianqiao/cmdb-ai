@@ -75,6 +75,9 @@ class LoopOutcome:
     ]
     final_answer: str | None
     control: ToolControl | None = None
+    # 本轮最后写入的那条 assistant 消息的主键，整轮用量回写到这一行上。
+    # 写它的时刻子 Agent 的账还没并进来，所以只能先把 id 带出去由调用方补写。
+    usage_message_id: int | None = None
 
 
 def _parse_arguments(tool_call: ToolCall) -> dict[str, Any]:
@@ -141,15 +144,24 @@ async def run_loop(
 
         cost_exceeded = False
         try:
-            active_budget.record_cost(result.cost_usd)
+            active_budget.record_cost(
+                result.cost_usd,
+                model_key=model_key,
+                prompt_tokens=result.prompt_tokens,
+                completion_tokens=result.completion_tokens,
+            )
         except BudgetExceededError:
             cost_exceeded = True
 
         if not result.tool_calls:
-            await append_assistant_message(
+            final_message = await append_assistant_message(
                 db, session_id, result.content or "", agent_id=agent_id
             )
-            return LoopOutcome(reason="final_answer", final_answer=result.content)
+            return LoopOutcome(
+                reason="final_answer",
+                final_answer=result.content,
+                usage_message_id=final_message.id,
+            )
 
         if cost_exceeded:
             return LoopOutcome(reason="budget_exceeded", final_answer=None)
@@ -179,7 +191,7 @@ async def run_loop(
                             ),
                         )
                     )
-                await append_assistant_message(
+                exit_message = await append_assistant_message(
                     db,
                     session_id,
                     result.content or "",
@@ -195,7 +207,10 @@ async def run_loop(
                         agent_id=agent_id,
                     )
                 return LoopOutcome(
-                    reason="early_exit", final_answer=None, control=tool_result.control
+                    reason="early_exit",
+                    final_answer=None,
+                    control=tool_result.control,
+                    usage_message_id=exit_message.id,
                 )
 
         await append_assistant_message(

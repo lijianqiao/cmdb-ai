@@ -39,6 +39,10 @@ function message(
       session_id: 1,
       tool_call_id: null,
       tool_calls: null,
+      prompt_tokens: null,
+      completion_tokens: null,
+      cost_usd: null,
+      usage_by_model: null,
       created_at: "2026-08-14T00:00:00Z",
     },
     overrides,
@@ -70,42 +74,20 @@ const empty: OpsChatState = { items: [] }
 describe("mapHistoryToItems", () => {
   it("把 user/assistant/tool_calls 映射为时间线，跳过 tool 结果", () => {
     const rows: AgentMessage[] = [
-      {
-        id: 1,
-        session_id: 9,
-        role: "user",
-        content: "你好",
-        tool_call_id: null,
-        tool_calls: null,
-        created_at: "2026-01-01T00:00:00Z",
-      },
-      {
+      message({ id: 1, role: "user", content: "你好" }),
+      message({
         id: 2,
-        session_id: 9,
         role: "assistant",
         content: "",
-        tool_call_id: null,
         tool_calls: [{ id: "tc1", name: "search_kb", arguments: {} }],
-        created_at: "2026-01-01T00:00:01Z",
-      },
-      {
+      }),
+      message({
         id: 3,
-        session_id: 9,
         role: "tool",
         content: "命中 1 条",
         tool_call_id: "tc1",
-        tool_calls: null,
-        created_at: "2026-01-01T00:00:02Z",
-      },
-      {
-        id: 4,
-        session_id: 9,
-        role: "assistant",
-        content: "根据文档…",
-        tool_call_id: null,
-        tool_calls: null,
-        created_at: "2026-01-01T00:00:03Z",
-      },
+      }),
+      message({ id: 4, role: "assistant", content: "根据文档…" }),
     ]
     const items = mapHistoryToItems(rows)
     expect(items.map((i) => i.kind)).toEqual([
@@ -461,5 +443,51 @@ describe("reduceOpsChat snapshot_loaded", () => {
       "message:3",
       "message:4",
     ])
+  })
+})
+
+describe("mapHistoryToItems 用量", () => {
+  it("把最终回复那一行的整轮用量带进时间线条目", () => {
+    const items = mapHistoryToItems([
+      message({
+        id: 7,
+        role: "assistant",
+        content: "在线",
+        prompt_tokens: 250,
+        completion_tokens: 50,
+        cost_usd: 0.003,
+        usage_by_model: {
+          "local-chat": {
+            prompt_tokens: 250,
+            completion_tokens: 50,
+            cost_usd: 0.003,
+          },
+        },
+      }),
+    ])
+
+    const assistant = items.find((item) => item.kind === "assistant")
+    expect(assistant?.kind === "assistant" && assistant.usage).toEqual({
+      promptTokens: 250,
+      completionTokens: 50,
+      costUsd: 0.003,
+      byModel: {
+        "local-chat": {
+          prompt_tokens: 250,
+          completion_tokens: 50,
+          cost_usd: 0.003,
+        },
+      },
+    })
+  })
+
+  it("没有用量的历史消息不给假的 0", () => {
+    // 加这四列之前的老消息永远是 null，显示成「花了 0 元」是错的
+    const items = mapHistoryToItems([
+      message({ id: 8, role: "assistant", content: "旧回答" }),
+    ])
+
+    const assistant = items.find((item) => item.kind === "assistant")
+    expect(assistant?.kind === "assistant" && assistant.usage).toBeUndefined()
   })
 })

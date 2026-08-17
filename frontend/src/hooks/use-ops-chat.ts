@@ -19,6 +19,7 @@ import type {
   AgentWsServerMessage,
   ChildAgentSnapshot,
   HitlProposalSafeSummary,
+  TurnUsage,
 } from "@/types/agent"
 
 /**
@@ -57,6 +58,8 @@ export type OpsChatItem =
       streaming: boolean
       serverId?: number
       createdAt?: string
+      /** 整轮用量，只有每轮最后一条回复带；流式过程中拿不到，刷新后由快照补上 */
+      usage?: TurnUsage
     }
   | {
       kind: "tool_call"
@@ -126,6 +129,21 @@ function messageItemId(messageId: number): string {
   return `message:${messageId}`
 }
 
+/**
+ * 从消息行读出整轮用量；不是每轮最后一条回复的行返回 undefined。
+ *
+ * 历史消息在加这四列之前就存在了，那些行永远是 null——不能当成"花了 0 元"显示。
+ */
+function readTurnUsage(row: AgentMessage): TurnUsage | undefined {
+  if (row.prompt_tokens == null || row.completion_tokens == null) return undefined
+  return {
+    promptTokens: row.prompt_tokens,
+    completionTokens: row.completion_tokens,
+    costUsd: row.cost_usd ?? 0,
+    byModel: row.usage_by_model,
+  }
+}
+
 function hitlItemId(proposalId: number): string {
   return `hitl:${proposalId}`
 }
@@ -179,6 +197,7 @@ export function mapHistoryToItems(messages: AgentMessage[]): OpsChatItem[] {
           content: row.content,
           streaming: false,
           createdAt: row.created_at,
+          usage: readTurnUsage(row),
         })
       }
     }

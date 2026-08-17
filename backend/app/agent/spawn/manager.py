@@ -531,6 +531,16 @@ class SpawnManager:
             cost_used_usd=(
                 active.cost_used_usd if active is not None else configured.cost_used_usd
             ),
+            prompt_tokens_used=(
+                active.prompt_tokens_used
+                if active is not None
+                else configured.prompt_tokens_used
+            ),
+            completion_tokens_used=(
+                active.completion_tokens_used
+                if active is not None
+                else configured.completion_tokens_used
+            ),
         )
 
     async def _persist_latest_terminal(

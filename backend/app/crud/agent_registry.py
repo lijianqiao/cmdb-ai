@@ -288,6 +288,27 @@ class CRUDAgentRegistry:
         recent_terminal.reverse()
         return active + recent_terminal
 
+    async def list_created_since(
+        self,
+        db: AsyncSession,
+        session_id: int,
+        since: datetime,
+    ) -> list[AgentRegistry]:
+        """返回本会话在 `since` 之后创建的子 Agent。
+
+        用于把一轮对话里派生出来的子 Agent 用量并进那一轮的合计。
+        绝大多数轮次不派生子 Agent，这条查询走 session_id 索引后返回空集。
+        """
+        stmt = (
+            select(AgentRegistry)
+            .where(
+                AgentRegistry.session_id == session_id,
+                AgentRegistry.created_at >= since,
+            )
+            .order_by(AgentRegistry.created_at.asc(), AgentRegistry.child_id.asc())
+        )
+        return list((await db.execute(stmt)).scalars().all())
+
     async def reserved_cost_for_session(self, db: AsyncSession, session_id: int) -> float:
         """Return conservative reserved/actual child cost for one session."""
         receipts = await self.list_for_session(db, session_id)

@@ -15,6 +15,7 @@ import {
 import { ExecutionProcessCollapsible } from "@/components/ops-assistant/ExecutionProcessCollapsible"
 import { CopyButton } from "@/components/ops-assistant/CopyButton"
 import { ChatMarkdown } from "@/components/ops-assistant/ChatMarkdown"
+import { TurnUsageLine } from "@/components/ops-assistant/TurnUsageLine"
 import { BubbleChatIcon, ChevronDownIcon, ChevronUpIcon } from "@/lib/icons"
 import {
   Empty,
@@ -173,6 +174,11 @@ function TurnRow({
                 <Spinner className="size-3.5 text-primary" />
                 <span>生成中...</span>
               </div>
+            ) : null}
+
+            {/* 本轮用量：生成中拿不到，本轮结束重新拉快照后才出现 */}
+            {!turn.assistantMessage.streaming && turn.assistantMessage.usage ? (
+              <TurnUsageLine usage={turn.assistantMessage.usage} />
             ) : null}
           </div>
         </div>

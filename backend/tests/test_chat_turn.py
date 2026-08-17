@@ -726,3 +726,76 @@ async def test_chat_turn_spawn_parallel_children_summarizes_safely(
         for sibling in receipts:
             if sibling.child_id != receipt.child_id:
                 assert sibling.task_brief not in child_text
+
+
+async def test_turn_usage_is_written_to_the_final_assistant_message(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """整轮 token / 花费合计写在最终回复那一行上，中间消息保持为空。
+
+    一轮 = 多步循环，所以显示的必须是各步之和，不是最后一次调用的用量。
+    """
+    from app.agent.chat_turn import run_chat_turn
+    from app.crud.agent_message import agent_message_crud
+
+    session_id = await _make_session(db_session, test_user.id)
+    calls = 0
+
+    async def fake_chat(model_key: str, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ChatResult(
+                content=None,
+                tool_calls=[
+                    ToolCall(id="call_1", name="query_monitor_status", arguments="{}")
+                ],
+                finish_reason="tool_calls",
+                prompt_tokens=100,
+                completion_tokens=20,
+                cost_usd=0.001,
+            )
+        return ChatResult(
+            content="在线",
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=150,
+            completion_tokens=30,
+            cost_usd=0.002,
+        )
+
+    async def fake_dispatch(name: str, args: dict[str, Any]) -> ToolResult:
+        return ToolResult(control="ok", content="10.0.0.5 状态: up")
+
+    await append_user_message(db_session, session_id, "10.0.0.5 在线吗")
+    outcome = await run_chat_turn(
+        db_session,
+        session_id=session_id,
+        actor_user_id=test_user.id,
+        chat_fn=fake_chat,
+        dispatch_tool=fake_dispatch,
+        hub_instance=AgentWsHub(),
+    )
+    await db_session.commit()
+
+    assert outcome.reason == "final_answer"
+    messages = await agent_message_crud.list_for_agent(db_session, session_id, agent_id=None)
+    final = messages[-1]
+    assert final.role == "assistant"
+    assert final.content == "在线"
+    assert final.prompt_tokens == 250  # 100 + 150，两步之和
+    assert final.completion_tokens == 50  # 20 + 30
+    assert final.cost_usd == pytest.approx(0.003)
+    assert final.usage_by_model == {
+        "local-chat": {
+            "prompt_tokens": 250.0,
+            "completion_tokens": 50.0,
+            "cost_usd": pytest.approx(0.003),
+        }
+    }
+
+    # 中间那条带 tool_calls 的 assistant 行不该有用量，否则界面会显示两串数字
+    earlier_assistants = [m for m in messages[:-1] if m.role == "assistant"]
+    assert earlier_assistants
+    assert all(message.prompt_tokens is None for message in earlier_assistants)

@@ -18,10 +18,12 @@
 6. 正常/early_exit 后广播 turn_done；异常广播中文 error（无堆栈）后原样抛出，由 API 层 commit。
 """
 
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.budget import Budget
 from app.agent.hitl_gate import HitlGateHook
 from app.agent.loop import ChatFn, LoopOutcome, ToolDispatcher, ToolResult, run_loop
 from app.agent.spawn import spawn_manager
@@ -33,6 +35,8 @@ from app.agent.spawn_tools import (
 from app.agent.tool_dispatch import build_root_tool_dispatcher, root_tool_schemas
 from app.agent.ws_hub import AgentWsHub, WsHitlEventPublisher, hub
 from app.core.llm import ChatResult, chat
+from app.crud.agent_message import agent_message_crud
+from app.crud.agent_registry import agent_registry_crud
 from app.schemas.agent_ws import AgentWsServerMessage
 
 # 架构 §8：根指令每轮从代码注入，不参与压缩摘要
@@ -68,6 +72,75 @@ port_enable/port_disable 必须提供 interface_name。
 
 # settings 无专用 Agent 模型键；MODELS 默认 chat 登记键为 local-chat
 _DEFAULT_MODEL_KEY = "local-chat"
+
+
+def _empty_model_usage() -> dict[str, float]:
+    return {"prompt_tokens": 0.0, "completion_tokens": 0.0, "cost_usd": 0.0}
+
+
+def _usage_number(value: object) -> float:
+    """从 registry 的 JSON 预算里取一个用量数字；取不到就按 0 算。
+
+    这列是 dict[str, object]，值是从 JSON 反序列化来的，不能假设类型。
+    用量统计不是关键路径，脏数据按 0 处理即可，不值得为它中断一整轮对话。
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return 0.0
+    return float(value)
+
+
+async def _record_turn_usage(
+    db: AsyncSession,
+    *,
+    session_id: int,
+    message_id: int,
+    budget: Budget,
+    turn_started_at: datetime,
+) -> None:
+    """把根循环 + 本轮子 Agent 的用量合计写到最终回复那一行上。
+
+    **必须带上子 Agent**：一次 investigate_root_cause 会并行拉起好几个子 Agent，
+    它们各有独立预算，不并进来的话界面上只显示根循环那点开销，会严重低估。
+
+    子 Agent 按「本轮之后创建」筛选。派生子 Agent 的工具会等它们全部跑完才返回
+    （orchestration._run_wave 里 gather 了 wait 结果），所以读到的用量是终值。
+    """
+    prompt_tokens = budget.prompt_tokens_used
+    completion_tokens = budget.completion_tokens_used
+    cost_usd = budget.cost_used_usd
+    by_model: dict[str, dict[str, float]] = {
+        key: {
+            "prompt_tokens": float(usage.prompt_tokens),
+            "completion_tokens": float(usage.completion_tokens),
+            "cost_usd": usage.cost_usd,
+        }
+        for key, usage in budget.usage_by_model.items()
+    }
+
+    children = await agent_registry_crud.list_created_since(db, session_id, turn_started_at)
+    for child in children:
+        snapshot = child.budget if isinstance(child.budget, dict) else {}
+        child_prompt = int(_usage_number(snapshot.get("prompt_tokens_used")))
+        child_completion = int(_usage_number(snapshot.get("completion_tokens_used")))
+        child_cost = _usage_number(snapshot.get("cost_used_usd"))
+        if not (child_prompt or child_completion or child_cost):
+            continue
+        prompt_tokens += child_prompt
+        completion_tokens += child_completion
+        cost_usd += child_cost
+        entry = by_model.setdefault(child.model, _empty_model_usage())
+        entry["prompt_tokens"] += child_prompt
+        entry["completion_tokens"] += child_completion
+        entry["cost_usd"] += child_cost
+
+    await agent_message_crud.set_turn_usage(
+        db,
+        message_id,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cost_usd=cost_usd,
+        usage_by_model=by_model,
+    )
 
 
 async def run_chat_turn(
@@ -203,6 +276,10 @@ async def run_chat_turn(
             return await spawn_dispatch(name, arguments)
         return await base_dispatch(name, arguments)
 
+    # 预算对象由本函数持有，run_loop 结束后还要读它的累计用量；
+    # 交给 run_loop 自己 new 的话用完就丢了，界面上就没有数字可显示。
+    turn_budget = Budget()
+    turn_started_at = datetime.now(UTC)
     try:
         outcome = await run_loop(
             db,
@@ -210,6 +287,7 @@ async def run_chat_turn(
             model_key=resolved_model,
             dispatch_tool=wrapped_dispatch,
             tools=tools,
+            budget=turn_budget,
             chat_fn=wrapped_chat,
             system_prompt=ROOT_OPS_SYSTEM_PROMPT,
             before_tool_call=gate_hook.before if gate_hook is not None else None,
@@ -224,6 +302,15 @@ async def run_chat_turn(
             ),
         )
         raise
+
+    if outcome.usage_message_id is not None:
+        await _record_turn_usage(
+            db,
+            session_id=session_id,
+            message_id=outcome.usage_message_id,
+            budget=turn_budget,
+            turn_started_at=turn_started_at,
+        )
 
     if outcome.reason == "llm_error":
         await active_hub.broadcast(

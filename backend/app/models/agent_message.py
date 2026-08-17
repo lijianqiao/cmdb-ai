@@ -9,7 +9,7 @@ uses both.
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -35,6 +35,16 @@ class AgentMessage(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
     tool_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     tool_calls: Mapped[list[dict[str, str]] | None] = mapped_column(JSON, nullable=True)
+    # 用量四列只写在「一轮对话最终回复」那条 assistant 行上，其余行全为 NULL。
+    # 存的是**整轮**的合计（多步循环 + 子 Agent），不是这一条消息自己的开销——
+    # 界面上那串数字要回答的是「刚才这次提问花了多少」。
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # {模型键: {prompt_tokens, completion_tokens, cost_usd}}，为分档模型预留
+    usage_by_model: Mapped[dict[str, dict[str, float]] | None] = mapped_column(
+        JSON, nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

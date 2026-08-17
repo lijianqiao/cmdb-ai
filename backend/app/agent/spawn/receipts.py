@@ -136,6 +136,20 @@ def _to_receipt(row: AgentRegistry) -> ChildReceipt:
                 field="budget.cost_used_usd",
                 positive=False,
             ),
+            # token 两项是后加的，用 .get 兜底：旧的在途行没有这两个键，
+            # 把它们列进上面的必填校验会让那些行直接判成损坏
+            prompt_tokens_used=_receipt_step(
+                budget.get("prompt_tokens_used", 0),
+                child_id=row.child_id,
+                field="budget.prompt_tokens_used",
+                minimum=0,
+            ),
+            completion_tokens_used=_receipt_step(
+                budget.get("completion_tokens_used", 0),
+                child_id=row.child_id,
+                field="budget.completion_tokens_used",
+                minimum=0,
+            ),
         ),
         status=row.status,
         result_summary=row.result_summary,
@@ -158,4 +172,6 @@ def _budget_payload(snapshot: ChildBudgetSnapshot) -> dict[str, object]:
         "max_wall_time_seconds": snapshot.max_wall_time_seconds,
         "steps_used": snapshot.steps_used,
         "cost_used_usd": snapshot.cost_used_usd,
+        "prompt_tokens_used": snapshot.prompt_tokens_used,
+        "completion_tokens_used": snapshot.completion_tokens_used,
     }

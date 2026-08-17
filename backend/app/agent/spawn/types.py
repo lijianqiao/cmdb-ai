@@ -38,6 +38,10 @@ class ChildBudgetSnapshot:
     max_wall_time_seconds: float
     steps_used: int = 0
     cost_used_usd: float = 0.0
+    # 子 Agent 的 token 用量要能并进父轮次的合计里，否则界面上一次多路排查
+    # 只显示根循环那点开销，会严重低估
+    prompt_tokens_used: int = 0
+    completion_tokens_used: int = 0
 
 
 @dataclass(frozen=True, slots=True)

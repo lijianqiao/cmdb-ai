@@ -2,9 +2,11 @@
 
 This is intentionally not a `CRUDBase` subclass: messages are append-only (no
 update, no soft-delete), so the generic base's machinery does not apply.
+`set_turn_usage` 是唯一的例外：它只往一条已存在的最终回复上补写用量统计，
+不改正文，所以 append-only 的语义没有被破坏。
 """
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent_message import AgentMessage
@@ -38,6 +40,28 @@ class CRUDAgentMessage:
         db.add(message)
         await db.flush()
         return message
+
+    async def set_turn_usage(
+        self,
+        db: AsyncSession,
+        message_id: int,
+        *,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cost_usd: float,
+        usage_by_model: dict[str, dict[str, float]],
+    ) -> None:
+        """把整轮用量补写到最终回复那一行上。"""
+        await db.execute(
+            update(AgentMessage)
+            .where(AgentMessage.id == message_id)
+            .values(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cost_usd=cost_usd,
+                usage_by_model=usage_by_model,
+            )
+        )
 
     async def list_for_session(
         self,
