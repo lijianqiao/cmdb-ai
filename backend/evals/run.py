@@ -186,8 +186,13 @@ async def main() -> int:
         print(f"[FAIL] {reason}")
 
     if "--update-baseline" in sys.argv:
+        # 模型名必须记进基线：分数和阈值都是绑定具体模型的，换了模型这份基线
+        # 就不该再用。从 settings 读而不是 os.environ——配置由 pydantic-settings
+        # 从 .env 加载，压根不会进环境变量，读 os.environ 只会得到空串。
+        from app.core.config import get_settings
+
         write_baseline(
-            _PATHS.baseline_path, verdict, model=os.environ.get("LLM_CHAT_MODEL", "")
+            _PATHS.baseline_path, verdict, model=get_settings().LLM_CHAT_MODEL
         )
         print(f"已写入基线：{_PATHS.baseline_path}")
 
