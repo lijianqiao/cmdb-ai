@@ -62,13 +62,21 @@ class CRUDKnowledgeChunk:
 
         Requires PostgreSQL + pgvector — `.cosine_distance()` compiles to a
         Postgres-only SQL operator and has no SQLite equivalent.
+
+        **始终 join 文档表排除已删除的文档**：切片不会随软删除消失，不过滤的话
+        回收站里的文档照样能被 kb_semantic_search 召回并被 Agent 引用——管理页
+        上看不见了，回答里还在用它，是最难发现的那种"删了个寂寞"。
         """
         distance = KnowledgeChunk.embedding.cosine_distance(query_embedding)
-        stmt = select(KnowledgeChunk, distance.label("distance")).order_by(distance).limit(top_k)
+        stmt = (
+            select(KnowledgeChunk, distance.label("distance"))
+            .join(KnowledgeDocument, KnowledgeChunk.document_id == KnowledgeDocument.id)
+            .where(KnowledgeDocument.is_deleted.is_(False))
+            .order_by(distance)
+            .limit(top_k)
+        )
         if category_id is not None:
-            stmt = stmt.join(
-                KnowledgeDocument, KnowledgeChunk.document_id == KnowledgeDocument.id
-            ).where(KnowledgeDocument.category_id == category_id)
+            stmt = stmt.where(KnowledgeDocument.category_id == category_id)
 
         result = await db.execute(stmt)
         return [(row[0], row[1]) for row in result.all()]

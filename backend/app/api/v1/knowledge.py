@@ -38,7 +38,13 @@ from app.schemas.knowledge import (
 )
 from app.services.knowledge_classification import suggest_categories
 from app.services.knowledge_ingestion import DuplicateDocumentError, ingest_document
-from app.services.knowledge_storage import PathTraversalError, read_document_preview
+from app.services.knowledge_storage import (
+    PathTraversalError,
+    move_document_to_trash,
+    purge_document_from_trash,
+    read_document_preview,
+    restore_document_from_trash,
+)
 from app.utils.audit import log_audit
 
 logger = logging.getLogger(__name__)
@@ -243,6 +249,142 @@ async def get_document_content(
             truncated=offset + len(content) < total_chars,
         )
     )
+
+
+@router.get(
+    "/documents/deleted",
+    response_model=ResponseEnvelope[PaginatedData[KnowledgeDocumentResponse]],
+)
+async def list_deleted_documents(
+    page: int = Query(default=1, ge=1, le=100_000),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("knowledge:manage")),
+) -> ResponseEnvelope[PaginatedData[KnowledgeDocumentResponse]]:
+    """回收站：分页列出已删除的知识文档。"""
+    documents, total = await knowledge_document_crud.list_deleted(
+        db, skip=(page - 1) * page_size, limit=page_size
+    )
+    items = [KnowledgeDocumentResponse.model_validate(item) for item in documents]
+    return paginated_response(items, total, page, page_size)
+
+
+@router.delete("/documents/{document_id}", response_model=ResponseEnvelope[None])
+async def delete_document(
+    document_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("knowledge:manage")),
+) -> ResponseEnvelope[None]:
+    """把文档移入回收站：软删除数据库行，并把正文文件移出 KNOWLEDGE_ROOT。
+
+    **两件事必须一起做。** 只软删数据库行的话，kb_glob / kb_grep / kb_read 仍然
+    直接扫文件系统，Agent 照样能读到并引用这份"已删除"的文档；只移文件的话，
+    切片还留在向量库里。两条检索路径各堵一条才算真的删掉。
+    """
+    document = await knowledge_document_crud.get(db, document_id)
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文档不存在")
+
+    title = document.title
+    file_path = document.file_path
+    if not await knowledge_document_crud.soft_delete(db, document_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文档不存在")
+
+    await log_audit(
+        db,
+        current_user.id,
+        "delete_knowledge_document",
+        target=f"knowledge_document:{document_id}",
+        detail=f"删除知识文档: {title}",
+        ip=get_client_ip(request),
+    )
+    await db.commit()
+    # 文件移动放在 commit 之后：事务回滚不了文件系统，先落库再动盘，
+    # 最坏情况是库里已删、文件还在原地，下次删除会把它补移走。
+    move_document_to_trash(file_path)
+    return success_response(None, message="已移入回收站")
+
+
+@router.post(
+    "/documents/{document_id}/restore",
+    response_model=ResponseEnvelope[KnowledgeDocumentResponse],
+)
+async def restore_document(
+    document_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("knowledge:manage")),
+) -> ResponseEnvelope[KnowledgeDocumentResponse]:
+    """从回收站恢复文档；同样内容已被重新上传时返回 409。"""
+    document = await knowledge_document_crud.get_deleted(db, document_id)
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="回收站中不存在该文档"
+        )
+
+    conflict = await knowledge_document_crud.active_with_content_hash(
+        db, document.content_hash, exclude_id=document_id
+    )
+    if conflict is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"同样内容的文档已重新上传：《{conflict.title}》(ID {conflict.id})，"
+                "恢复会产生重复。请先删除那一份再恢复。"
+            ),
+        )
+
+    restored = await knowledge_document_crud.restore(db, document_id)
+    if restored is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="回收站中不存在该文档"
+        )
+
+    await log_audit(
+        db,
+        current_user.id,
+        "restore_knowledge_document",
+        target=f"knowledge_document:{document_id}",
+        detail=f"恢复知识文档: {restored.title}",
+        ip=get_client_ip(request),
+    )
+    await db.commit()
+    restore_document_from_trash(restored.file_path)
+    return success_response(
+        KnowledgeDocumentResponse.model_validate(restored), message="恢复成功"
+    )
+
+
+@router.delete("/documents/{document_id}/purge", response_model=ResponseEnvelope[None])
+async def purge_document(
+    document_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("knowledge:manage")),
+) -> ResponseEnvelope[None]:
+    """永久删除回收站中的文档：行、切片与正文文件一并清除，不可恢复。"""
+    document = await knowledge_document_crud.get_deleted(db, document_id)
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="回收站中不存在该文档"
+        )
+
+    title = document.title
+    file_path = document.file_path
+    # 切片靠 knowledge_chunks 的 ON DELETE CASCADE 一起消失
+    await knowledge_document_crud.hard_delete(db, document_id)
+    await log_audit(
+        db,
+        current_user.id,
+        "purge_knowledge_document",
+        target=f"knowledge_document:{document_id}",
+        detail=f"永久删除知识文档: {title}",
+        ip=get_client_ip(request),
+    )
+    await db.commit()
+    purge_document_from_trash(file_path)
+    return success_response(None, message="已永久删除")
 
 
 @router.patch(

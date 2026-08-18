@@ -12,6 +12,11 @@ from pathlib import Path
 from app.core.config import BACKEND_ROOT
 
 KNOWLEDGE_ROOT = BACKEND_ROOT / "knowledge"
+# 回收站**故意放在 KNOWLEDGE_ROOT 之外**：kb_glob / kb_grep / kb_read 都以
+# KNOWLEDGE_ROOT 为根做包含校验，文件一旦移出去这三个工具就再也扫不到，
+# 检索侧一行过滤都不用加。放在 KNOWLEDGE_ROOT 里面则要在每个工具上各排除一次，
+# 漏掉任何一个都等于没删干净。
+KNOWLEDGE_TRASH_ROOT = BACKEND_ROOT / "knowledge_trash"
 
 
 class PathTraversalError(ValueError):
@@ -111,3 +116,45 @@ def glob_documents(pattern: str, *, category_code: str | None = None) -> list[st
             continue
         matches.append(str(resolved.relative_to(root)).replace("\\", "/"))
     return sorted(matches)
+
+
+def _trash_path(relative_path: str) -> Path:
+    """Resolve a path inside the trash root, rejecting any escape attempt."""
+    KNOWLEDGE_TRASH_ROOT.mkdir(parents=True, exist_ok=True)
+    root = KNOWLEDGE_TRASH_ROOT.resolve()
+    candidate = (root / relative_path).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise PathTraversalError(f"path {relative_path!r} escapes KNOWLEDGE_TRASH_ROOT")
+    return candidate
+
+
+def move_document_to_trash(relative_path: str) -> None:
+    """Move a document's file out of KNOWLEDGE_ROOT into the trash root.
+
+    移走而不是删除，是为了让「回收站恢复」能真的恢复正文。移出 KNOWLEDGE_ROOT
+    之后 kb_glob / kb_grep / kb_read 立刻就看不到它了——这三个工具都以
+    KNOWLEDGE_ROOT 为根，不需要额外过滤。
+
+    文件不存在按已移走处理：数据库行才是真相来源，磁盘上缺文件不该让删除失败。
+    """
+    source = resolve_safe_path(relative_path)
+    if not source.is_file():
+        return
+    target = _trash_path(relative_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source.replace(target)
+
+
+def restore_document_from_trash(relative_path: str) -> None:
+    """Move a document's file back from the trash root into KNOWLEDGE_ROOT."""
+    source = _trash_path(relative_path)
+    if not source.is_file():
+        return
+    target = resolve_safe_path(relative_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source.replace(target)
+
+
+def purge_document_from_trash(relative_path: str) -> None:
+    """Delete a document's file from the trash root for good."""
+    _trash_path(relative_path).unlink(missing_ok=True)

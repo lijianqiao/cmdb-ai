@@ -7,9 +7,24 @@ import "@testing-library/jest-dom/vitest"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { usePaginatedQuery } from "@/hooks/use-paginated-query"
-import { getDocumentContent, type KnowledgeDocument } from "@/lib/knowledge-api"
+import {
+  deleteDocument,
+  getDocumentContent,
+  type KnowledgeDocument,
+} from "@/lib/knowledge-api"
+
+import { MemoryRouter } from "react-router"
 
 import { KnowledgePage } from "./KnowledgePage"
+
+/** 页头有指向回收站的 Link，必须在 Router 上下文里渲染 */
+function renderPage() {
+  return render(
+    <MemoryRouter>
+      <KnowledgePage />
+    </MemoryRouter>,
+  )
+}
 
 function buildDocument(
   overrides: Partial<KnowledgeDocument> & Pick<KnowledgeDocument, "id">,
@@ -22,6 +37,7 @@ function buildDocument(
     file_type: "md",
     status: "ready",
     created_at: "2026-08-18T00:00:00Z",
+    updated_at: "2026-08-18T00:00:00Z",
     suggested_category_id: null,
     suggestion_confidence: null,
     suggestion_reason: "",
@@ -60,6 +76,7 @@ vi.mock("@/lib/knowledge-api", () => ({
   classifyDocuments: vi.fn(),
   applyDocumentCategory: vi.fn(),
   getDocumentContent: vi.fn(),
+  deleteDocument: vi.fn(),
 }))
 
 vi.mock("sonner", () => ({
@@ -75,7 +92,7 @@ afterEach(() => {
 
 describe("KnowledgePage", () => {
   it("分类筛选框默认展示「全部分类」而不是「__all__」", async () => {
-    render(<KnowledgePage />)
+    renderPage()
 
     // 等待并断言 Select 触发器渲染「全部分类」
     const triggers = await screen.findAllByRole("combobox")
@@ -104,7 +121,7 @@ describe("KnowledgePage", () => {
       refetch: vi.fn(),
     } as unknown as ReturnType<typeof usePaginatedQuery>)
 
-    render(<KnowledgePage />)
+    renderPage()
 
     await waitFor(() =>
       expect(
@@ -139,7 +156,7 @@ describe("KnowledgePage", () => {
       truncated: false,
     })
 
-    render(<KnowledgePage />)
+    renderPage()
 
     // 必须每次重新查询：listCategories 的 effect 落地会让整页重渲染，
     // 先 findBy 拿到的节点这时已经脱离文档，点它不会触发任何 handler
@@ -149,5 +166,29 @@ describe("KnowledgePage", () => {
     fireEvent.click(screen.getByLabelText("预览 交换机手册"))
 
     await waitFor(() => expect(getDocumentContent).toHaveBeenCalledWith(7))
+  })
+
+  it("每行提供删除入口，且删除要先确认", async () => {
+    vi.mocked(usePaginatedQuery).mockReturnValue({
+      items: [buildDocument({ id: 9, title: "要删的文档" })],
+      total: 1,
+      page: 1,
+      setPage: vi.fn(),
+      pageSize: 10,
+      isLoading: false,
+      onPageSizeChange: vi.fn(),
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof usePaginatedQuery>)
+
+    renderPage()
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("删除 要删的文档")).toBeInTheDocument(),
+    )
+    fireEvent.click(screen.getByLabelText("删除 要删的文档"))
+
+    // 先出确认弹窗，不能点一下就删
+    expect(await screen.findByText(/移入回收站吗/)).toBeInTheDocument()
+    expect(deleteDocument).not.toHaveBeenCalled()
   })
 })

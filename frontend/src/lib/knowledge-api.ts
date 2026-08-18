@@ -10,6 +10,7 @@ export interface KnowledgeCategory {
   name: string
   description: string
   created_at: string
+  updated_at: string
 }
 
 /** 知识文档。`suggested_*` 是待人工确认的 AI 建议，未生成或已应用时为空 */
@@ -22,6 +23,7 @@ export interface KnowledgeDocument {
   file_type: string
   status: string
   created_at: string
+  updated_at: string
   suggested_category_id: number | null
   suggestion_confidence: number | null
   suggestion_reason: string
@@ -186,4 +188,45 @@ export async function getDocumentContent(
     `/knowledge/documents/${documentId}/content`,
   )
   return response.data.data
+}
+
+/**
+ * 把文档移入回收站。
+ *
+ * 需要 `knowledge:manage`。后端同时软删数据库行并把正文文件移出 KNOWLEDGE_ROOT，
+ * 两条检索路径（向量检索与文件系统 grep/glob）都会立刻看不到它。
+ *
+ * Args:
+ *   documentId: 文档 ID
+ */
+export async function deleteDocument(documentId: number): Promise<void> {
+  await api.delete(`/knowledge/documents/${documentId}`)
+}
+
+/**
+ * 从回收站恢复文档。
+ *
+ * Args:
+ *   documentId: 文档 ID
+ *
+ * Returns:
+ *   恢复后的文档
+ */
+export async function restoreDocument(
+  documentId: number,
+): Promise<KnowledgeDocument> {
+  const response = await api.post<ApiResponse<KnowledgeDocument>>(
+    `/knowledge/documents/${documentId}/restore`,
+  )
+  return response.data.data
+}
+
+/**
+ * 永久删除回收站中的文档（行、切片与正文文件一并清除）。
+ *
+ * Args:
+ *   documentId: 文档 ID
+ */
+export async function purgeDocument(documentId: number): Promise<void> {
+  await api.delete(`/knowledge/documents/${documentId}/purge`)
 }

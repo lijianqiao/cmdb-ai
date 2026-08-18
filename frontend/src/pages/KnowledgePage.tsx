@@ -14,7 +14,13 @@ import type { ColumnDef } from "@tanstack/react-table"
 import dayjs from "dayjs"
 import { toast } from "sonner"
 
-import { MagicWand01Icon, Tick02Icon, Upload01Icon, ViewIcon } from "@/lib/icons"
+import {
+  Delete02Icon,
+  MagicWand01Icon,
+  Tick02Icon,
+  Upload01Icon,
+  ViewIcon,
+} from "@/lib/icons"
 import { DocumentPreviewDrawer } from "@/components/knowledge/DocumentPreviewDrawer"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -35,9 +41,14 @@ import { Pagination } from "@/components/common/Pagination"
 import { usePaginatedQuery } from "@/hooks/use-paginated-query"
 import { usePermission } from "@/hooks/use-permission"
 import { PERMISSIONS } from "@/lib/constants"
+import { Link } from "react-router"
+
+import { ConfirmDialog } from "@/components/common/ConfirmDialog"
+import { ROUTES } from "@/lib/constants"
 import {
   applyDocumentCategory,
   classifyDocuments,
+  deleteDocument,
   listCategories,
   type KnowledgeCategory,
   type KnowledgeDocument,
@@ -78,6 +89,7 @@ export function KnowledgePage() {
   const [previewDocument, setPreviewDocument] = useState<KnowledgeDocument | null>(
     null,
   )
+  const [deleteTarget, setDeleteTarget] = useState<KnowledgeDocument | null>(null)
 
   const params = useMemo(() => {
     const next: Record<string, unknown> = {}
@@ -193,6 +205,19 @@ export function KnowledgePage() {
       await refetch()
     } catch {
       toast.error("应用建议失败")
+    }
+  }
+
+  const handleDeleteConfirm = async (): Promise<boolean> => {
+    if (!deleteTarget) return false
+    try {
+      await deleteDocument(deleteTarget.id)
+      toast.success(`已把《${deleteTarget.title}》移入回收站`)
+      await refetch()
+      return true
+    } catch {
+      toast.error("删除失败")
+      return false
     }
   }
 
@@ -342,6 +367,18 @@ export function KnowledgePage() {
                 <Tick02Icon />
                 应用
               </Button>
+              {canManage ? (
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="ghost"
+                  aria-label={`删除 ${document.title}`}
+                  onClick={() => setDeleteTarget(document)}
+                >
+                  <Delete02Icon />
+                  删除
+                </Button>
+              ) : null}
             </div>
           )
         },
@@ -357,15 +394,20 @@ export function KnowledgePage() {
         title="知识库"
         description="查看已上传的运维文档，按需生成 AI 分类建议并确认归类"
         actions={
-          canUploadKnowledge ? (
-            <Button
-              type="button"
-              onClick={() => setUploadOpen(true)}
-            >
-              <Upload01Icon data-icon="inline-start" />
-              上传知识文档
-            </Button>
-          ) : null
+          <div className="flex items-center gap-2">
+            {canManage ? (
+              <Button variant="outline" render={<Link to={ROUTES.KNOWLEDGE_TRASH} />}>
+                <Delete02Icon data-icon="inline-start" />
+                回收站
+              </Button>
+            ) : null}
+            {canUploadKnowledge ? (
+              <Button type="button" onClick={() => setUploadOpen(true)}>
+                <Upload01Icon data-icon="inline-start" />
+                上传知识文档
+              </Button>
+            ) : null}
+          </div>
         }
       />
 
@@ -468,6 +510,16 @@ export function KnowledgePage() {
       <DocumentPreviewDrawer
         document={previewDocument}
         onClose={() => setPreviewDocument(null)}
+      />
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null)
+        }}
+        title="确认删除"
+        description={`确定要把《${deleteTarget?.title ?? ""}》移入回收站吗？移入后运维助手将不再检索到它，可在回收站恢复。`}
+        onConfirm={handleDeleteConfirm}
       />
     </div>
   )

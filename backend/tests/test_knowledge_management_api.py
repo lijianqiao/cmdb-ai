@@ -579,3 +579,188 @@ async def test_duplicate_upload_error_names_the_conflicting_document(
     detail = duplicate.text
     assert "交换机重启手册" in detail
     assert "换个分类" in detail
+
+
+@pytest.fixture
+def knowledge_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
+    """把正文目录和回收站目录都指到临时目录，别写进仓库里的 backend/knowledge*。"""
+    root = tmp_path / "knowledge"  # type: ignore[operator]
+    trash = tmp_path / "knowledge_trash"  # type: ignore[operator]
+    monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", root)
+    monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_TRASH_ROOT", trash)
+
+
+async def test_delete_moves_file_out_of_knowledge_root_and_hides_document(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    knowledge_dirs: None,
+    stub_embedding: None,
+) -> None:
+    """删除要同时挡住两条检索路径：列表看不到，且正文文件移出 KNOWLEDGE_ROOT。
+
+    只软删数据库行的话，kb_glob / kb_grep / kb_read 直接扫文件系统，
+    Agent 照样能读到并引用这份"已删除"的文档。
+    """
+    from app.services import knowledge_storage
+
+    await _grant_knowledge_permissions(db_session, test_user)
+    await _create_category(client, auth_headers, "sop")
+    document = await _upload(
+        client, auth_headers, title="要删掉的", filename="del.md",
+        content=b"secret runbook", category_code="sop",
+    )
+    relative_path = str(document["file_path"])
+    assert (knowledge_storage.KNOWLEDGE_ROOT / relative_path).is_file()
+
+    deleted = await client.delete(
+        f"/api/v1/knowledge/documents/{document['id']}", headers=auth_headers
+    )
+    assert deleted.status_code == 200, deleted.text
+
+    # 列表里消失
+    listed = await client.get("/api/v1/knowledge/documents", headers=auth_headers)
+    assert listed.json()["data"]["total"] == 0
+    # 文件移出 KNOWLEDGE_ROOT，kb_glob/kb_grep/kb_read 再也扫不到
+    assert not (knowledge_storage.KNOWLEDGE_ROOT / relative_path).exists()
+    assert (knowledge_storage.KNOWLEDGE_TRASH_ROOT / relative_path).is_file()
+    # 回收站里能看到
+    trashed = await client.get(
+        "/api/v1/knowledge/documents/deleted", headers=auth_headers
+    )
+    assert trashed.json()["data"]["total"] == 1
+
+
+async def test_restore_brings_back_row_and_file(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    knowledge_dirs: None,
+    stub_embedding: None,
+) -> None:
+    """恢复要把数据库行和正文文件一起还原。"""
+    from app.services import knowledge_storage
+
+    await _grant_knowledge_permissions(db_session, test_user)
+    await _create_category(client, auth_headers, "sop")
+    document = await _upload(
+        client, auth_headers, title="恢复我", filename="res.md",
+        content=b"restore me", category_code="sop",
+    )
+    relative_path = str(document["file_path"])
+    await client.delete(
+        f"/api/v1/knowledge/documents/{document['id']}", headers=auth_headers
+    )
+
+    restored = await client.post(
+        f"/api/v1/knowledge/documents/{document['id']}/restore", headers=auth_headers
+    )
+
+    assert restored.status_code == 200, restored.text
+    assert (knowledge_storage.KNOWLEDGE_ROOT / relative_path).is_file()
+    listed = await client.get("/api/v1/knowledge/documents", headers=auth_headers)
+    assert listed.json()["data"]["total"] == 1
+
+
+async def test_restore_rejects_when_same_content_was_re_uploaded(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    knowledge_dirs: None,
+    stub_embedding: None,
+) -> None:
+    """删除后又重新传了同样内容，恢复会造出重复，必须拦住并说清楚。"""
+    await _grant_knowledge_permissions(db_session, test_user)
+    await _create_category(client, auth_headers, "sop")
+    first = await _upload(
+        client, auth_headers, title="原件", filename="a.md",
+        content=b"same body", category_code="sop",
+    )
+    await client.delete(
+        f"/api/v1/knowledge/documents/{first['id']}", headers=auth_headers
+    )
+    # 删掉之后同样内容可以重新上传（去重只看活跃文档）
+    await _upload(
+        client, auth_headers, title="重新传的", filename="b.md",
+        content=b"same body", category_code="sop",
+    )
+
+    conflict = await client.post(
+        f"/api/v1/knowledge/documents/{first['id']}/restore", headers=auth_headers
+    )
+
+    assert conflict.status_code == 409, conflict.text
+    assert "重新传的" in conflict.text
+
+
+async def test_purge_removes_row_chunks_and_file(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    knowledge_dirs: None,
+    stub_embedding: None,
+) -> None:
+    """永久删除要清掉行、切片与正文文件。"""
+    from sqlalchemy import func as sa_func
+
+    from app.models.knowledge_chunk import KnowledgeChunk
+    from app.services import knowledge_storage
+
+    await _grant_knowledge_permissions(db_session, test_user)
+    await _create_category(client, auth_headers, "sop")
+    document = await _upload(
+        client, auth_headers, title="彻底删掉", filename="p.md",
+        content=b"purge me", category_code="sop",
+    )
+    document_id = int(document["id"])
+    relative_path = str(document["file_path"])
+    await client.delete(
+        f"/api/v1/knowledge/documents/{document_id}", headers=auth_headers
+    )
+
+    purged = await client.delete(
+        f"/api/v1/knowledge/documents/{document_id}/purge", headers=auth_headers
+    )
+
+    assert purged.status_code == 200, purged.text
+    db_session.expire_all()
+    remaining_chunks = (
+        await db_session.execute(
+            sa_func.count().select().select_from(KnowledgeChunk).where(
+                KnowledgeChunk.document_id == document_id
+            )
+        )
+    ).scalar_one()
+    assert remaining_chunks == 0
+    assert not (knowledge_storage.KNOWLEDGE_TRASH_ROOT / relative_path).exists()
+    trashed = await client.get(
+        "/api/v1/knowledge/documents/deleted", headers=auth_headers
+    )
+    assert trashed.json()["data"]["total"] == 0
+
+
+async def test_trash_routes_require_manage_permission(
+    client: AsyncClient,
+    auth_headers: Headers,
+) -> None:
+    """删除/回收站/恢复/永久删除都要 knowledge:manage。"""
+    assert (
+        await client.get("/api/v1/knowledge/documents/deleted", headers=auth_headers)
+    ).status_code == 403
+    assert (
+        await client.delete("/api/v1/knowledge/documents/1", headers=auth_headers)
+    ).status_code == 403
+    assert (
+        await client.post(
+            "/api/v1/knowledge/documents/1/restore", headers=auth_headers
+        )
+    ).status_code == 403
+    assert (
+        await client.delete(
+            "/api/v1/knowledge/documents/1/purge", headers=auth_headers
+        )
+    ).status_code == 403

@@ -40,6 +40,9 @@ class KnowledgeDocumentResponse(ApiModel):
     file_type: str
     status: str
     created_at: datetime
+    # 回收站按删除时间排序、并展示这一列；软删除只改 is_deleted，
+    # 所以 updated_at 就是删除发生的时刻
+    updated_at: datetime
     # AI 分类建议；未生成或已被应用时全部为空。
     suggested_category_id: int | None = None
     suggestion_confidence: float | None = None

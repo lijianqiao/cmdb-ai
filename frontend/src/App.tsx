@@ -93,6 +93,11 @@ const MonitorLogsPage = lazy(() =>
     default: module.MonitorLogsPage,
   })),
 )
+const KnowledgeTrashPage = lazy(() =>
+  import("@/pages/KnowledgeTrashPage").then((module) => ({
+    default: module.KnowledgeTrashPage,
+  })),
+)
 const KnowledgePage = lazy(() =>
   import("@/pages/KnowledgePage").then((module) => ({
     default: module.KnowledgePage,
@@ -253,6 +258,14 @@ export function App() {
               element={
                 <ProtectedRoute permission={PERMISSIONS.KNOWLEDGE_READ}>
                   <KnowledgePage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path={ROUTES.KNOWLEDGE_TRASH}
+              element={
+                <ProtectedRoute permission={PERMISSIONS.KNOWLEDGE_MANAGE}>
+                  <KnowledgeTrashPage />
                 </ProtectedRoute>
               }
             />

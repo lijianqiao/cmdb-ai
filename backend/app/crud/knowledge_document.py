@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crud.base import CRUDBase, contains_pattern
@@ -154,6 +154,77 @@ class CRUDKnowledgeDocument(CRUDBase[KnowledgeDocument]):
             .group_by(KnowledgeDocument.category_id)
         )
         return {row[0]: row[1] for row in (await db.execute(stmt)).all()}
+
+    def _deleted_statement(self) -> Select[tuple[KnowledgeDocument]]:
+        """回收站视图：只看已软删除的行。"""
+        return select(KnowledgeDocument).where(KnowledgeDocument.is_deleted.is_(True))
+
+    async def list_deleted(
+        self,
+        db: AsyncSession,
+        *,
+        skip: int = 0,
+        limit: int = 20,
+    ) -> tuple[list[KnowledgeDocument], int]:
+        """分页列出回收站中的文档，最近删除的排前面。"""
+        total = (
+            await db.execute(
+                select(func.count()).select_from(
+                    self._deleted_statement().subquery()
+                )
+            )
+        ).scalar_one()
+        rows = (
+            await db.execute(
+                self._deleted_statement()
+                .order_by(KnowledgeDocument.updated_at.desc(), KnowledgeDocument.id.desc())
+                .offset(skip)
+                .limit(limit)
+            )
+        ).scalars().all()
+        return list(rows), int(total)
+
+    async def get_deleted(
+        self, db: AsyncSession, document_id: int
+    ) -> KnowledgeDocument | None:
+        """按 ID 取回收站中的文档；不在回收站里返回 None。"""
+        return (
+            await db.execute(
+                self._deleted_statement().where(KnowledgeDocument.id == document_id)
+            )
+        ).scalar_one_or_none()
+
+    async def active_with_content_hash(
+        self, db: AsyncSession, content_hash: str, *, exclude_id: int
+    ) -> KnowledgeDocument | None:
+        """查同内容的**活跃**文档，用于恢复前的冲突检查。
+
+        恢复等于把一份文档重新变成活跃状态，如果这期间同样内容已经被重新上传，
+        恢复就会造出两份一模一样的活跃文档——正是上传去重要挡的那种情况。
+        """
+        stmt = self._active_statement().where(
+            KnowledgeDocument.content_hash == content_hash,
+            KnowledgeDocument.id != exclude_id,
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    async def restore(self, db: AsyncSession, document_id: int) -> KnowledgeDocument | None:
+        """把文档移出回收站；不在回收站里返回 None。"""
+        document = await self.get_deleted(db, document_id)
+        if document is None:
+            return None
+        document.is_deleted = False
+        await db.flush()
+        return document
+
+    async def hard_delete(self, db: AsyncSession, document_id: int) -> bool:
+        """物理删除回收站中的文档；切片靠库级 ON DELETE CASCADE 一并清掉。"""
+        document = await self.get_deleted(db, document_id)
+        if document is None:
+            return False
+        await db.delete(document)
+        await db.flush()
+        return True
 
 
 knowledge_document_crud = CRUDKnowledgeDocument()

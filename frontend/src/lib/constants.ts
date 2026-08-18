@@ -16,6 +16,7 @@ export const ROUTES = {
   DEVICE_COMMAND_POLICIES: "/device-command-policies",
   DEVICE_COMMAND_POLICIES_TRASH: "/device-command-policies/trash",
   KNOWLEDGE: "/knowledge",
+  KNOWLEDGE_TRASH: "/knowledge/trash",
   PROFILE: "/profile",
   AUDIT: "/audit",
   SYSTEM_CONFIG: "/system-config",
