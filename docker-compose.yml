@@ -29,6 +29,31 @@ services:
       timeout: 5s
       retries: 20
 
+  # eval 专用库。刻意跟开发库分成两个容器，而不是在同一个 postgres 里
+  # 开第二个 database：eval 每轮开头要清库重灌，同实例同账号的话，
+  # evals/seed.py 里连接串写错一个字就能把开发数据清掉。
+  # 独立容器 + 独立端口 + 独立账号，这个事故在结构上就很难发生。
+  #
+  #   docker compose --profile eval up -d postgres-eval
+  postgres-eval:
+    image: pgvector/pgvector:pg17
+    container_name: ent-agent-postgres-eval
+    # profile 让它平时不启动：不带 --profile eval 的 docker compose up 不会碰它
+    profiles: ["eval"]
+    environment:
+      POSTGRES_USER: evaluser
+      POSTGRES_PASSWORD: eval-only
+      POSTGRES_DB: ent-agent-eval
+    ports:
+      # 跟开发库的 5433 错开，光看端口就能认出连的是哪个库
+      - "5434:5432"
+    # 刻意不挂卷：测试库的数据不该活过容器，每轮都是重灌的
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evaluser -d ent-agent-eval"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   backend:
     build: ./backend
     container_name: ent-agent-backend

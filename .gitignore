@@ -49,3 +49,6 @@ Thumbs.db
 *.log
 logs/
 
+
+# eval 每轮的产物（种子文件、结果快照）；baseline.json 与 cases/ 在 workdir 外，进版本库
+backend/evals/.workdir/
