@@ -1,0 +1,17 @@
+# 库里确实有答案时，模型必须去检索、并且答到点上。
+# 这是最基本的主路径：它一红，说明检索链路整个断了。
+id: kb-hit
+category: capability
+title: 库里有答案时能检索到并引用
+prompt: 交换机 SW-01 的例行巡检要检查哪些项？
+repeat: 5
+expect:
+  outcome:
+    # 任一命中即可。要求全中等于逼模型逐字复述文档，那不是要测的东西。
+    answer_contains_any: ["端口", "CPU", "温度"]
+  invariants:
+    # 不指定用哪个检索工具、也不指定顺序——§11.2 要求用 invariants 而非唯一路径
+    must_call_any: [kb_grep, kb_semantic_search, kb_glob]
+    must_not_call: [device_control]
+  efficiency:
+    max_steps: 8
