@@ -95,6 +95,9 @@ docker compose down -v           # also delete data — use with care
 Deliberate choices:
 
 - **Port 8090, not 8080** — `LLM_CHAT_BASE_URL` defaults to a local model server on `127.0.0.1:8080`.
+  Changing this port means changing `BACKEND_CORS_ORIGINS` in the same file: `/auth/login` matches the
+  browser's `Origin` against that list and answers `403 请求来源不受信任` on a mismatch, which the login
+  form reports as a wrong password.
 - **The backend publishes no host port** — reachable only through nginx, so there is never a second API origin.
 - **ripgrep is installed in the image** — `kb_grep` shells out to `rg`; without it knowledge-base search fails at runtime.
 - **Exactly one worker** — the agent spawn runtime keeps in-process state, so `WEB_CONCURRENCY` must be 1.
