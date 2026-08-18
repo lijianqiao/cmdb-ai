@@ -867,3 +867,76 @@ async def test_uncategorized_document_gets_a_normal_suggestion(
         headers=auth_headers,
     )
     assert listed.json()["data"]["items"][0]["suggested_category_id"] == sop_id
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '根据文档内容，我认为它属于 SOP。\n{"category":"sop","confidence":0.9,"reason":"是 SOP"}',
+        '{"category":"sop","confidence":0.9,"reason":"是 SOP"}\n以上是我的判断。',
+        '```json\n{"category":"sop","confidence":0.9,"reason":"是 SOP"}\n```',
+    ],
+)
+async def test_prose_around_json_still_yields_a_suggestion(
+    raw: str,
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+    knowledge_dirs: None,
+    stub_embedding: None,
+) -> None:
+    """模型在 JSON 前后加解释文字时不能丢掉结果。
+
+    提示词已写明「不要任何解释性文字」，但模型经常照加不误。那次调用的钱已经
+    花了、答案其实也给了，为格式洁癖把它算成"分析失败"既误导用户又浪费预算。
+    """
+    await _grant_knowledge_permissions(db_session, test_user)
+    sop_id = await _create_category(client, auth_headers, "sop")
+    document = await _upload(
+        client, auth_headers, title="带解释的输出", filename="w.md",
+        content=raw.encode()[:40] + b" filler", category_code=None,
+    )
+    _stub_chat(monkeypatch, raw)
+
+    response = await client.post(
+        "/api/v1/knowledge/documents/classify",
+        json={"document_ids": [document["id"]]},
+        headers=auth_headers,
+    )
+
+    assert response.json()["data"]["suggested"] == 1, response.text
+    listed = await client.get(
+        "/api/v1/knowledge/documents",
+        params={"pending_suggestion": "true"},
+        headers=auth_headers,
+    )
+    assert listed.json()["data"]["items"][0]["suggested_category_id"] == sop_id
+
+
+async def test_output_without_any_json_object_is_still_a_failure(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+    knowledge_dirs: None,
+    stub_embedding: None,
+) -> None:
+    """兜底提取不能宽到把纯文本也当成建议。"""
+    await _grant_knowledge_permissions(db_session, test_user)
+    await _create_category(client, auth_headers, "sop")
+    document = await _upload(
+        client, auth_headers, title="纯文本", filename="v.md",
+        content=b"plain", category_code=None,
+    )
+    _stub_chat(monkeypatch, "我觉得这份文档属于 SOP 分类。")
+
+    response = await client.post(
+        "/api/v1/knowledge/documents/classify",
+        json={"document_ids": [document["id"]]},
+        headers=auth_headers,
+    )
+
+    assert response.json()["data"]["skipped"] == 1

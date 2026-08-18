@@ -75,6 +75,30 @@ def _category_menu(categories: list[KnowledgeCategory]) -> str:
     )
 
 
+def _loads_json_object(text: str) -> dict[str, object] | None:
+    """解析一个 JSON 对象，容忍模型在前后多写的解释文字。
+
+    提示词已经写明「不要任何解释性文字」，但模型经常照说不误地加一句
+    「根据文档内容，我认为……」再跟上 JSON。整串按 JSON 解析必然失败，
+    而那次调用的钱已经花了、答案其实也给了——为这点格式洁癖丢掉结果不划算。
+
+    只在整串解析失败后才退回到「取第一个 { 到最后一个 }」，
+    格式规范的输出走的仍是原来那条路径。
+    """
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        try:
+            payload = json.loads(text[start : end + 1])
+        except ValueError:
+            return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _parse_single_suggestion(
     raw: str | None,
 ) -> tuple[str | None, float, str] | None:
@@ -92,11 +116,8 @@ def _parse_single_suggestion(
     if text.startswith("```"):
         text = text.split("\n", 1)[-1] if "\n" in text else ""
         text = text.rsplit("```", 1)[0].strip()
-    try:
-        payload = json.loads(text)
-    except ValueError:
-        return None
-    if not isinstance(payload, dict):
+    payload = _loads_json_object(text)
+    if payload is None:
         return None
     code = payload.get("category")
     if not isinstance(code, str):
@@ -155,7 +176,14 @@ async def _suggest_one(
 
     parsed = _parse_single_suggestion(result.content)
     if parsed is None:
-        logger.info("分类建议跳过：模型输出无法解析 document_id=%s", document.id)
+        # 带上模型原样输出（截断）：不然"解析失败"这四个字什么线索都不给，
+        # 既看不出是模型答非所问，还是它换了个 JSON 形状。
+        # 这里是模型对分类问题的回答，不含文档正文。
+        logger.warning(
+            "分类建议跳过：模型输出无法解析 document_id=%s raw=%r",
+            document.id,
+            (result.content or "")[:200],
+        )
         return "skipped"
     code, confidence, reason = parsed
     if code is None:
@@ -167,7 +195,12 @@ async def _suggest_one(
     target = by_code.get(code)
     if target is None:
         # 模型编了一个不存在的 code。不落库，避免管理页出现指向空分类的建议。
-        logger.info("分类建议跳过：模型给出未知分类 code=%r document_id=%s", code, document.id)
+        logger.warning(
+            "分类建议跳过：模型给出未知分类 code=%r document_id=%s 候选=%r",
+            code,
+            document.id,
+            [category.code for category in categories],
+        )
         return "skipped"
 
     if target.id == document.category_id:
