@@ -16,6 +16,7 @@
 """
 
 import asyncio
+import io
 import os
 import sys
 import time
@@ -130,6 +131,13 @@ async def prepare_database() -> tuple[async_sessionmaker[AsyncSession], int]:
 
 async def main() -> int:
     """跑完全部用例并打印结果。返回进程退出码：0 通过，1 有失败。"""
+    # 一轮要跑十几分钟。stdout 重定向到文件时 Python 默认按块缓冲，
+    # 那样在跑完之前你什么都看不到，没法中途判断是不是卡住了。
+    # isinstance 收窄不只是为了过类型检查：stdout 被别的东西接管时
+    # （比如 pytest 捕获）确实可能不是 TextIOWrapper，那时跳过即可。
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(line_buffering=True)
+
     print(f"测试库：{_PATHS.workdir}")
     session_factory, user_id = await prepare_database()
 

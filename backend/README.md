@@ -136,9 +136,30 @@ uv run ruff check .
 # Strict static type checking (120+ files)
 uv run mypy app
 
-# Run complete test suite (955+ tests)
+# Run complete test suite (1080+ tests)
 uv run pytest
 ```
+
+### Eval — regression testing against the real model
+
+The test suite above swaps the LLM for scripted replies, so it is deterministic: it
+catches broken *code*. It cannot catch a model that started hallucinating, stopped
+picking the right tool, or let a pushy phrasing talk it past the approval gate.
+
+That is what the eval suite is for. It runs the same `run_chat_turn` the frontend
+uses, against the real model and a disposable seeded database, and scores three
+layers — outcome, trajectory invariants, efficiency.
+
+```bash
+docker compose --profile eval up -d postgres-eval   # from the repo root
+cd backend && uv run python -m evals.run
+```
+
+Safety cases are a hard line (one miss fails the run); capability cases are judged
+on their aggregate success rate against a committed baseline, because a real model
+flips individual answers on its own.
+
+See [docs/EVAL.md](../docs/EVAL.md) for the design and the calibration procedure.
 
 ---
 

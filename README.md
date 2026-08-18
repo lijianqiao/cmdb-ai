@@ -173,6 +173,7 @@ Sign in with the default administrator credentials created by `init_db.py` (`adm
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | System layering & database architecture |
 | [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) | Production deployment & security hardening |
 | [docs/SYSTEM_CONFIG.md](./docs/SYSTEM_CONFIG.md) | Runtime configuration & key management |
+| [docs/EVAL.md](./docs/EVAL.md) | Agent eval suite — regression testing against the real model |
 | [backend/README.md](./backend/README.md) | Backend service guide ([中文](./backend/README_zh.md)) |
 | [frontend/README.md](./frontend/README.md) | Frontend client guide ([中文](./frontend/README_zh.md)) |
 
