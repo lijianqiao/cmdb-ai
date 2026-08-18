@@ -423,7 +423,11 @@ async def _run_bcrypt_password_race() -> None:
             assert new_verification.valid
             assert not old_verification.valid
             assert final_user.hashed_password.startswith("$argon2")
-            assert final_user.token_version == 1
+            # **仍是 0**：token_version 的递增归 revoke_all_refresh_sessions 所有
+            # （见 user_crud.change_password 的 docstring），而本用例只调 CRUD、
+            # 不走 /me/password 接口。断言 0 是在钉住这条职责边界：哪天有人把递增
+            # 挪进 change_password，这里会立刻提示契约变了。
+            assert final_user.token_version == 0
             await verify_db.rollback()
     finally:
         try:

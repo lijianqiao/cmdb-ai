@@ -99,6 +99,20 @@ frontend/
 
 ---
 
+## Docker 运行（推荐）
+
+在仓库根目录 `docker compose up -d --build`，然后访问 <http://localhost:8090>。
+
+前端镜像是「Vite 构建产物 + nginx」，nginx 同时负责：
+
+- 把 `/api` 反代到后端，**包含 WebSocket 升级**（运维助手的实时事件走
+  `/api/v1/ws/agent/{id}`，少了升级头会表现为"页面能开、就是不推消息"）；
+- SPA 路由回退，`/knowledge`、`/users/trash` 这类深链接刷新不会 404；
+- 把代理读超时放宽到 600s，一轮多步工具调用的长回答不会被拦腰截断。
+
+因为 `src/lib/api.ts` 的 `baseURL` 默认是相对路径 `/api/v1`、WS 地址由页面 host 推出，
+构建产物里不含任何后端地址，同一份镜像可部署到任意域名，不需要按环境重新构建。
+
 ## 本地启动与开发
 
 ### 安装依赖

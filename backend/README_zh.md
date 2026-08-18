@@ -79,6 +79,32 @@ backend/
 
 ---
 
+## Docker 运行（推荐）
+
+在仓库根目录 `docker compose up -d --build` 会一起起数据库、后端与前端；
+后端容器启动时自动跑 `alembic upgrade head` 与幂等种子初始化。详见根目录 README。
+
+镜像里有两件事值得知道：
+
+- **装了 ripgrep**：`kb_grep` 直接调 `rg` 可执行文件，缺了它知识库全文检索会在运行时
+  返回失败，而不是启动就报错，很难联想到是镜像少装了东西。
+- **只跑 1 个 worker**：`SpawnManager` / `ws_hub` / `turn_registry` 都是进程内状态，
+  `validate_single_worker_environment` 会拒绝 `WEB_CONCURRENCY != 1`。要横向扩容，
+  得先把这三样外置。
+
+## Docker 运行（推荐）
+
+在仓库根目录 `docker compose up -d --build` 会一起起数据库、后端与前端；
+后端容器启动时自动跑 `alembic upgrade head` 与幂等种子初始化。详见根目录 README。
+
+镜像里有两件事值得知道：
+
+- **装了 ripgrep**：`kb_grep` 直接调 `rg` 可执行文件，缺了它知识库全文检索会在运行时
+  返回失败，而不是启动就报错，很难联想到是镜像少装了东西。
+- **只跑 1 个 worker**：`SpawnManager` / `ws_hub` / `turn_registry` 都是进程内状态，
+  `validate_single_worker_environment` 会拒绝 `WEB_CONCURRENCY != 1`。要横向扩容，
+  得先把这三样外置。
+
 ## 本地安装与启动
 
 ### 环境准备

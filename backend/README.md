@@ -79,6 +79,21 @@ backend/
 
 ---
 
+## Running with Docker (recommended)
+
+`docker compose up -d --build` at the repo root brings up the database, backend and frontend
+together; the backend container runs `alembic upgrade head` plus an idempotent seed pass on start.
+See the root README for details.
+
+Two things worth knowing about the image:
+
+- **ripgrep is installed** — `kb_grep` shells out to the `rg` binary. Without it knowledge-base
+  search fails at request time rather than at startup, which is hard to trace back to a missing
+  package.
+- **Exactly one worker** — `SpawnManager` / `ws_hub` / `turn_registry` keep in-process state and
+  `validate_single_worker_environment` rejects `WEB_CONCURRENCY != 1`. Scaling out means moving
+  those three out of the process first.
+
 ## Development & Setup
 
 ### Requirements

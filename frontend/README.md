@@ -99,6 +99,21 @@ All routes are split into lightweight dynamic chunks via `React.lazy()`:
 
 ---
 
+## Running with Docker (recommended)
+
+Run `docker compose up -d --build` at the repo root, then open <http://localhost:8090>.
+
+The frontend image is "Vite build output + nginx", and nginx also handles:
+
+- proxying `/api` to the backend **including the WebSocket upgrade** (ops-assistant live events go
+  through `/api/v1/ws/agent/{id}`; without the upgrade headers the symptom is "the page loads but
+  nothing streams");
+- SPA fallback, so deep links such as `/knowledge` or `/users/trash` survive a refresh;
+- a 600s proxy read timeout, so a long multi-step answer is not cut off mid-stream.
+
+Because `baseURL` in `src/lib/api.ts` defaults to the relative `/api/v1` and the WS URL is derived
+from the page host, no backend address is baked into the build — one image runs on any domain.
+
 ## Getting Started
 
 ### Installation

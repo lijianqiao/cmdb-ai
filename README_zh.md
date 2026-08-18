@@ -72,6 +72,56 @@ ent-agent/
 
 ---
 
+## 快速开始（Docker，推荐）
+
+整套系统（PostgreSQL + 后端 + 前端）都在容器里跑，本机只需要装 Docker。
+
+```bash
+cp backend/.env.example backend/.env   # 填入模型密钥、INIT_SUPERUSER_* 等
+docker compose up -d --build
+```
+
+打开 <http://localhost:8090>。前端与 API **同源**：nginx 把 `/api` 反代到后端，
+所以构建产物里不含任何后端地址，同一份镜像可以部署到任意域名。
+
+启动时后端会自动 `alembic upgrade head` 并跑一次幂等的种子初始化，不需要手工执行。
+
+```bash
+docker compose logs -f backend   # 看迁移、种子与运行日志
+docker compose down              # 停止（数据卷保留）
+docker compose down -v           # 连同数据一起删除，慎用
+```
+
+几个刻意的选择：
+
+- **端口 8090 而不是 8080**：`LLM_CHAT_BASE_URL` 默认指向 `127.0.0.1:8080` 的本地模型服务，避开它。
+- **后端不映射宿主端口**：只经 nginx 同源访问，避免出现"两个后端地址"的困惑。
+- **镜像里装了 ripgrep**：`kb_grep` 工具直接调 `rg`，缺了它知识库全文检索会在运行时失败。
+- **只跑单个 worker**：Agent 的 Spawn 运行时是进程内状态，`WEB_CONCURRENCY` 只能是 1。
+- 知识库正文与回收站挂在具名卷上，重建镜像不会丢已上传的文档。
+
+## 快速开始（本地运行）
+
+想改代码、用热重载时更方便。需要 Python 3.14 + uv、Node 24、以及一个带 pgvector 的 PostgreSQL
+（可以只起编排里的数据库：`docker compose up -d postgres`）。
+
+另外 `kb_grep` 依赖 **ripgrep**，本地需自行安装（`winget install BurntSushi.ripgrep.MSVC` /
+`brew install ripgrep` / `apt install ripgrep`）。
+
+```bash
+# 后端
+cd backend
+uv sync
+uv run alembic upgrade head
+uv run python init_db.py
+uv run uvicorn app.main:app --reload
+
+# 前端（另开一个终端）
+cd frontend
+npm install
+npm run dev
+```
+
 ## 快速开始
 
 ### 前置要求

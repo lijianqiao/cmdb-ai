@@ -1,0 +1,113 @@
+# 持续集成：后端 + 前端 + 镜像构建
+#
+# 三个 job 并行。后端那个特意起了带 pgvector 的 Postgres：
+# tests/test_knowledge_chunk_search_postgres.py 与 test_postgres_refresh_concurrency.py
+# 依赖 TEST_POSTGRES_DATABASE_URL，本地不配就永远 skip——CI 是它们唯一会被
+# 真正执行的地方，而它们覆盖的恰恰是 SQLite 测不了的部分（pgvector 余弦检索、
+# Postgres 行锁并发）。
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  backend:
+    name: 后端（ruff + mypy + pytest）
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ent_agent_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d ent_agent_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # kb_grep 直接调 rg 可执行文件，缺了它相关测试会走"未安装"分支而非真实路径
+      - name: 安装 ripgrep
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      # uv 会按 .python-version 拉 3.14.3；容器里禁下载，CI 里正相反
+      - name: 安装依赖
+        run: uv sync --frozen
+
+      - name: ruff
+        run: uv run ruff check .
+
+      - name: mypy
+        run: uv run mypy app/
+
+      # PG 专属测试要求库已迁移且有 vector 扩展
+      - name: 迁移 CI 数据库
+        run: uv run alembic upgrade head
+        env:
+          DATABASE_URL: postgresql+psycopg://ci:ci@localhost:5432/ent_agent_ci
+
+      - name: pytest
+        run: uv run pytest -q
+        env:
+          TEST_POSTGRES_DATABASE_URL: postgresql+psycopg://ci:ci@localhost:5432/ent_agent_ci
+
+  frontend:
+    name: 前端（eslint + tsc + vitest + build）
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - name: eslint
+        run: npm run lint
+
+      - name: vitest
+        run: npx vitest run
+
+      # build 脚本是 `tsc -b && vite build`，类型检查含在里面
+      - name: 构建
+        run: npm run build
+
+  docker:
+    name: 镜像构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 只构建不推送：确保部署路径不会在没人注意时坏掉
+      - name: 构建后端镜像
+        run: docker build -t ent-agent-backend:ci ./backend
+
+      - name: 构建前端镜像
+        run: docker build -t ent-agent-frontend:ci ./frontend

@@ -1,3 +1,12 @@
+# 整套系统的容器编排：postgres + backend + frontend
+#
+# 起停：
+#   docker compose up -d --build     # 首次或改了代码
+#   docker compose logs -f backend   # 看后端日志（迁移与种子在启动时跑）
+#   docker compose down              # 停止（数据卷保留）
+#
+# 访问：http://localhost:8090 —— 前端与 API 同源，nginx 把 /api 反代到 backend。
+
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -8,9 +17,54 @@ services:
       POSTGRES_PASSWORD: ent-agent-dev-only
       POSTGRES_DB: Ent-agent
     ports:
+      # 宿主机映射到 5433，避免和本地已装的 postgres 抢 5432
       - "5433:5432"
     volumes:
       - ent-agent-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # backend 启动时立刻要跑 alembic，数据库没就绪会直接失败退出，
+      # 所以这里必须有健康检查配合下面的 service_healthy
+      test: ["CMD-SHELL", "pg_isready -U lijianqiao -d Ent-agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build: ./backend
+    container_name: ent-agent-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      # 复用本地那份 .env（模型密钥等）；下面的 environment 会覆盖其中
+      # 与容器网络冲突的项
+      - ./backend/.env
+    environment:
+      # 容器内连的是服务名 postgres:5432，不是宿主机的 5433
+      DATABASE_URL: postgresql+psycopg://lijianqiao:ent-agent-dev-only@postgres:5432/Ent-agent
+      # 显式写成 1 是自我说明：Agent Spawn 只支持单 worker，
+      # app.main.validate_single_worker_environment 会拒绝其它值
+      WEB_CONCURRENCY: "1"
+      # 前端经 nginx 同源访问，浏览器看到的 Host 是宿主机地址
+      ALLOWED_HOSTS: "localhost,127.0.0.1,backend"
+    volumes:
+      # 知识库正文与回收站是运行时数据，必须落在卷上，
+      # 否则重建镜像会把已上传的文档全部丢掉
+      - ent-agent-knowledge:/app/knowledge
+      - ent-agent-knowledge-trash:/app/knowledge_trash
+
+  frontend:
+    build: ./frontend
+    container_name: ent-agent-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      # 不用 8080：本地模型服务（LLM_CHAT_BASE_URL 默认 127.0.0.1:8080）常占着它
+      - "8090:80"
 
 volumes:
   ent-agent-postgres-data:
+  ent-agent-knowledge:
+  ent-agent-knowledge-trash:

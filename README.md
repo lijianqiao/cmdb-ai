@@ -72,6 +72,56 @@ ent-agent/
 
 ---
 
+## Quick start (Docker, recommended)
+
+The whole stack — PostgreSQL, backend, frontend — runs in containers; Docker is the only prerequisite.
+
+```bash
+cp backend/.env.example backend/.env   # model credentials, INIT_SUPERUSER_*, ...
+docker compose up -d --build
+```
+
+Open <http://localhost:8090>. The frontend and the API are **same-origin**: nginx proxies `/api`
+to the backend, so no backend address is baked into the build and one image works on any domain.
+
+On start the backend runs `alembic upgrade head` and an idempotent seed pass — no manual step.
+
+```bash
+docker compose logs -f backend   # migrations, seeding and runtime logs
+docker compose down              # stop (volumes kept)
+docker compose down -v           # also delete data — use with care
+```
+
+Deliberate choices:
+
+- **Port 8090, not 8080** — `LLM_CHAT_BASE_URL` defaults to a local model server on `127.0.0.1:8080`.
+- **The backend publishes no host port** — reachable only through nginx, so there is never a second API origin.
+- **ripgrep is installed in the image** — `kb_grep` shells out to `rg`; without it knowledge-base search fails at runtime.
+- **Exactly one worker** — the agent spawn runtime keeps in-process state, so `WEB_CONCURRENCY` must be 1.
+- Knowledge-base files and the trash live on named volumes, so rebuilding images never drops uploaded documents.
+
+## Quick start (local)
+
+Better when you are editing code and want hot reload. Needs Python 3.14 + uv, Node 24, and a
+PostgreSQL with pgvector (`docker compose up -d postgres` starts just the database).
+
+`kb_grep` also needs **ripgrep** installed locally (`winget install BurntSushi.ripgrep.MSVC` /
+`brew install ripgrep` / `apt install ripgrep`).
+
+```bash
+# backend
+cd backend
+uv sync
+uv run alembic upgrade head
+uv run python init_db.py
+uv run uvicorn app.main:app --reload
+
+# frontend (second terminal)
+cd frontend
+npm install
+npm run dev
+```
+
 ## Quick Start
 
 ### Prerequisites

@@ -98,6 +98,9 @@ async def _run_search_similar_test() -> None:
 
             await db.rollback()
     finally:
-        async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.drop_all)
+        # **不 drop_all**：本用例插入的行上面已经 rollback 掉了，清理不需要它；
+        # 而 TEST_POSTGRES_DATABASE_URL 是多个模块共用的同一个库，
+        # test_postgres_refresh_concurrency 要求库**已迁移**。字母序下本模块先跑，
+        # 一旦在这里清空 schema，那边整组就会以「未迁移」失败——两个模块单独跑
+        # 都是绿的，一起跑才炸，是最难查的那种。
         await engine.dispose()
