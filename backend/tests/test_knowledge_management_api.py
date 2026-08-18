@@ -940,3 +940,74 @@ async def test_output_without_any_json_object_is_still_a_failure(
     )
 
     assert response.json()["data"]["skipped"] == 1
+
+
+async def test_applying_a_category_moves_the_file_so_both_lookups_agree(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    knowledge_dirs: None,
+    stub_embedding: None,
+) -> None:
+    """改分类必须连正文文件一起搬。
+
+    kb_glob / kb_grep 按**目录**限定分类，向量检索按**数据库列**限定。只改
+    category_id 不搬文件，两条检索路径就会对"这份文档属于哪个分类"给出相反答案：
+    归到 sop 之后，向量检索认 sop，而 kb_grep(category="sop") 找不到它，
+    kb_grep(category="uncategorized") 反而还能找到。分类的意义正是让按分类检索
+    有效，这种错位等于让 AI 建议分类白做。
+    """
+    from app.services.knowledge_storage import glob_documents
+
+    await _grant_knowledge_permissions(db_session, test_user)
+    sop_id = await _create_category(client, auth_headers, "sop")
+    document = await _upload(
+        client, auth_headers, title="待归类 SOP", filename="run.md",
+        content=b"sop body", category_code=None,
+    )
+    assert str(document["file_path"]).startswith("uncategorized/")
+
+    applied = await client.patch(
+        f"/api/v1/knowledge/documents/{document['id']}/category",
+        json={"category_id": sop_id},
+        headers=auth_headers,
+    )
+    assert applied.status_code == 200, applied.text
+
+    # 数据库侧：分类与路径都指向 sop
+    assert applied.json()["data"]["category_id"] == sop_id
+    assert str(applied.json()["data"]["file_path"]).startswith("sop/")
+
+    # 文件系统侧：sop 目录里找得到，原来的 uncategorized 目录里找不到
+    assert glob_documents("*.md", category_code="sop")
+    assert glob_documents("*.md", category_code="uncategorized") == []
+
+
+async def test_applying_the_same_category_is_a_no_op_on_disk(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    knowledge_dirs: None,
+    stub_embedding: None,
+) -> None:
+    """归到它已经在的分类时，文件路径不变，也不该把文件搬丢。"""
+    from app.services.knowledge_storage import glob_documents
+
+    await _grant_knowledge_permissions(db_session, test_user)
+    sop_id = await _create_category(client, auth_headers, "sop")
+    document = await _upload(
+        client, auth_headers, title="已经在 sop", filename="keep.md",
+        content=b"stay", category_code="sop",
+    )
+
+    applied = await client.patch(
+        f"/api/v1/knowledge/documents/{document['id']}/category",
+        json={"category_id": sop_id},
+        headers=auth_headers,
+    )
+
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["data"]["file_path"] == document["file_path"]
+    assert glob_documents("*.md", category_code="sop")

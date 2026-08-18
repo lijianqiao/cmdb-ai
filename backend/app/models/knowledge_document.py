@@ -25,6 +25,10 @@ class KnowledgeDocument(Base, TimestampMixin):
     file_path: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     file_type: Mapped[str] = mapped_column(String(20), nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # 目前**恒为 "ready"**：ingest_document 在同一个事务里把它从 processing 改成
+    # ready，外部永远观察不到中间态，全库也没有任何查询按它过滤。留着不是因为它
+    # 现在有用，而是将来若要做「上传后需审批才可检索」，这里是它的天然落脚点，
+    # 届时只需扩枚举 + 在检索侧加过滤，不必再加列。**读它之前先确认它真的被写过。**
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="processing")
     uploaded_by: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True

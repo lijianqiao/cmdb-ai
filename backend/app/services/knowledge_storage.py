@@ -128,6 +128,37 @@ def _trash_path(relative_path: str) -> Path:
     return candidate
 
 
+def move_document_to_category(
+    relative_path: str,
+    *,
+    category_code: str,
+    document_id: int,
+    filename: str,
+) -> str:
+    """把文档正文移到新分类的目录下，返回新的相对路径。
+
+    **改分类必须连文件一起搬。** kb_glob / kb_grep 是按**目录**限定分类的
+    （见 glob_documents 与 knowledge_tools.kb_grep），而向量检索按数据库列限定。
+    只改 category_id 不搬文件，这两条检索路径就会对"这份文档属于哪个分类"
+    给出相反的答案：向量检索认新分类，文件工具认旧目录。
+
+    源文件不存在时只返回新路径、不报错：数据库行才是真相来源，磁盘缺文件不该
+    让归类操作失败（正文本来就已经读不到了）。
+    """
+    target_relative = (
+        f"{category_code}/{document_id}_{sanitize_filename(filename)}"
+    )
+    if target_relative == relative_path:
+        return target_relative
+
+    directory = category_dir(category_code)
+    target = directory / f"{document_id}_{sanitize_filename(filename)}"
+    source = resolve_safe_path(relative_path)
+    if source.is_file():
+        source.replace(target)
+    return target_relative
+
+
 def move_document_to_trash(relative_path: str) -> None:
     """Move a document's file out of KNOWLEDGE_ROOT into the trash root.
 
@@ -157,4 +188,7 @@ def restore_document_from_trash(relative_path: str) -> None:
 
 def purge_document_from_trash(relative_path: str) -> None:
     """Delete a document's file from the trash root for good."""
+    if not relative_path:
+        # 空路径解析出来就是回收站根目录，对目录 unlink 会抛异常
+        return
     _trash_path(relative_path).unlink(missing_ok=True)

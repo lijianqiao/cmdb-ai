@@ -40,6 +40,7 @@ from app.services.knowledge_classification import suggest_categories
 from app.services.knowledge_ingestion import DuplicateDocumentError, ingest_document
 from app.services.knowledge_storage import (
     PathTraversalError,
+    move_document_to_category,
     move_document_to_trash,
     purge_document_from_trash,
     read_document_preview,
@@ -299,10 +300,16 @@ async def delete_document(
         detail=f"删除知识文档: {title}",
         ip=get_client_ip(request),
     )
-    await db.commit()
-    # 文件移动放在 commit 之后：事务回滚不了文件系统，先落库再动盘，
-    # 最坏情况是库里已删、文件还在原地，下次删除会把它补移走。
+    # **先动盘再提交**：删除的目的就是让 Agent 立刻看不到它。如果放在 commit 之后
+    # 而移动失败，库里已标删、文件却还留在 KNOWLEDGE_ROOT 里，kb_grep 照样读得到
+    # ——正是这个功能要防的情况。反过来先搬文件、提交失败再搬回来，最坏也只是
+    # 这次删除没生效，不会留下"已删除但仍可被检索"的文档。
     move_document_to_trash(file_path)
+    try:
+        await db.commit()
+    except Exception:
+        restore_document_from_trash(file_path)
+        raise
     return success_response(None, message="已移入回收站")
 
 
@@ -349,8 +356,12 @@ async def restore_document(
         detail=f"恢复知识文档: {restored.title}",
         ip=get_client_ip(request),
     )
-    await db.commit()
     restore_document_from_trash(restored.file_path)
+    try:
+        await db.commit()
+    except Exception:
+        move_document_to_trash(restored.file_path)
+        raise
     return success_response(
         KnowledgeDocumentResponse.model_validate(restored), message="恢复成功"
     )
@@ -408,8 +419,21 @@ async def update_document_category(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分类不存在")
 
     previous_category_id = document.category_id
+    previous_path = document.file_path
+    # 提前取好旧分类 code：补偿要用它，而补偿发生在 commit 失败之后，
+    # 那时再去查库等于拿一个刚出过错的会话冒险
+    previous_category = await knowledge_category_crud.get(db, previous_category_id)
+    previous_code = previous_category.code if previous_category else None
     adopted_suggestion = document.suggested_category_id == body.category_id
     await knowledge_document_crud.apply_category(db, document, body.category_id)
+    # 文件必须跟着分类走：kb_glob / kb_grep 按目录限定分类，只改 category_id
+    # 会让文件工具和向量检索对"这份文档在哪个分类"给出相反答案。
+    document.file_path = move_document_to_category(
+        previous_path,
+        category_code=category.code,
+        document_id=document.id,
+        filename=document.original_filename,
+    )
     await log_audit(
         db,
         current_user.id,
@@ -421,7 +445,18 @@ async def update_document_category(
         ),
         ip=get_client_ip(request),
     )
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        # 文件已经搬走了，提交却失败：把它搬回原处，别留下库与盘不一致
+        if previous_code is not None:
+            move_document_to_category(
+                document.file_path,
+                category_code=previous_code,
+                document_id=document.id,
+                filename=document.original_filename,
+            )
+        raise
     return success_response(
         KnowledgeDocumentResponse.model_validate(document), message="已更新分类"
     )
