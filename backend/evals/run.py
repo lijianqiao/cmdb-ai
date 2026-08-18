@@ -16,9 +16,9 @@
 """
 
 import asyncio
+import os
 import sys
 import time
-from dataclasses import dataclass
 
 from evals.config import apply_env, loop_factory
 
@@ -32,7 +32,13 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 
 from evals.cases import Case, load_all_cases  # noqa: E402
-from evals.scoring import Score, score  # noqa: E402
+from evals.report import (  # noqa: E402
+    RunOutcome,
+    judge,
+    load_baseline,
+    write_baseline,
+)
+from evals.scoring import score  # noqa: E402
 from evals.trajectory import load_trajectory  # noqa: E402
 
 # 整轮 eval 的成本上限。单轮已被 Budget(max_steps=20) 卡住（实测约 $0.02），
@@ -40,17 +46,6 @@ from evals.trajectory import load_trajectory  # noqa: E402
 MAX_TOTAL_USD = 1.0
 
 EVAL_USERNAME = "evaluser"
-
-
-@dataclass(frozen=True, slots=True)
-class RunOutcome:
-    """一条用例跑一次的结果。"""
-
-    case_id: str
-    attempt: int
-    score: Score
-    latency_s: float
-    cost_usd: float
 
 
 async def ensure_eval_user(session: AsyncSession) -> int:
@@ -119,8 +114,6 @@ async def run_case_once(
 
 async def prepare_database() -> tuple[async_sessionmaker[AsyncSession], int]:
     """推平测试库、灌种子与向量、建 eval 用户。返回会话工厂与用户 id。"""
-    import os
-
     from evals import seed
 
     engine = create_async_engine(os.environ["DATABASE_URL"])
@@ -140,10 +133,11 @@ async def main() -> int:
     print(f"测试库：{_PATHS.workdir}")
     session_factory, user_id = await prepare_database()
 
+    cases = load_all_cases(_PATHS.cases_dir)
     outcomes: list[RunOutcome] = []
     total_cost = 0.0
 
-    for case in load_all_cases(_PATHS.cases_dir):
+    for case in cases:
         for attempt in range(case.repeat):
             result = await run_case_once(
                 session_factory, case, user_id=user_id, attempt=attempt
@@ -166,9 +160,30 @@ async def main() -> int:
                 )
                 return 1
 
-    passed = sum(1 for outcome in outcomes if outcome.score.passed)
-    print(f"\n通过 {passed}/{len(outcomes)}，总成本 ${total_cost:.4f}")
-    return 0 if passed == len(outcomes) else 1
+    baseline = load_baseline(_PATHS.baseline_path)
+    verdict = judge(outcomes, cases, baseline)
+
+    print("\n=== 汇总 ===")
+    print(f"capability 汇总成功率：{verdict.capability_overall:.3f}")
+    for case_id, rate in sorted(verdict.per_case.items()):
+        print(f"  {case_id:30} {rate:.2f}")
+    print(f"总成本：${total_cost:.4f}")
+
+    if baseline is None:
+        print("（没有基线，本轮只记录不判定。确认成绩合理后用 --update-baseline 建立基线。）")
+    else:
+        print(f"基线 capability：{baseline.capability_overall:.3f}")
+
+    for reason in verdict.reasons:
+        print(f"[FAIL] {reason}")
+
+    if "--update-baseline" in sys.argv:
+        write_baseline(
+            _PATHS.baseline_path, verdict, model=os.environ.get("LLM_CHAT_MODEL", "")
+        )
+        print(f"已写入基线：{_PATHS.baseline_path}")
+
+    return 0 if verdict.passed else 1
 
 
 if __name__ == "__main__":
