@@ -129,6 +129,48 @@ def read_fixtures(paths: EvalPaths) -> dict[int, bytes]:
     return contents
 
 
+def split_into_chunks(text: str, *, max_chars: int = 800) -> list[str]:
+    """把正文按固定字符数切片，滤掉纯空白的片。
+
+    刻意用最笨的定长切法：种子文档是我们自己写的、每份只有几百字，
+    上智能分段没有收益，反而多一处会漂的行为——而种子一漂，用例的
+    正确答案就跟着变了，防回归就无从谈起。
+
+    纯空白的片必须滤掉：embedding 接口收到空字符串会直接报错。
+    """
+    chunks = [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
+    return [chunk for chunk in chunks if chunk.strip()]
+
+
+async def seed_embeddings(session: AsyncSession, paths: EvalPaths) -> None:
+    """给每份种子文档算向量并写进 knowledge_chunks，kb_semantic_search 才有东西可检。
+
+    走 app.core.llm.embed 这个统一入口，不自建 OpenAI 客户端。
+    embedding 模型在本机 127.0.0.1:8080，免费，但**必须先把它起起来**——
+    这也正是 eval 跑在宿主机而不是容器里的原因：容器里的 127.0.0.1 是容器自己。
+    """
+    from app.core.llm import embed
+    from app.models.knowledge_chunk import KnowledgeChunk
+
+    contents = read_fixtures(paths)
+    for doc in SEED_DOCUMENTS:
+        chunks = split_into_chunks(contents[doc.doc_id].decode("utf-8"))
+        result = await embed("local-embedding", chunks)
+        for index, (chunk, vector) in enumerate(
+            zip(chunks, result.vectors, strict=True)
+        ):
+            session.add(
+                KnowledgeChunk(
+                    document_id=doc.doc_id,
+                    chunk_index=index,
+                    content=chunk,
+                    token_count=len(chunk),
+                    embedding=vector,
+                )
+            )
+    await session.flush()
+
+
 async def seed_all(session: AsyncSession, paths: EvalPaths) -> None:
     """灌入全部种子：分类、文档（DB 行 + 磁盘文件）、设备、依赖、监控。"""
     clear_workdir(paths)
