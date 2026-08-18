@@ -20,6 +20,7 @@ dependencies = [
     "httpx>=0.28.1",
     "cryptography>=50.0.0",
     "netmiko>=4.7.0",
+    "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]
@@ -30,6 +31,7 @@ dev = [
     "pytest>=9.1,<10",
     "pytest-asyncio>=1.4,<2",
     "ruff>=0.16,<1",
+    "types-pyyaml>=6.0.12.20260815",
 ]
 
 [tool.ruff]
