@@ -45,8 +45,27 @@ class MonitorTargetUpdate(ApiModel):
         return self
 
 
+type MonitorBucketState = Literal["up", "down", "unknown"]
+
+
+class MonitorUptimeWindow(ApiModel):
+    """最近一小时的可用率状态条：60 个分钟格 + 可用率。
+
+    三个字段绑在一起才有意义，所以做成嵌套对象而不是摊平：
+    单看 `buckets` 不知道它从哪个时刻开始、每格多长。前端靠
+    `started_at + index * bucket_seconds` 算出每格对应的时间做 tooltip。
+    """
+
+    started_at: datetime
+    bucket_seconds: int
+    buckets: list[MonitorBucketState]
+    # 窗口内一次探测都没有时为 None，而不是 1.0——
+    # 一个刚建好、从没跑过的目标显示「100% 可用」是撒谎。
+    uptime_rate: float | None
+
+
 class MonitorTargetResponse(ApiModel):
-    """监控目标公开表示，附带最近一次探测结果。"""
+    """监控目标公开表示，附带最近一次探测结果与最近一小时的可用率状态条。"""
 
     id: int
     cmdb_asset_id: int | None
@@ -60,6 +79,7 @@ class MonitorTargetResponse(ApiModel):
     latest_latency_ms: int | None = None
     latest_detail: str = ""
     latest_checked_at: datetime | None = None
+    uptime_window: MonitorUptimeWindow
 
     model_config = ConfigDict(from_attributes=True)
 

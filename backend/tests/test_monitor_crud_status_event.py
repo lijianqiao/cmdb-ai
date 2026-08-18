@@ -170,3 +170,84 @@ async def test_list_recent_for_targets_omits_targets_without_events(
     )
 
     assert set(grouped) == {with_events}
+
+
+# ---------------------------------------------------------------------------
+# 按时间窗批量取，供监控页的可用率状态条使用。
+#
+# 为什么不复用 list_recent_for_targets(limit=N)：状态条要的是「最近一小时」，
+# 而 N 条对应多长时间取决于该目标的探测间隔（可配 5~3600 秒）。
+# 用条数限制会让快间隔的目标只覆盖到几分钟、慢间隔的目标拉回几小时前的旧数据。
+# 按时间过滤既语义正确，也天然有界：一小时最多 3600/5 = 720 条/目标。
+
+
+async def test_list_since_for_targets_returns_only_events_in_window(
+    db_session: AsyncSession,
+) -> None:
+    """窗口外的旧事件不能返回，否则「最近一小时」这句话就是假的。"""
+    target_id = await _make_target(db_session, ip="10.0.0.21")
+    now = datetime.now(UTC)
+
+    inside = await monitor_status_event_crud.record(
+        db_session, target_id=target_id, status="up"
+    )
+    inside.checked_at = now - timedelta(minutes=30)
+    outside = await monitor_status_event_crud.record(
+        db_session, target_id=target_id, status="down"
+    )
+    outside.checked_at = now - timedelta(hours=2)
+    await db_session.commit()
+
+    grouped = await monitor_status_event_crud.list_since_for_targets(
+        db_session, [target_id], since=now - timedelta(hours=1)
+    )
+
+    assert [status for status, _ in grouped[target_id]] == ["up"]
+
+
+async def test_list_since_for_targets_groups_by_target(
+    db_session: AsyncSession,
+) -> None:
+    """一次查询覆盖整页目标，不能退化成逐目标的 N+1。"""
+    first_id = await _make_target(db_session, ip="10.0.0.22")
+    second_id = await _make_target(db_session, ip="10.0.0.23")
+    now = datetime.now(UTC)
+
+    for target_id, status in ((first_id, "up"), (second_id, "down")):
+        event = await monitor_status_event_crud.record(
+            db_session, target_id=target_id, status=status
+        )
+        event.checked_at = now - timedelta(minutes=5)
+    await db_session.commit()
+
+    grouped = await monitor_status_event_crud.list_since_for_targets(
+        db_session, [first_id, second_id], since=now - timedelta(hours=1)
+    )
+
+    assert grouped[first_id][0][0] == "up"
+    assert grouped[second_id][0][0] == "down"
+
+
+async def test_list_since_for_targets_omits_targets_without_events(
+    db_session: AsyncSession,
+) -> None:
+    """没有事件的目标不出现在结果里，调用方按「缺席即无数据」处理。"""
+    target_id = await _make_target(db_session, ip="10.0.0.24")
+
+    grouped = await monitor_status_event_crud.list_since_for_targets(
+        db_session, [target_id], since=datetime.now(UTC) - timedelta(hours=1)
+    )
+
+    assert grouped == {}
+
+
+async def test_list_since_for_targets_handles_empty_target_list(
+    db_session: AsyncSession,
+) -> None:
+    """空目标列表不发查询——列表页可能一条目标都没有。"""
+    assert (
+        await monitor_status_event_crud.list_since_for_targets(
+            db_session, [], since=datetime.now(UTC)
+        )
+        == {}
+    )

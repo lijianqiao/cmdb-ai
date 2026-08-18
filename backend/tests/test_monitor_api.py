@@ -252,3 +252,77 @@ async def test_monitor_logs_filters_by_target_id_and_status(
     assert item["label"] == "SSH-A"
     assert item["ip_address"] == "10.0.0.11"
     assert item["port"] == 22
+
+
+# ---------------------------------------------------------------------------
+# 可用率状态条：一次列表请求就把整条图表的数据带回来，前端不用再逐目标追加请求。
+
+
+async def test_list_includes_uptime_window(
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
+) -> None:
+    """列表要顺带返回 60 个分钟格与可用率，前端一次请求渲染完整条。"""
+    await _grant_monitor_permissions(db_session, test_user)
+    create_resp = await client.post(
+        "/api/v1/monitor/targets",
+        json={"ip_address": "10.0.0.31", "port": 80, "label": "HTTP"},
+        headers=auth_headers,
+    )
+    target_id = create_resp.json()["data"]["id"]
+
+    await monitor_status_event_crud.record(db_session, target_id=target_id, status="up")
+    await monitor_status_event_crud.record(db_session, target_id=target_id, status="down")
+    await db_session.commit()
+
+    item = (
+        await client.get("/api/v1/monitor/targets", headers=auth_headers)
+    ).json()["data"]["items"][0]
+
+    window = item["uptime_window"]
+    assert len(window["buckets"]) == 60
+    assert window["bucket_seconds"] == 60
+    # 刚写入的两条都落在最后一格；有一次失败 → 该格为 down
+    assert window["buckets"][-1] == "down"
+    assert window["uptime_rate"] == 0.5
+
+
+async def test_target_without_probes_reports_unknown_not_full_uptime(
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
+) -> None:
+    """从没探测过的目标不能显示「100% 可用」——那是撒谎，格子也该是灰的。"""
+    await _grant_monitor_permissions(db_session, test_user)
+    await client.post(
+        "/api/v1/monitor/targets",
+        json={"ip_address": "10.0.0.32", "port": 80, "label": "新建"},
+        headers=auth_headers,
+    )
+
+    item = (
+        await client.get("/api/v1/monitor/targets", headers=auth_headers)
+    ).json()["data"]["items"][0]
+
+    window = item["uptime_window"]
+    assert window["uptime_rate"] is None
+    assert set(window["buckets"]) == {"unknown"}
+
+
+async def test_single_target_detail_also_carries_the_window(
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
+) -> None:
+    """详情接口与列表用同一个响应模型，字段不能只在列表里有值。"""
+    await _grant_monitor_permissions(db_session, test_user)
+    create_resp = await client.post(
+        "/api/v1/monitor/targets",
+        json={"ip_address": "10.0.0.33", "port": 80, "label": "详情"},
+        headers=auth_headers,
+    )
+    target_id = create_resp.json()["data"]["id"]
+    await monitor_status_event_crud.record(db_session, target_id=target_id, status="up")
+    await db_session.commit()
+
+    detail = (
+        await client.get(f"/api/v1/monitor/targets/{target_id}", headers=auth_headers)
+    ).json()["data"]
+
+    assert detail["uptime_window"]["uptime_rate"] == 1.0
+    assert detail["uptime_window"]["buckets"][-1] == "up"

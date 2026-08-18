@@ -48,6 +48,7 @@ import { PageHeader } from "@/components/layout/PageHeader"
 import { Pagination } from "@/components/common/Pagination"
 import { ConfirmDialog } from "@/components/common/ConfirmDialog"
 import { MonitorTargetFormDialog } from "@/components/monitor/MonitorTargetFormDialog"
+import { UptimeStrip } from "@/components/monitor/UptimeStrip"
 import api from "@/lib/api"
 import { usePaginatedQuery } from "@/hooks/use-paginated-query"
 import { usePermission } from "@/hooks/use-permission"
@@ -64,10 +65,13 @@ const DEFAULT_SWEEP_MS = 30_000
 
 type ActiveFilter = "all" | "true" | "false"
 
+// 轮询会刷新的字段。uptime_window 必须在列表里——轮询已经把它取回来了，
+// 不带上的话状态条会冻在打开页面那一刻，而旁边的状态徽章还在跳，看着像坏了。
 interface MonitorLiveFields {
   latest_status: MonitorTarget["latest_status"]
   latest_latency_ms: MonitorTarget["latest_latency_ms"]
   latest_checked_at: MonitorTarget["latest_checked_at"]
+  uptime_window: MonitorTarget["uptime_window"]
 }
 
 function statusLabel(status: MonitorTarget["latest_status"]): string {
@@ -179,6 +183,7 @@ export function MonitorTargetsPage() {
               latest_status: item.latest_status,
               latest_latency_ms: item.latest_latency_ms,
               latest_checked_at: item.latest_checked_at,
+              uptime_window: item.uptime_window,
             }
           }
           return next
@@ -420,6 +425,7 @@ export function MonitorTargetsPage() {
                     </p>
                   </div>
                 </div>
+                <UptimeStrip data={target.uptime_window} />
               </CardContent>
             </Card>
           ))}

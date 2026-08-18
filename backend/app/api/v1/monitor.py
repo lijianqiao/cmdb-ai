@@ -6,6 +6,9 @@
 @Docs: 监控目标管理 API：CRUD、最近探测状态与审计
 """
 
+from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,11 +28,20 @@ from app.schemas.monitor import (
     MonitorTargetCreate,
     MonitorTargetResponse,
     MonitorTargetUpdate,
+    MonitorUptimeWindow,
 )
+from app.services.monitor_uptime import BUCKET_COUNT, BUCKET_SECONDS, build_uptime_window
 from app.services.system_config import get_effective_operations_config
 from app.utils.audit import log_audit
 
 router = APIRouter()
+
+# 窗口起点相对「当前分钟」往回退多远。
+#
+# 是 BUCKET_COUNT - 1 而不是 BUCKET_COUNT：最后一格必须是**当前这一分钟**，
+# 否则刚刚发生的探测会落在窗口之外，界面上永远看不到最新状态。
+# 60 格 = 59 个完整的过去分钟 + 当前这个还没走完的分钟。
+UPTIME_WINDOW_OFFSET = timedelta(seconds=BUCKET_SECONDS * (BUCKET_COUNT - 1))
 
 
 def _coerce_latest_status(value: str | None) -> MonitorLatestStatus | None:
@@ -44,17 +56,20 @@ def _coerce_latest_status(value: str | None) -> MonitorLatestStatus | None:
 def _to_response(
     target: MonitorTarget,
     latest: MonitorStatusEvent | None,
+    window: MonitorUptimeWindow,
 ) -> MonitorTargetResponse:
-    """把目标与最近一次探测结果拼成响应。
+    """把目标与最近一次探测结果、最近一小时的状态条拼成响应。
 
     Args:
         target: 监控目标
         latest: 该目标最新一条探测事件，从未探测过则为 None
+        window: 最近一小时的可用率状态条（无探测时也是 60 个 unknown 格）
 
     Returns:
         管理页使用的监控目标响应
     """
     return MonitorTargetResponse(
+        uptime_window=window,
         id=target.id,
         cmdb_asset_id=target.cmdb_asset_id,
         ip_address=target.ip_address,
@@ -78,6 +93,34 @@ async def _latest_map(
     return await monitor_status_event_crud.get_latest_status_for_targets(
         db, [target.id for target in targets]
     )
+
+
+async def _uptime_map(
+    db: AsyncSession,
+    targets: list[MonitorTarget],
+) -> dict[int, MonitorUptimeWindow]:
+    """批量算出一组目标最近一小时的可用率状态条。
+
+    一次查询覆盖整页目标，不会退化成逐目标的 N+1——这也是把状态条塞进列表
+    响应的前提：前端一次请求就能渲染完整图表，不用再逐行追加请求。
+
+    窗口起点在这里统一取一次，整页目标对齐同一条时间轴；逐个目标各取一次
+    now() 会让相邻两行的格子错开几毫秒，视觉上对不齐。
+    """
+    window_start = datetime.now(UTC).replace(second=0, microsecond=0) - UPTIME_WINDOW_OFFSET
+    events_by_target = await monitor_status_event_crud.list_since_for_targets(
+        db, [target.id for target in targets], since=window_start
+    )
+    return {
+        target.id: MonitorUptimeWindow.model_validate(
+            asdict(
+                build_uptime_window(
+                    events_by_target.get(target.id, ()), window_start=window_start
+                )
+            )
+        )
+        for target in targets
+    }
 
 
 async def _ensure_cmdb_asset(db: AsyncSession, cmdb_asset_id: int | None) -> None:
@@ -165,7 +208,11 @@ async def list_targets(
         limit=page_size,
     )
     latest_by_id = await _latest_map(db, targets)
-    items = [_to_response(target, latest_by_id.get(target.id)) for target in targets]
+    window_by_id = await _uptime_map(db, targets)
+    items = [
+        _to_response(target, latest_by_id.get(target.id), window_by_id[target.id])
+        for target in targets
+    ]
     return paginated_response(items, total, page, page_size)
 
 
@@ -194,7 +241,12 @@ async def create_target(
         ip=get_client_ip(request),
     )
     await db.commit()
-    return success_response(_to_response(target, None), message="创建成功", code=status.HTTP_201_CREATED)
+    windows = await _uptime_map(db, [target])
+    return success_response(
+        _to_response(target, None, windows[target.id]),
+        message="创建成功",
+        code=status.HTTP_201_CREATED,
+    )
 
 
 @router.get("/targets/{target_id}", response_model=ResponseEnvelope[MonitorTargetResponse])
@@ -208,7 +260,8 @@ async def get_target(
     if target is None:
         raise HTTPException(status_code=404, detail="监控目标不存在")
     latest_by_id = await _latest_map(db, [target])
-    return success_response(_to_response(target, latest_by_id.get(target.id)))
+    windows = await _uptime_map(db, [target])
+    return success_response(_to_response(target, latest_by_id.get(target.id), windows[target.id]))
 
 
 @router.patch("/targets/{target_id}", response_model=ResponseEnvelope[MonitorTargetResponse])
@@ -254,7 +307,11 @@ async def update_target(
     )
     await db.commit()
     latest_by_id = await _latest_map(db, [updated])
-    return success_response(_to_response(updated, latest_by_id.get(updated.id)), message="更新成功")
+    windows = await _uptime_map(db, [updated])
+    return success_response(
+        _to_response(updated, latest_by_id.get(updated.id), windows[updated.id]),
+        message="更新成功",
+    )
 
 
 @router.delete("/targets/{target_id}", response_model=ResponseEnvelope[None])

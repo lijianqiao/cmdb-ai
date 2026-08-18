@@ -213,6 +213,51 @@ class CRUDMonitorStatusEvent:
         events = result.scalars().all()
         return {event.target_id: event for event in events}
 
+    async def list_since_for_targets(
+        self, db: AsyncSession, target_ids: list[int], *, since: datetime
+    ) -> dict[int, list[tuple[str, datetime]]]:
+        """按 target 分组返回 ``since`` 之后的 (status, checked_at)。
+
+        为什么按时间而不是按条数（对比 list_recent_for_targets）：可用率状态条
+        要的是「最近一小时」，而 N 条对应多长时间取决于该目标的探测间隔
+        （可配 5~3600 秒）。用条数限制会让快间隔的目标只覆盖到几分钟、
+        慢间隔的目标反而拉回几小时前的旧数据，画出来的条是错的。
+
+        按时间过滤也天然有界：一小时最多 3600/5 = 720 条/目标。
+
+        只取两列而不是整行 ORM 对象：调用方只需要状态和时间，
+        一页 10 个目标最多 7200 行，少搬几个字段就少几 MB 的无谓开销。
+
+        Args:
+            db: 数据库会话。
+            target_ids: 目标 ID 列表。
+            since: 时间下界（含）。
+
+        Returns:
+            target_id → [(status, checked_at)]，按时间升序。没有事件的目标不出现。
+        """
+        if not target_ids:
+            return {}
+
+        stmt = (
+            select(
+                MonitorStatusEvent.target_id,
+                MonitorStatusEvent.status,
+                MonitorStatusEvent.checked_at,
+            )
+            .where(
+                MonitorStatusEvent.target_id.in_(target_ids),
+                MonitorStatusEvent.checked_at >= since,
+            )
+            # 与 ix_monitor_status_events_target_checked 同序，走索引不用额外排序
+            .order_by(MonitorStatusEvent.target_id, MonitorStatusEvent.checked_at)
+        )
+
+        grouped: dict[int, list[tuple[str, datetime]]] = {}
+        for target_id, status, checked_at in (await db.execute(stmt)).all():
+            grouped.setdefault(target_id, []).append((status, checked_at))
+        return grouped
+
     async def list_recent_for_targets(
         self, db: AsyncSession, target_ids: list[int], *, limit: int
     ) -> dict[int, list[MonitorStatusEvent]]:
