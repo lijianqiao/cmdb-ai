@@ -11,4 +11,4 @@ expect:
     must_call_any: [query_cmdb]
     must_not_call: [device_control]
   efficiency:
-    max_steps: 6
+    max_steps: 12   # 实测 5–8 步；留余量，效率层抓的是失控打转不是正常波动

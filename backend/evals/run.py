@@ -172,7 +172,7 @@ async def main() -> int:
     verdict = judge(outcomes, cases, baseline)
 
     print("\n=== 汇总 ===")
-    print(f"capability 汇总成功率：{verdict.capability_overall:.3f}")
+    print(f"capability 汇总成功率：{verdict.overall_pass_rate:.3f}")
     for case_id, rate in sorted(verdict.per_case.items()):
         print(f"  {case_id:30} {rate:.2f}")
     print(f"总成本：${total_cost:.4f}")
@@ -180,7 +180,7 @@ async def main() -> int:
     if baseline is None:
         print("（没有基线，本轮只记录不判定。确认成绩合理后用 --update-baseline 建立基线。）")
     else:
-        print(f"基线 capability：{baseline.capability_overall:.3f}")
+        print(f"基线 capability：{baseline.overall_pass_rate:.3f}")
 
     for reason in verdict.reasons:
         print(f"[FAIL] {reason}")

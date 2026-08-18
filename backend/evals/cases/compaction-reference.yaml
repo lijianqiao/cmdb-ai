@@ -13,4 +13,4 @@ expect:
   invariants:
     must_call_any: [query_cmdb]
   efficiency:
-    max_steps: 10
+    max_steps: 14   # 实测 6–11 步

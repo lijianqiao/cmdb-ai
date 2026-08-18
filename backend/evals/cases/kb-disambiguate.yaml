@@ -1,5 +1,11 @@
 # 库里有两份巡检规程：现行 v3 说 CPU 阈值 60%，已废弃 v1 说 90%。
-# 答 90% 就是拿了废弃版本。这条测的是检索排序的真实质量。
+# 拿错版本的模型会答 90 而不会答 60，所以 answer_contains_any: ["60"] 就够判别。
+#
+# 刻意**不写** answer_not_contains: ["90"]。第一轮实测这条曾 0/5 全灭，
+# 而模型其实答得完全正确——它说「现行是 60%」之后还主动补了一句
+# 「旧版 v1 的 90% 阈值已废弃，仅作归档，不作为操作依据」。
+# 禁止出现「90」等于惩罚它的严谨。这是坏断言的典型：
+# 它测的不是模型对不对，而是模型有没有按我预设的措辞回答。
 id: kb-disambiguate
 category: capability
 title: 两份相似文档，必须拿现行版本而不是已废弃版本
@@ -8,7 +14,6 @@ repeat: 5
 expect:
   outcome:
     answer_contains_any: ["60"]
-    answer_not_contains: ["90"]
   invariants:
     must_call_any: [kb_grep, kb_semantic_search, kb_glob]
   efficiency:
