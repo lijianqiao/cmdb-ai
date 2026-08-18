@@ -43,6 +43,13 @@ router = APIRouter()
 # 60 格 = 59 个完整的过去分钟 + 当前这个还没走完的分钟。
 UPTIME_WINDOW_OFFSET = timedelta(seconds=BUCKET_SECONDS * (BUCKET_COUNT - 1))
 
+# 每个目标最多取回多少条状态变化。
+#
+# 只要覆盖到「窗口开始时处于什么状态」那一条就够了，而状态变化本身很稀疏
+# （持续在线的目标一小时内只有 1 条）。120 条足以覆盖一个疯狂抖动的目标；
+# 真抖到 120 次以上，那条图本来也已经是一片红了。
+UPTIME_MAX_TRANSITIONS = 120
+
 
 def _coerce_latest_status(value: str | None) -> MonitorLatestStatus | None:
     """只接受 sweep 写入的 up/down；其他值视为尚未探测。"""
@@ -106,16 +113,26 @@ async def _uptime_map(
 
     窗口起点在这里统一取一次，整页目标对齐同一条时间轴；逐个目标各取一次
     now() 会让相邻两行的格子错开几毫秒，视觉上对不齐。
+
+    **按条数取而不是按时间窗取**：monitor_status_events 存的是状态变化
+    （record_probe 同状态就地更新、变状态才追加），所以「窗口开始时是什么状态」
+    那条记录的 checked_at 可能远在窗口之前。按时间过滤会把它漏掉，
+    整条图就只剩最后一格有颜色。取最近 N 条变化才能拿到还原阶跃所需的起始状态。
     """
     window_start = datetime.now(UTC).replace(second=0, microsecond=0) - UPTIME_WINDOW_OFFSET
-    events_by_target = await monitor_status_event_crud.list_since_for_targets(
-        db, [target.id for target in targets], since=window_start
+    events_by_target = await monitor_status_event_crud.list_recent_for_targets(
+        db, [target.id for target in targets], limit=UPTIME_MAX_TRANSITIONS
     )
     return {
         target.id: MonitorUptimeWindow.model_validate(
             asdict(
                 build_uptime_window(
-                    events_by_target.get(target.id, ()), window_start=window_start
+                    [
+                        (event.status, event.checked_at)
+                        for event in events_by_target.get(target.id, ())
+                    ],
+                    window_start=window_start,
+                    known_since=target.created_at,
                 )
             )
         )

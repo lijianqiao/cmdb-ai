@@ -6,6 +6,8 @@
 @Docs: 监控目标管理 API：CRUD、查重、最近探测状态与权限
 """
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -255,13 +257,36 @@ async def test_monitor_logs_filters_by_target_id_and_status(
 
 
 # ---------------------------------------------------------------------------
-# 可用率状态条：一次列表请求就把整条图表的数据带回来，前端不用再逐目标追加请求。
+# 可用率状态条：列表接口顺带返回整条图表的数据，前端一次请求渲染完成。
+#
+# monitor_status_events 存的是**状态变化**（record_probe 同状态就地更新
+# checked_at、变状态才追加行），不是探测流水。所以一个持续在线一小时的目标
+# 在表里只有 1 行——接口必须把这 1 行还原成整条绿色，而不是只点亮最后一格。
 
 
-async def test_list_includes_uptime_window(
+async def _backdate(
+    db_session: AsyncSession, target_id: int, *, created_minutes_ago: int
+) -> None:
+    """把目标创建时间往前挪，模拟一个已经存在一段时间的目标。
+
+    状态条不会画目标存在之前的时间（那时它还没建，画任何颜色都是编的），
+    所以测「整条全绿」必须让目标比窗口更早存在。
+    """
+    target = await monitor_target_crud.get(db_session, target_id)
+    assert target is not None
+    target.created_at = datetime.now(UTC) - timedelta(minutes=created_minutes_ago)
+    await db_session.flush()
+
+
+async def test_single_up_row_paints_the_whole_strip_green(
     client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
 ) -> None:
-    """列表要顺带返回 60 个分钟格与可用率，前端一次请求渲染完整条。"""
+    """**回归测试：之前这里只有最后一格是绿的，其余全灰。**
+
+    一个持续在线的目标只有 1 行状态变化记录。把它当成孤立的探测点去分桶，
+    就只有 checked_at 所在的那一格有颜色——整条图等于废掉。
+    正确做法是把它还原成阶跃：这一行代表「一直是 up，最后确认于 checked_at」。
+    """
     await _grant_monitor_permissions(db_session, test_user)
     create_resp = await client.post(
         "/api/v1/monitor/targets",
@@ -269,9 +294,9 @@ async def test_list_includes_uptime_window(
         headers=auth_headers,
     )
     target_id = create_resp.json()["data"]["id"]
+    await _backdate(db_session, target_id, created_minutes_ago=180)
 
     await monitor_status_event_crud.record(db_session, target_id=target_id, status="up")
-    await monitor_status_event_crud.record(db_session, target_id=target_id, status="down")
     await db_session.commit()
 
     item = (
@@ -281,9 +306,9 @@ async def test_list_includes_uptime_window(
     window = item["uptime_window"]
     assert len(window["buckets"]) == 60
     assert window["bucket_seconds"] == 60
-    # 刚写入的两条都落在最后一格；有一次失败 → 该格为 down
-    assert window["buckets"][-1] == "down"
-    assert window["uptime_rate"] == 0.5
+    # 关键断言：整条都得是绿的，不是只有最后一格
+    assert set(window["buckets"]) == {"up"}
+    assert window["uptime_rate"] == 1.0
 
 
 async def test_target_without_probes_reports_unknown_not_full_uptime(
@@ -291,11 +316,13 @@ async def test_target_without_probes_reports_unknown_not_full_uptime(
 ) -> None:
     """从没探测过的目标不能显示「100% 可用」——那是撒谎，格子也该是灰的。"""
     await _grant_monitor_permissions(db_session, test_user)
-    await client.post(
+    create_resp = await client.post(
         "/api/v1/monitor/targets",
         json={"ip_address": "10.0.0.32", "port": 80, "label": "新建"},
         headers=auth_headers,
     )
+    await _backdate(db_session, create_resp.json()["data"]["id"], created_minutes_ago=180)
+    await db_session.commit()
 
     item = (
         await client.get("/api/v1/monitor/targets", headers=auth_headers)
@@ -304,6 +331,39 @@ async def test_target_without_probes_reports_unknown_not_full_uptime(
     window = item["uptime_window"]
     assert window["uptime_rate"] is None
     assert set(window["buckets"]) == {"unknown"}
+
+
+async def test_strip_shows_the_outage_before_recovery(
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
+) -> None:
+    """故障恢复后，故障那段仍要留在条上——否则回看历史没有意义。"""
+    await _grant_monitor_permissions(db_session, test_user)
+    create_resp = await client.post(
+        "/api/v1/monitor/targets",
+        json={"ip_address": "10.0.0.34", "port": 80, "label": "抖过一次"},
+        headers=auth_headers,
+    )
+    target_id = create_resp.json()["data"]["id"]
+    await _backdate(db_session, target_id, created_minutes_ago=180)
+
+    now = datetime.now(UTC)
+    down = await monitor_status_event_crud.record(
+        db_session, target_id=target_id, status="down"
+    )
+    down.checked_at = now - timedelta(minutes=40)
+    up = await monitor_status_event_crud.record(
+        db_session, target_id=target_id, status="up"
+    )
+    up.checked_at = now
+    await db_session.commit()
+
+    item = (
+        await client.get("/api/v1/monitor/targets", headers=auth_headers)
+    ).json()["data"]["items"][0]
+
+    buckets = item["uptime_window"]["buckets"]
+    assert "down" in buckets, "故障段必须留在条上"
+    assert buckets[-1] == "up", "已恢复，最后一格该是绿的"
 
 
 async def test_single_target_detail_also_carries_the_window(
@@ -317,6 +377,7 @@ async def test_single_target_detail_also_carries_the_window(
         headers=auth_headers,
     )
     target_id = create_resp.json()["data"]["id"]
+    await _backdate(db_session, target_id, created_minutes_ago=180)
     await monitor_status_event_crud.record(db_session, target_id=target_id, status="up")
     await db_session.commit()
 
@@ -325,4 +386,4 @@ async def test_single_target_detail_also_carries_the_window(
     ).json()["data"]
 
     assert detail["uptime_window"]["uptime_rate"] == 1.0
-    assert detail["uptime_window"]["buckets"][-1] == "up"
+    assert set(detail["uptime_window"]["buckets"]) == {"up"}

@@ -1,16 +1,17 @@
-"""把原始探测事件折叠成「一小时 × 每分钟一格」的可用率条。
+"""把状态变化日志还原成「一小时 × 每分钟一格」的可用率条。
 
 实现流程：
-1. 监控目标页要画一条状态条（形如公有云状态页）。数据源是 monitor_status_events
-   的原始探测记录，探测间隔可低至 5 秒，所以一格里可能有多次探测。
-2. 这个模块只做纯计算：给它一批事件和窗口起点，返回 60 个格子的状态与可用率。
-   不连库、不碰时间"现在"（窗口起点由调用方传入），因此完全可测——
-   时间相关的逻辑最忌讳内部读 now()，那会让测试变成掷骰子。
-3. 三个判断在这里落实：
-   - 一格里**只要有一次失败就是红**。监控界面宁可多报，也不能把抖动藏掉。
-   - **没有探测的格子是 unknown（灰），不是绿**。把"没测"画成"正常"是撒谎。
-   - **uptime_rate 按原始探测数算**，不是按格子算；窗口内没有任何探测时返回
-     None 而不是 1.0——否则一个刚建好、根本没跑过的目标会显示「100% 可用」。
+1. **monitor_status_events 不是探测流水，是状态变化日志。** 见
+   `crud.monitor_status_event.record_probe`：同状态就地更新当前行的 checked_at，
+   变状态才追加新行。所以一个持续在线一小时的目标在表里**只有 1 行**。
+2. 因此不能把行当成独立的探测点去分桶——那样只有最后一格有颜色，其余全灰，
+   整条图等于废掉。必须把行还原成**阶跃函数**：第 i 行的状态覆盖
+   `(上一行.checked_at, 本行.checked_at]`，最早那行往前一直覆盖到有记录之初。
+3. 覆盖范围有两个边界，越界的格子是 unknown（灰）而不是绿：
+   - 往后：最后一行的 checked_at 之后还没探测过。
+   - 往前：`known_since`（目标创建时间）之前这个目标还不存在。
+4. uptime_rate 按**时间加权**：窗口内处于 up 的时长 / 有覆盖的时长。
+   按行数算是没意义的——行数是状态变化次数，不是探测次数。
 """
 
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from app.services.monitor_uptime import BUCKET_COUNT, build_uptime_window
 
 WINDOW_START = datetime(2026, 8, 18, 10, 0, tzinfo=UTC)
+LONG_AGO = WINDOW_START - timedelta(days=1)
 
 
 def _at(minute: int, second: int = 0) -> datetime:
@@ -26,98 +28,129 @@ def _at(minute: int, second: int = 0) -> datetime:
 
 def test_window_always_has_sixty_buckets() -> None:
     """格子数固定，前端才能无脑渲染定长的条。"""
-    window = build_uptime_window([], window_start=WINDOW_START)
+    window = build_uptime_window([], window_start=WINDOW_START, known_since=LONG_AGO)
 
     assert len(window.buckets) == BUCKET_COUNT == 60
 
 
-def test_buckets_without_probes_are_unknown_not_up() -> None:
-    """没探测过就画成绿色等于撒谎——目标可能刚建好，也可能探测挂了。"""
-    window = build_uptime_window([], window_start=WINDOW_START)
+def test_no_events_means_unknown_not_up() -> None:
+    """一行都没有 = 从没探测过。画成绿色等于撒谎。"""
+    window = build_uptime_window([], window_start=WINDOW_START, known_since=LONG_AGO)
 
     assert set(window.buckets) == {"unknown"}
     assert window.uptime_rate is None
 
 
-def test_all_successful_probes_make_every_covered_bucket_up() -> None:
-    """有探测且全成功的格子是绿的，没覆盖到的仍是灰的。"""
-    events = [("up", _at(minute)) for minute in range(10)]
+def test_single_up_row_paints_the_whole_covered_window_green() -> None:
+    """**这是最常见也是之前画错的场景。**
 
-    window = build_uptime_window(events, window_start=WINDOW_START)
+    持续在线的目标在表里只有 1 行，checked_at 就是最近一次探测时间。
+    这一行代表「从有记录以来一直是 up，最后一次确认是在 checked_at」，
+    所以从窗口起点到 checked_at 全都该是绿的——而不是只有最后一格绿。
+    """
+    events = [("up", _at(59, 30))]
 
-    assert window.buckets[:10] == ["up"] * 10
-    assert window.buckets[10:] == ["unknown"] * 50
+    window = build_uptime_window(
+        events, window_start=WINDOW_START, known_since=LONG_AGO
+    )
+
+    assert set(window.buckets) == {"up"}
     assert window.uptime_rate == 1.0
 
 
-def test_one_failure_makes_the_whole_bucket_down() -> None:
-    """一格里两次探测、一次失败——必须是红。宁可多报也不能藏抖动。"""
-    events = [("up", _at(3, 0)), ("down", _at(3, 30))]
+def test_buckets_after_the_last_observation_are_unknown() -> None:
+    """最后一次探测之后的时间还没被观测，不能当成正常。"""
+    events = [("up", _at(20, 0))]
 
-    window = build_uptime_window(events, window_start=WINDOW_START)
+    window = build_uptime_window(
+        events, window_start=WINDOW_START, known_since=LONG_AGO
+    )
 
-    assert window.buckets[3] == "down"
+    assert window.buckets[19] == "up"
+    assert window.buckets[21] == "unknown"
 
 
-def test_uptime_rate_counts_probes_not_buckets() -> None:
-    """按原始探测算：4 次里错 1 次是 0.75。
+def test_buckets_before_the_target_existed_are_unknown() -> None:
+    """目标 30 分钟前才建，之前那半小时不该被画成任何状态。"""
+    events = [("up", _at(59, 0))]
 
-    若按格子算，这 4 次挤在 1 格里就成了「1 格全红 = 0%」，
-    严重夸大故障——格子的粒度不该影响可用率数字。
-    """
-    events = [
-        ("up", _at(0, 0)),
-        ("up", _at(0, 15)),
-        ("up", _at(0, 30)),
-        ("down", _at(0, 45)),
-    ]
+    window = build_uptime_window(
+        events, window_start=WINDOW_START, known_since=_at(30, 0)
+    )
 
-    window = build_uptime_window(events, window_start=WINDOW_START)
+    assert window.buckets[0] == "unknown"
+    assert window.buckets[29] == "unknown"
+    assert window.buckets[31] == "up"
+
+
+def test_state_change_splits_the_strip() -> None:
+    """down 一直持续到它被 up 取代那一刻，之后才转绿。"""
+    events = [("down", _at(20, 0)), ("up", _at(59, 0))]
+
+    window = build_uptime_window(
+        events, window_start=WINDOW_START, known_since=LONG_AGO
+    )
 
     assert window.buckets[0] == "down"
-    assert window.uptime_rate == 0.75
+    assert window.buckets[19] == "down"
+    assert window.buckets[30] == "up"
 
 
-def test_events_outside_the_window_are_ignored() -> None:
-    """窗口外的事件不能算进来，否则「最近一小时」这句话就是假的。"""
-    events = [
-        ("down", WINDOW_START - timedelta(minutes=1)),  # 太早
-        ("up", _at(0)),
-        ("down", WINDOW_START + timedelta(hours=1, minutes=1)),  # 太晚
-    ]
+def test_change_inside_one_bucket_makes_it_down() -> None:
+    """一格里既有失败又有恢复时判红。监控界面宁可多报，不能把抖动藏掉。"""
+    events = [("down", _at(10, 20)), ("up", _at(59, 0))]
 
-    window = build_uptime_window(events, window_start=WINDOW_START)
+    window = build_uptime_window(
+        events, window_start=WINDOW_START, known_since=LONG_AGO
+    )
 
-    assert window.buckets[0] == "up"
+    assert window.buckets[10] == "down"
+
+
+def test_uptime_rate_is_time_weighted_not_row_counted() -> None:
+    """按时长算：前 30 分钟 down、后 30 分钟 up → 0.5。
+
+    按行数算是没意义的——行数是状态变化次数，不是探测次数。
+    这里只有 2 行，按行数算会得出 0.5 纯属巧合；把 down 段拉长就会露馅。
+    """
+    events = [("down", _at(30, 0)), ("up", _at(60, 0))]
+
+    window = build_uptime_window(
+        events, window_start=WINDOW_START, known_since=LONG_AGO
+    )
+
+    assert window.uptime_rate == 0.5
+
+
+def test_uptime_rate_ignores_uncovered_time() -> None:
+    """只探测过前 15 分钟就全绿的目标是 100%，不该被后面 45 分钟的空白拉低。"""
+    events = [("up", _at(15, 0))]
+
+    window = build_uptime_window(
+        events, window_start=WINDOW_START, known_since=LONG_AGO
+    )
+
     assert window.uptime_rate == 1.0
 
 
-def test_bucket_index_is_floor_of_elapsed_minutes() -> None:
-    """59 分 59 秒仍属于最后一格，不能溢出到第 61 格。"""
-    events = [("down", _at(59, 59))]
+def test_events_are_sorted_before_reconstruction() -> None:
+    """调用方按 checked_at 倒序取最近 N 行，这里必须自己排好再还原。"""
+    events = [("up", _at(59, 0)), ("down", _at(20, 0))]
 
-    window = build_uptime_window(events, window_start=WINDOW_START)
+    window = build_uptime_window(
+        events, window_start=WINDOW_START, known_since=LONG_AGO
+    )
 
-    assert window.buckets[59] == "down"
-    assert window.buckets[58] == "unknown"
+    assert window.buckets[0] == "down"
+    assert window.buckets[40] == "up"
 
 
 def test_window_metadata_lets_the_frontend_label_each_bucket() -> None:
     """前端要能算出每格对应的时间，才能做 tooltip。"""
-    window = build_uptime_window([], window_start=WINDOW_START)
+    window = build_uptime_window([], window_start=WINDOW_START, known_since=LONG_AGO)
 
     assert window.started_at == WINDOW_START
     assert window.bucket_seconds == 60
-
-
-def test_unsorted_events_are_handled() -> None:
-    """事件来源按 target 分组、组内倒序，别的调用方也可能乱序传入。"""
-    events = [("down", _at(5)), ("up", _at(1))]
-
-    window = build_uptime_window(events, window_start=WINDOW_START)
-
-    assert window.buckets[1] == "up"
-    assert window.buckets[5] == "down"
 
 
 def test_naive_timestamps_are_treated_as_utc() -> None:
@@ -128,8 +161,11 @@ def test_naive_timestamps_are_treated_as_utc() -> None:
     否则单测全绿、上线就抛「can't subtract offset-naive and offset-aware」。
     项目里 spawn/receipts.py 与 agent_sessions.py 用的是同一套归一化。
     """
-    naive = datetime(2026, 8, 18, 10, 5)  # noqa: DTZ001 - 刻意构造 naive，见上
+    naive = datetime(2026, 8, 18, 10, 30)  # noqa: DTZ001 - 刻意构造 naive，见上
 
-    window = build_uptime_window([("down", naive)], window_start=WINDOW_START)
+    window = build_uptime_window(
+        [("up", naive)], window_start=WINDOW_START, known_since=LONG_AGO
+    )
 
-    assert window.buckets[5] == "down"
+    assert window.buckets[0] == "up"
+    assert window.buckets[29] == "up"
