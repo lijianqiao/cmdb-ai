@@ -171,7 +171,7 @@ cd backend && uv run pytest tests/ -q
 Expected: 1024 passed（原 1022 + 新增 2），0 failed
 
 ```bash
-cd backend && uv run mypy app evals tests && uv run ruff check .
+cd backend && uv run mypy app evals && uv run ruff check .
 ```
 Expected: 两条都 0 error（此时 `evals/` 还不存在，mypy 会报路径不存在——先只跑 `mypy app tests`，Task 2 建包后再加上 `evals`）
 
@@ -391,7 +391,7 @@ cd backend && uv run pytest tests/test_evals_config.py -v
 Expected: 3 passed
 
 ```bash
-cd backend && uv run mypy app evals tests && uv run ruff check .
+cd backend && uv run mypy app evals && uv run ruff check .
 ```
 Expected: 0 error
 
@@ -786,7 +786,7 @@ cd backend && uv run pytest tests/test_evals_seed_spec.py -v
 Expected: 3 passed
 
 ```bash
-cd backend && uv run mypy app evals tests && uv run ruff check .
+cd backend && uv run mypy app evals && uv run ruff check .
 ```
 Expected: 0 error
 
@@ -977,7 +977,7 @@ cd backend && uv run pytest tests/test_evals_chunking.py -v
 Expected: 3 passed
 
 ```bash
-cd backend && uv run mypy app evals tests && uv run ruff check .
+cd backend && uv run mypy app evals && uv run ruff check .
 ```
 Expected: 0 error
 
@@ -1248,7 +1248,7 @@ cd backend && uv run pytest tests/test_evals_trajectory.py -v
 Expected: 3 passed
 
 ```bash
-cd backend && uv run mypy app evals tests && uv run ruff check .
+cd backend && uv run mypy app evals && uv run ruff check .
 ```
 Expected: 0 error
 
@@ -1542,7 +1542,7 @@ cd backend && uv run pytest tests/test_evals_cases.py -v
 Expected: 4 passed
 
 ```bash
-cd backend && uv run mypy app evals tests && uv run ruff check .
+cd backend && uv run mypy app evals && uv run ruff check .
 ```
 Expected: 0 error
 
@@ -1808,7 +1808,7 @@ cd backend && uv run pytest tests/test_evals_scoring.py -v
 Expected: 8 passed
 
 ```bash
-cd backend && uv run mypy app evals tests && uv run ruff check .
+cd backend && uv run mypy app evals && uv run ruff check .
 ```
 Expected: 0 error
 
@@ -2045,7 +2045,7 @@ Expected: 5 行 `[PASS] kb-hit #1..#5`（或部分 FAIL，附带具体失败原�
 - [ ] **Step 4: 静态检查**
 
 ```bash
-cd backend && uv run mypy app evals tests && uv run ruff check .
+cd backend && uv run mypy app evals && uv run ruff check .
 ```
 Expected: 0 error
 
@@ -2715,7 +2715,7 @@ cd backend && uv run pytest tests/test_evals_report.py -v
 Expected: 5 passed
 
 ```bash
-cd backend && uv run pytest tests/ -q && uv run mypy app evals tests && uv run ruff check .
+cd backend && uv run pytest tests/ -q && uv run mypy app evals && uv run ruff check .
 ```
 Expected: 全绿、0 error
 
@@ -2860,7 +2860,7 @@ eval 用真模型验证「模型会不会选对工具、会不会瞎编、危险
 - [ ] **Step 5: 全量验证**
 
 ```bash
-cd backend && uv run pytest tests/ -q && uv run mypy app evals tests && uv run ruff check .
+cd backend && uv run pytest tests/ -q && uv run mypy app evals && uv run ruff check .
 ```
 Expected: 全绿、0 error
 

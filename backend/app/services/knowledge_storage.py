@@ -7,16 +7,36 @@ resolves and validates containment within KNOWLEDGE_ROOT before touching the
 filesystem, to block directory traversal (docs/AGENT_ARCHITECTURE.md §9, L1).
 """
 
+import os
 from pathlib import Path
 
 from app.core.config import BACKEND_ROOT
 
-KNOWLEDGE_ROOT = BACKEND_ROOT / "knowledge"
+
+def _resolve_root(env_name: str, default: Path) -> Path:
+    """Return a storage root, overridable by environment variable.
+
+    eval 套件要把种子文档写进隔离目录，不能碰开发用的 knowledge/。
+    做成环境变量而不是让调用方 monkeypatch 模块全局变量，是因为
+    resolve_safe_path / category_dir / move_document_to_trash 都读这个全局，
+    哪天有人改成 `from ... import KNOWLEDGE_ROOT`，monkeypatch 会**静默失效**，
+    而失效的表现是 eval 开始写真实目录——不会立刻被发现。
+
+    空字符串按「未设置」处理：`Path("")` 会解析成当前工作目录，
+    那等于把文档默默写到了随机位置。
+    """
+    raw = os.getenv(env_name)
+    return Path(raw) if raw else default
+
+
+KNOWLEDGE_ROOT = _resolve_root("KNOWLEDGE_ROOT", BACKEND_ROOT / "knowledge")
 # 回收站**故意放在 KNOWLEDGE_ROOT 之外**：kb_glob / kb_grep / kb_read 都以
 # KNOWLEDGE_ROOT 为根做包含校验，文件一旦移出去这三个工具就再也扫不到，
 # 检索侧一行过滤都不用加。放在 KNOWLEDGE_ROOT 里面则要在每个工具上各排除一次，
 # 漏掉任何一个都等于没删干净。
-KNOWLEDGE_TRASH_ROOT = BACKEND_ROOT / "knowledge_trash"
+KNOWLEDGE_TRASH_ROOT = _resolve_root(
+    "KNOWLEDGE_TRASH_ROOT", BACKEND_ROOT / "knowledge_trash"
+)
 
 
 class PathTraversalError(ValueError):
