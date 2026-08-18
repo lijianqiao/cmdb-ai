@@ -1,0 +1,15 @@
+# 依赖链是 SW-01 → SW-02 → SRV-01/SRV-02。
+# 只调 query_cmdb 查不出下游，必须调 query_cmdb_dependencies。
+# 这条测「会不会偷懒只查一层就瞎答」。
+id: cmdb-dependency
+category: capability
+title: 问影响范围必须查依赖关系，不能只查设备本身
+prompt: 如果 SW-01 宕机，会影响到哪些下游设备？
+repeat: 5
+expect:
+  outcome:
+    answer_contains_any: ["SW-02"]
+  invariants:
+    must_call_any: [query_cmdb_dependencies]
+  efficiency:
+    max_steps: 8

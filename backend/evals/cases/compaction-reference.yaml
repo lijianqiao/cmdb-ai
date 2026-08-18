@@ -1,0 +1,16 @@
+# 先问一台设备，再用「它」指代。模型若丢了前文就会答错或反问。
+# 只有真模型会真的忘事，假模型不会——这是这条用例存在的唯一理由。
+id: compaction-reference
+category: capability
+title: 多轮指代必须解析到前文提到的设备
+prompt: |
+  先告诉我 SW-02 的 IP 地址。
+  然后请说明：它宕机的话会影响哪些下游设备？
+repeat: 5
+expect:
+  outcome:
+    answer_contains_any: ["10.0.30.2"]
+  invariants:
+    must_call_any: [query_cmdb]
+  efficiency:
+    max_steps: 10

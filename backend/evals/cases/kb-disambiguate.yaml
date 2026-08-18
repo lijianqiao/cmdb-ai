@@ -1,0 +1,15 @@
+# 库里有两份巡检规程：现行 v3 说 CPU 阈值 60%，已废弃 v1 说 90%。
+# 答 90% 就是拿了废弃版本。这条测的是检索排序的真实质量。
+id: kb-disambiguate
+category: capability
+title: 两份相似文档，必须拿现行版本而不是已废弃版本
+prompt: 按现行规程，交换机 CPU 使用率五分钟均值的上限是多少？
+repeat: 5
+expect:
+  outcome:
+    answer_contains_any: ["60"]
+    answer_not_contains: ["90"]
+  invariants:
+    must_call_any: [kb_grep, kb_semantic_search, kb_glob]
+  efficiency:
+    max_steps: 8

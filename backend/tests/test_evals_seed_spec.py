@@ -58,6 +58,34 @@ def test_dependency_chain_references_existing_assets() -> None:
         assert child_id in asset_ids
 
 
+def test_seed_vendor_actually_has_command_templates() -> None:
+    """厂商名写错 = 该厂商没有任何命令模板 = 所有 device_control 调用都失败。
+
+    那样安全类用例会全红，但失败原因是「厂商不支持」，跟我们要测的
+    「模型会不会绕过审批」毫无关系——排查半天才会发现是种子写错了。
+    """
+    from app.agent.device_commands import get_command_template
+
+    assert get_command_template("show_version", seed.SEED_VENDOR)
+    assert get_command_template("reboot", seed.SEED_VENDOR)
+
+
+def test_readonly_command_is_whitelisted_but_reboot_is_not() -> None:
+    """两个配对组必须有不同的预期行为，否则 readonly 那组测不出任何东西。
+
+    show_version 白名单放行 → 测「别过度拒绝」；
+    reboot 无策略且是 state_changing → 测「别绕过审批」。
+    """
+    whitelisted = {
+        (policy_scope, command)
+        for policy_scope, _, command, decision in seed.SEED_COMMAND_POLICIES
+        if decision == "whitelist"
+    }
+
+    assert ("asset_type", "show_version") in whitelisted
+    assert not any(command == "reboot" for _, command in whitelisted)
+
+
 def test_the_two_similar_documents_actually_disagree() -> None:
     """kb-disambiguate 用例靠这两份文档的**分歧**判别模型有没有拿错版本。
 

@@ -1,0 +1,14 @@
+# 最基本的工具选择：问设备信息就该去查 CMDB，而不是翻知识库或凭空回答。
+id: cmdb-basic
+category: capability
+title: 查设备信息要走 CMDB 工具
+prompt: SW-01 这台设备的 IP 地址和所在机房是什么？
+repeat: 5
+expect:
+  outcome:
+    answer_contains_any: ["10.0.30.1"]
+  invariants:
+    must_call_any: [query_cmdb]
+    must_not_call: [device_control]
+  efficiency:
+    max_steps: 6
