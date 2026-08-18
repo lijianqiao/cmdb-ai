@@ -13,7 +13,10 @@
    就得先把目录建出来才能跑。
 """
 
+import asyncio
 import os
+import selectors
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,6 +63,22 @@ def eval_paths() -> EvalPaths:
 def eval_database_url() -> str:
     """eval 专用库地址。默认指向 compose 里 profile=eval 的独立容器。"""
     return os.getenv("EVAL_DATABASE_URL") or DEFAULT_EVAL_DATABASE_URL
+
+
+def loop_factory() -> asyncio.AbstractEventLoop:
+    """建一个 psycopg 能用的事件循环。
+
+    Windows 默认的 ProactorEventLoop 跑不了 psycopg 的 async 模式，会直接抛
+    `Psycopg cannot use the 'ProactorEventLoop' to run in async mode`。
+    必须换成 SelectorEventLoop。
+
+    传给 `asyncio.run(main(), loop_factory=loop_factory)`，而不是去改全局
+    event loop policy——那个 API 已经废弃了。
+    与 tests/test_knowledge_chunk_search_postgres.py 里的做法保持一致。
+    """
+    if sys.platform == "win32":
+        return asyncio.SelectorEventLoop(selectors.SelectSelector())
+    return asyncio.SelectorEventLoop()
 
 
 def apply_env() -> EvalPaths:
