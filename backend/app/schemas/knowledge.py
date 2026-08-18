@@ -69,6 +69,8 @@ class KnowledgeClassifyResponse(ApiModel):
     skipped: int
     # 模型认为当前分类就是对的：既不是建议也不是失败，单列一档才说得清
     unchanged: int = 0
+    # 模型明确回答"现有分类都不合适"：也不是失败，而是在提示该新建分类
+    no_match: int = 0
 
 
 class KnowledgeDocumentContentResponse(ApiModel):

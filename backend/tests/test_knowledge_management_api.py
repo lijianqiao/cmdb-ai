@@ -310,7 +310,7 @@ async def test_classify_single_document_writes_suggestion_without_spawning(
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["data"] == {"suggested": 1, "skipped": 0, "unchanged": 0}
+    assert response.json()["data"] == {"suggested": 1, "skipped": 0, "unchanged": 0, "no_match": 0}
 
     listed = await client.get(
         "/api/v1/knowledge/documents",
@@ -349,7 +349,7 @@ async def test_classify_skips_unknown_category_from_model(
         headers=auth_headers,
     )
 
-    assert response.json()["data"] == {"suggested": 0, "skipped": 1, "unchanged": 0}
+    assert response.json()["data"] == {"suggested": 0, "skipped": 1, "unchanged": 0, "no_match": 0}
 
 
 async def test_classify_strips_markdown_fence_from_model_output(
@@ -383,7 +383,7 @@ async def test_classify_strips_markdown_fence_from_model_output(
         headers=auth_headers,
     )
 
-    assert response.json()["data"] == {"suggested": 1, "skipped": 0, "unchanged": 0}
+    assert response.json()["data"] == {"suggested": 1, "skipped": 0, "unchanged": 0, "no_match": 0}
 
 
 async def test_classify_requires_manage_permission(
@@ -540,7 +540,7 @@ async def test_classify_does_not_persist_a_suggestion_equal_to_current_category(
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["data"] == {"suggested": 0, "skipped": 0, "unchanged": 1}
+    assert response.json()["data"] == {"suggested": 0, "skipped": 0, "unchanged": 1, "no_match": 0}
 
     row = await knowledge_document_crud.get(db_session, int(document["id"]))
     assert row is not None
@@ -764,3 +764,106 @@ async def test_trash_routes_require_manage_permission(
             "/api/v1/knowledge/documents/1/purge", headers=auth_headers
         )
     ).status_code == 403
+
+
+async def test_model_saying_no_suitable_category_is_not_reported_as_failure(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+    knowledge_dirs: None,
+    stub_embedding: None,
+) -> None:
+    """提示词允许模型把 category 留空表示「没有合适的分类」。
+
+    那是一条**有信息量的结论**（该去新建分类），不是故障。先前它和「调用失败 /
+    输出解析不了」一起被计进 skipped，界面上显示成"未能给出建议"，
+    用户完全看不出下一步该做什么。
+    """
+    await _grant_knowledge_permissions(db_session, test_user)
+    await _create_category(client, auth_headers, "sop")
+    document = await _upload(
+        client, auth_headers, title="八竿子打不着的文档", filename="x.md",
+        content=b"unrelated content", category_code=None,
+    )
+    _stub_chat(monkeypatch, '{"category":"","confidence":0.2,"reason":"都不沾边"}')
+
+    response = await client.post(
+        "/api/v1/knowledge/documents/classify",
+        json={"document_ids": [document["id"]]},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"] == {
+        "suggested": 0,
+        "skipped": 0,
+        "unchanged": 0,
+        "no_match": 1,
+    }
+
+
+async def test_unparseable_model_output_is_still_a_failure(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+    knowledge_dirs: None,
+    stub_embedding: None,
+) -> None:
+    """输出压根解析不了才算 skipped——不能和「模型说没有合适分类」混为一谈。"""
+    await _grant_knowledge_permissions(db_session, test_user)
+    await _create_category(client, auth_headers, "sop")
+    document = await _upload(
+        client, auth_headers, title="解析不了", filename="y.md",
+        content=b"whatever", category_code=None,
+    )
+    _stub_chat(monkeypatch, "这不是 JSON")
+
+    response = await client.post(
+        "/api/v1/knowledge/documents/classify",
+        json={"document_ids": [document["id"]]},
+        headers=auth_headers,
+    )
+
+    assert response.json()["data"] == {
+        "suggested": 0,
+        "skipped": 1,
+        "unchanged": 0,
+        "no_match": 0,
+    }
+
+
+async def test_uncategorized_document_gets_a_normal_suggestion(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+    knowledge_dirs: None,
+    stub_embedding: None,
+) -> None:
+    """未分类文档拿到匹配的分类时，就是一条普通建议——这条路径本来就不特殊。"""
+    await _grant_knowledge_permissions(db_session, test_user)
+    sop_id = await _create_category(client, auth_headers, "sop")
+    document = await _upload(
+        client, auth_headers, title="待归类的 SOP", filename="z.md",
+        content=b"sop body", category_code=None,
+    )
+    _stub_chat(monkeypatch, '{"category":"sop","confidence":0.9,"reason":"是 SOP"}')
+
+    response = await client.post(
+        "/api/v1/knowledge/documents/classify",
+        json={"document_ids": [document["id"]]},
+        headers=auth_headers,
+    )
+
+    assert response.json()["data"]["suggested"] == 1
+    listed = await client.get(
+        "/api/v1/knowledge/documents",
+        params={"pending_suggestion": "true"},
+        headers=auth_headers,
+    )
+    assert listed.json()["data"]["items"][0]["suggested_category_id"] == sop_id

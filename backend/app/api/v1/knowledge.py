@@ -459,6 +459,7 @@ async def classify_documents_endpoint(
             suggested=outcome.suggested,
             skipped=outcome.skipped,
             unchanged=outcome.unchanged,
+            no_match=outcome.no_match,
         ),
         message=f"已生成 {outcome.suggested} 份建议",
     )

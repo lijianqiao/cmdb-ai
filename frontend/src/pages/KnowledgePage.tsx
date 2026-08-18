@@ -172,21 +172,26 @@ export function KnowledgePage() {
     setIsClassifying(true)
     try {
       const result = await classifyDocuments(selectedIds)
-      // unchanged 不是失败：模型认为当前分类就是对的，所以没有建议可应用。
-      // 不单独说明的话，用户会以为是分析失败了。
+      // 三种「没产生建议」的原因必须分开说，它们对用户意味着完全不同的下一步：
+      //   unchanged → 当前分类就是对的，什么都不用做
+      //   no_match  → 现有分类都不合适，该去新建一个分类
+      //   skipped   → 真的失败了（正文读不到 / 模型调用或解析出错），可以重试
       const details = [
         result.unchanged > 0 ? `${result.unchanged} 份维持原分类` : "",
-        result.skipped > 0 ? `${result.skipped} 份未能给出建议` : "",
+        result.no_match > 0 ? `${result.no_match} 份没有合适的分类` : "",
+        result.skipped > 0 ? `${result.skipped} 份分析失败` : "",
       ].filter(Boolean)
       const suffix = details.length > 0 ? `（${details.join("，")}）` : ""
-      if (result.suggested === 0) {
-        toast.warning(
-          details.length > 0
-            ? `没有需要调整的分类${suffix}`
-            : "没有生成任何建议，请检查分类是否已配置或稍后重试",
-        )
-      } else {
+      if (result.suggested > 0) {
         toast.success(`已生成 ${result.suggested} 份建议${suffix}`)
+      } else if (result.no_match > 0) {
+        toast.warning(
+          `现有分类都不合适，建议先新建一个更贴切的分类再重试${suffix}`,
+        )
+      } else if (result.unchanged > 0) {
+        toast.success(`当前分类已经是合适的，无需调整${suffix}`)
+      } else {
+        toast.error(`分析失败，请稍后重试${suffix}`)
       }
       setSelectedIds([])
       await refetch()

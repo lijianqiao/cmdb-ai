@@ -10,7 +10,6 @@ export interface KnowledgeCategory {
   name: string
   description: string
   created_at: string
-  updated_at: string
 }
 
 /** 知识文档。`suggested_*` 是待人工确认的 AI 建议，未生成或已应用时为空 */
@@ -134,6 +133,8 @@ export interface KnowledgeClassifyResult {
   skipped: number
   /** 模型认为当前分类就是对的：不是失败，也不会产生可应用的建议 */
   unchanged: number
+  /** 模型明确回答现有分类都不合适：也不是失败，而是在提示该新建分类 */
+  no_match: number
 }
 
 /**

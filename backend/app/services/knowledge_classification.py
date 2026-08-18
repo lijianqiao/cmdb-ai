@@ -48,7 +48,7 @@ _SINGLE_DOC_SYSTEM_PROMPT = """你是运维知识文档分类器。
 {"category":"code 或空字符串","confidence":0到1的小数,"reason":"一句有正文依据的中文理由"}"""
 
 
-type SuggestionKind = Literal["suggested", "unchanged", "skipped"]
+type SuggestionKind = Literal["suggested", "unchanged", "no_match", "skipped"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +60,10 @@ class SuggestionOutcome:
     # 模型认为当前分类就是对的。这不是失败，也不落库——落一条「建议 = 现分类」
     # 的记录只会在管理页留下一个点了没反应、又清不掉的死结。
     unchanged: int = 0
+    # 模型明确回答「现有分类里没有合适的」。这同样不是失败，而是一条有用的结论：
+    # 它告诉用户该新建一个分类。跟"调用失败/输出解析不了"混在一起报，
+    # 用户只会以为分析挂了，完全看不出该去建分类。
+    no_match: int = 0
 
 
 def _category_menu(categories: list[KnowledgeCategory]) -> str:
@@ -71,8 +75,16 @@ def _category_menu(categories: list[KnowledgeCategory]) -> str:
     )
 
 
-def _parse_single_suggestion(raw: str | None) -> tuple[str, float, str] | None:
-    """解析单文档建议的 JSON 输出；任何异常都返回 None 表示本次没拿到建议。"""
+def _parse_single_suggestion(
+    raw: str | None,
+) -> tuple[str | None, float, str] | None:
+    """解析单文档建议的 JSON 输出。
+
+    Returns:
+        None 表示输出无法解析；`(None, ...)` 表示模型明确回答「没有合适的分类」
+        （提示词允许它把 category 留空），`(code, ...)` 表示给出了候选 code。
+        这两种"没有 code"必须分开：前者是模型坏了，后者是模型认真回答了。
+    """
     if not raw:
         return None
     text = raw.strip()
@@ -87,7 +99,7 @@ def _parse_single_suggestion(raw: str | None) -> tuple[str, float, str] | None:
     if not isinstance(payload, dict):
         return None
     code = payload.get("category")
-    if not isinstance(code, str) or not code.strip():
+    if not isinstance(code, str):
         return None
     raw_confidence = payload.get("confidence")
     confidence = (
@@ -97,7 +109,8 @@ def _parse_single_suggestion(raw: str | None) -> tuple[str, float, str] | None:
     )
     confidence = min(max(confidence, 0.0), 1.0)
     reason = payload.get("reason")
-    return code.strip(), confidence, reason.strip() if isinstance(reason, str) else ""
+    normalized_reason = reason.strip() if isinstance(reason, str) else ""
+    return (code.strip() or None), confidence, normalized_reason
 
 
 async def _suggest_one(
@@ -109,7 +122,8 @@ async def _suggest_one(
 
     Returns:
         "suggested" 已写入建议；"unchanged" 模型认为当前分类正确（不落库）；
-        "skipped" 没拿到可用建议（正文读不到、输出无法解析、code 不在候选里）。
+        "no_match" 模型明确回答现有分类都不合适（不落库，提示用户去建分类）；
+        "skipped" 真的没拿到答案（正文读不到、调用失败、输出无法解析、code 不存在）。
     """
     try:
         excerpt = read_document_file(document.file_path, limit=_CLASSIFY_EXCERPT_CHARS)
@@ -141,8 +155,13 @@ async def _suggest_one(
 
     parsed = _parse_single_suggestion(result.content)
     if parsed is None:
+        logger.info("分类建议跳过：模型输出无法解析 document_id=%s", document.id)
         return "skipped"
     code, confidence, reason = parsed
+    if code is None:
+        # 模型认真回答了「现有分类都不合适」，这是结论不是故障
+        logger.info("分类建议：现有分类无合适项 document_id=%s", document.id)
+        return "no_match"
 
     by_code = {category.code: category for category in categories}
     target = by_code.get(code)
@@ -170,8 +189,11 @@ async def _suggest_batch(
     categories: list[KnowledgeCategory],
     *,
     actor_user_id: int,
-) -> tuple[int, int]:
-    """两份及以上走 classify_documents 编排工作流；返回 (写入建议数, 维持原分类数)。
+) -> tuple[int, int, int]:
+    """两份及以上走 classify_documents 编排工作流。
+
+    Returns:
+        (写入建议数, 维持原分类数, 无合适分类数)
 
     工作流需要一个真实 AgentSession（AgentRegistry 外键约束），这里临时建一个、
     跑完即删。建议已经落到文档行，子 Agent 的对话记录没有保留价值，留着只会
@@ -222,10 +244,17 @@ async def _suggest_batch(
 
     suggested = 0
     unchanged = 0
+    no_match = 0
     for item in outcome.suggestions:
         document = by_id.get(item.document_id)
+        if document is None:
+            continue
+        if not item.recommended_category.strip():
+            # 与单份路径同样处理：模型明确说没有合适分类，是结论不是故障
+            no_match += 1
+            continue
         target = by_code.get(item.recommended_category)
-        if document is None or target is None:
+        if target is None:
             continue
         if target.id == document.category_id:
             # 与单份路径同样处理：建议等于现分类就不落库，见 SuggestionOutcome.unchanged
@@ -239,7 +268,7 @@ async def _suggest_batch(
             reason=item.reason,
         )
         suggested += 1
-    return suggested, unchanged
+    return suggested, unchanged, no_match
 
 
 async def suggest_categories(
@@ -284,13 +313,15 @@ async def suggest_categories(
             suggested=int(kind == "suggested"),
             skipped=int(kind == "skipped"),
             unchanged=int(kind == "unchanged"),
+            no_match=int(kind == "no_match"),
         )
 
-    suggested, unchanged = await _suggest_batch(
+    suggested, unchanged, no_match = await _suggest_batch(
         db, documents, categories, actor_user_id=actor_user_id
     )
     return SuggestionOutcome(
         suggested=suggested,
-        skipped=len(documents) - suggested - unchanged,
+        skipped=len(documents) - suggested - unchanged - no_match,
         unchanged=unchanged,
+        no_match=no_match,
     )
