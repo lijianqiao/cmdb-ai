@@ -132,12 +132,14 @@ async def test_dispatch_calls_validated_db_tool(
         asset_ids: list[int] | None,
         ip: str | None,
         business_system: str | None,
+        hostname: str | None,
     ) -> ToolResult:
         assert db is db_session
         captured.update(
             asset_ids=asset_ids,
             ip=ip,
             business_system=business_system,
+            hostname=hostname,
         )
         return ToolResult(control="ok", content="asset")
 
@@ -151,6 +153,7 @@ async def test_dispatch_calls_validated_db_tool(
         "asset_ids": None,
         "ip": "10.0.0.5",
         "business_system": None,
+        "hostname": None,
     }
 
 

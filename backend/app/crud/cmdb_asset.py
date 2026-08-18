@@ -18,6 +18,19 @@ class CRUDCmdbAsset(CRUDBase[CmdbAsset]):
         result = await db.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_by_hostname(self, db: AsyncSession, hostname: str) -> list[CmdbAsset]:
+        """Return active assets whose hostname matches, case-insensitively.
+
+        返回列表而不是单个：hostname 在模型上没有唯一约束，重名时只给第一个
+        会让调用方以为「就这一台」。大小写不敏感是因为人打字、模型转述都可能
+        变形（SW-01 / sw-01），精确匹配会让 Agent 误以为设备不存在。
+        """
+        stmt = self._active_statement().where(
+            func.lower(CmdbAsset.hostname) == hostname.lower()
+        )
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
     async def list_all(self, db: AsyncSession) -> list[CmdbAsset]:
         """Return every active asset, ordered by id."""
         stmt = self._active_statement().order_by(CmdbAsset.id.asc())

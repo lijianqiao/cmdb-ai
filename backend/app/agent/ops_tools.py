@@ -61,13 +61,20 @@ async def query_cmdb(
     asset_ids: list[int] | None = None,
     ip: str | None = None,
     business_system: str | None = None,
+    hostname: str | None = None,
 ) -> ToolResult:
-    """Look up CMDB assets by id list, IP, or business system; no filter returns everything."""
+    """Look up CMDB assets by id list, IP, business system, or hostname.
+
+    没有任何过滤条件时返回全部（工具层的 QueryCmdbArgs 会拦住这种调用，
+    这里保留是给内部调用方用的）。
+    """
     if asset_ids is not None:
         assets = await cmdb_asset_crud.list_by_ids(db, asset_ids)
     elif ip is not None:
         found = await cmdb_asset_crud.get_by_ip(db, ip)
         assets = [found] if found is not None else []
+    elif hostname is not None:
+        assets = await cmdb_asset_crud.list_by_hostname(db, hostname)
     elif business_system is not None:
         assets = await cmdb_asset_crud.list_by_business_system(db, business_system)
     else:

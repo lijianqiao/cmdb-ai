@@ -97,7 +97,7 @@ _DESCRIPTIONS: dict[ToolName, str] = {
     "kb_grep": "在 knowledge/ 授权范围内用 ripgrep 搜索正文并返回行号。",
     "kb_read": "分页读取 knowledge/ 内一个文档的正文。",
     "kb_semantic_search": "关键词不足时对知识分块做向量语义检索。",
-    "query_cmdb": "按资产 ID、IP 或业务系统读取 CMDB 资产。",
+    "query_cmdb": "按资产 ID、IP、业务系统或主机名读取 CMDB 资产（四选一）。",
     "query_cmdb_dependencies": "按方向和有限深度遍历一个资产的依赖图。",
     "query_monitor_status": "读取目标当前派生状态和有限条最近探测历史。",
 }
@@ -153,6 +153,7 @@ async def _dispatch_validated(
             asset_ids=parsed.asset_ids,
             ip=parsed.ip,
             business_system=parsed.business_system,
+            hostname=parsed.hostname,
         )
     if isinstance(parsed, QueryCmdbDependenciesArgs):
         return await query_cmdb_dependencies(

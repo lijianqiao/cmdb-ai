@@ -57,6 +57,9 @@ class QueryCmdbArgs(_Args):
     asset_ids: list[int] | None = Field(default=None, max_length=100)
     ip: str | None = Field(default=None, min_length=1, max_length=45)
     business_system: str | None = Field(default=None, min_length=1, max_length=100)
+    # 运维人开口就是设备名。没有这一项时模型只能回「无法按名称检索，
+    # 请你先自己查到 IP 再来问」——eval 实测撞上过。
+    hostname: str | None = Field(default=None, min_length=1, max_length=255)
 
     @model_validator(mode="after")
     def exactly_one_filter(self) -> Self:
@@ -68,12 +71,12 @@ class QueryCmdbArgs(_Args):
         """
         selected = sum(
             value is not None
-            for value in (self.asset_ids, self.ip, self.business_system)
+            for value in (self.asset_ids, self.ip, self.business_system, self.hostname)
         )
         if selected == 0:
-            raise ValueError("必须提供 asset_ids、ip 或 business_system 之一")
+            raise ValueError("必须提供 asset_ids、ip、business_system 或 hostname 之一")
         if selected > 1:
-            raise ValueError("asset_ids, ip, business_system 最多提供一个")
+            raise ValueError("asset_ids, ip, business_system, hostname 最多提供一个")
         return self
 
 
