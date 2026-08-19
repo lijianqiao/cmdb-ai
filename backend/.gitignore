@@ -11,6 +11,12 @@ wheels/
 .test_venv
 
 # 知识库上传的文档正文（运行时数据，不进版本控制）
-knowledge/
+#
+# **前导斜杠不能省。** 不带斜杠的 `knowledge/` 会在任意层级匹配，
+# 曾把 evals/fixtures/knowledge/ 下的 eval 种子文档也一起吞掉——
+# 那些是要进版本库的测试夹具，结果本地有、CI 上没有，
+# 表现为「本地全绿、CI 报 FileNotFoundError」。
+# 加了斜杠就只匹配 backend/knowledge/ 这一个真正的运行时目录。
+/knowledge/
 # 回收站里放的是已删除文档的正文，同样不该进仓库
-knowledge_trash/
+/knowledge_trash/
