@@ -10,15 +10,18 @@ Interact with your IT infrastructure through natural language: query CMDB assets
 
 ## Product Demo
 
+<!-- Drop the recording at docs/images/product_demo.gif and restore the line below:
 ![Product demo](./docs/images/product_demo.gif)
+-->
 
-The demo covers:
+A walkthrough of one full operator session:
+
 1. Superuser login and the dashboard overview;
 2. CMDB asset management and dependency topology;
 3. Device command policy configuration (whitelist bypass / blacklist block);
 4. Ops Assistant conversation:
-   - Querying a switch running-config (triggers automated execution plus an AI-generated summary);
-   - Attempting a device reboot (blocked by the blacklist policy with a safety notice).
+   - Querying a switch running-config — the agent picks the tool, executes, and returns an AI-generated summary;
+   - Attempting a device reboot — **blocked by the approval gate**, with the proposal left `PENDING` for a human.
 
 ---
 
@@ -28,6 +31,8 @@ The demo covers:
   - Natural language troubleshooting, CMDB lookups, TCP port probes, and device configuration inspection.
   - Multi-vendor network automation via Netmiko (Cisco IOS-XE, Cisco Small Business, Huawei VRP, HP Comware, Juniper Junos, Linux).
   - Streaming responses over WebSocket with Turn-grouped execution processes, collapsible thinking traces, and sticky copy buttons.
+  - Cancel a running turn mid-flight; token usage and per-reply cost shown under every answer.
+  - Three configurable model tiers (cheap / balanced / strong) with wholesale fallback when a tier is unset.
 - **🛡️ Human-In-The-Loop (HITL) Security**:
   - Strict approval gate for state-changing/sensitive actions with `PENDING → APPROVED → EXECUTING → EXECUTED / UNKNOWN` state machine.
   - Global auto-popup modal with 6-digit `InputOTP` credential input for dynamic-password protected assets.
@@ -39,8 +44,13 @@ The demo covers:
   - Fine-grained whitelist and blacklist rules by asset type or specific device to bypass or enforce approval workflows.
 - **📡 TCP Liveness Monitoring**:
   - Async concurrent TCP probing, latency tracking, state-flip alert broadcast, and historical event logs.
+  - Status-page style uptime strip: the last hour at one bar per minute, plus a time-weighted uptime rate — delivered in the same list request, no per-row follow-up calls.
 - **📚 Knowledge Base & RAG**:
   - Document upload (`.md`, `.txt`), intelligent CJK text chunking, and vector similarity search powered by `pgvector`.
+  - In-app document preview, AI-suggested categorisation, and delete with a restorable recycle bin — deletion removes the file from both retrieval paths (vector search *and* the ripgrep file scan) at once.
+- **🎯 Agent Eval Suite**:
+  - 10 fixed cases run against the **real** model, scored on three layers (outcome / trajectory invariants / efficiency).
+  - Safety cases are a hard red line; capability cases are judged on an aggregate success rate against a committed baseline — because a real model flips individual answers on its own. See [docs/EVAL.md](./docs/EVAL.md).
 - **🔐 Enterprise RBAC & Security**:
   - Users ↔ Roles ↔ Permissions with module grouping and soft deletion/trash bin support.
   - Dual-token authentication: in-memory short-lived Access Token + HttpOnly Refresh Cookie with session-family rotation and replay protection.
@@ -55,7 +65,7 @@ The demo covers:
 | --- | --- |
 | **Backend** | Python 3.14, FastAPI, SQLAlchemy 2 (async), PostgreSQL + pgvector, Alembic, Netmiko, JWT, uv |
 | **Frontend** | React 19, TypeScript, Vite 8, Tailwind CSS 4, shadcn/ui (Base UI), Zustand, React Router 7 |
-| **Quality** | Ruff, mypy (strict), pytest (955+ tests) / ESLint, Prettier, Vitest (134+ tests) |
+| **Quality** | Ruff, mypy (strict), pytest (1120 tests) / ESLint, Prettier, Vitest (169 tests) |
 
 ---
 
@@ -64,8 +74,9 @@ The demo covers:
 ```text
 ent-agent/
 ├── backend/          # FastAPI API service (see backend/README.md)
+│   └── evals/        # Agent eval suite — 10 cases against the real model
 ├── frontend/         # React SPA client (see frontend/README.md)
-├── docs/             # PRD, architecture, deployment, diagrams, demo GIF
+├── docs/             # PRD, architecture, deployment, eval design, diagrams
 ├── README.md         # English documentation (this file)
 └── README_zh.md      # Chinese documentation
 ```
@@ -105,15 +116,22 @@ Deliberate choices:
 
 ## Quick start (local)
 
-Better when you are editing code and want hot reload. Needs Python 3.14 + uv, Node 24, and a
-PostgreSQL with pgvector (`docker compose up -d postgres` starts just the database).
+Better when you are editing code and want hot reload.
 
-`kb_grep` also needs **ripgrep** installed locally (`winget install BurntSushi.ripgrep.MSVC` /
-`brew install ripgrep` / `apt install ripgrep`).
+**Prerequisites**
+
+- **Python 3.14** & [uv](https://github.com/astral-sh/uv)
+- **Node.js 24** (npm)
+- **PostgreSQL ≥ 14** with the `pgvector` and `pg_trgm` extensions
+  (`docker compose up -d postgres` starts just the database, extensions included)
+- **ripgrep** — `kb_grep` shells out to `rg`
+  (`winget install BurntSushi.ripgrep.MSVC` / `brew install ripgrep` / `apt install ripgrep`)
+- A local embedding engine (e.g. llama.cpp) or any OpenAI-compatible API key
 
 ```bash
 # backend
 cd backend
+cp .env.example .env      # set DATABASE_URL, CMDB_CREDENTIAL_KEY, LLM_CHAT_* / LLM_EMBEDDING_*
 uv sync
 uv run alembic upgrade head
 uv run python init_db.py
@@ -125,43 +143,17 @@ npm install
 npm run dev
 ```
 
-## Quick Start
+| | |
+| --- | --- |
+| Web app | `http://localhost:5173` |
+| API base | `http://localhost:8000/api/v1` |
+| OpenAPI docs | `http://localhost:8000/docs` |
 
-### Prerequisites
+Sign in with the administrator account created by `init_db.py` (`admin` / `admin123`).
+**Change it before exposing the instance to anyone else.**
 
-- **Python 3.14** & [uv](https://github.com/astral-sh/uv)
-- **Node.js ≥ 20** (npm or pnpm)
-- **PostgreSQL ≥ 14** (with `pgvector` and `pg_trgm` extensions enabled)
-- (Optional) Local embedding engine (e.g. llama.cpp) or remote OpenAI-compatible API key
-
-### 1. Backend Setup
-
-```bash
-cd backend
-cp .env.example .env
-
-# Edit DATABASE_URL, CMDB_CREDENTIAL_KEY, and LLM_CHAT_* / LLM_EMBEDDING_* in .env
-uv sync
-uv run alembic upgrade head
-uv run python init_db.py
-uv run python main.py
-```
-
-- API Base: `http://localhost:8000/api/v1`
-- OpenAPI Docs: `http://localhost:8000/docs`
-
-### 2. Frontend Setup
-
-```bash
-cd frontend
-cp .env.example .env
-npm install
-npm run dev
-```
-
-- Web App: `http://localhost:5173`
-
-Sign in with the default administrator credentials created by `init_db.py` (`admin` / `admin123`).
+> On Windows start the backend via `uv run python main.py` instead — it selects the
+> Selector event loop that async psycopg requires.
 
 ---
 
