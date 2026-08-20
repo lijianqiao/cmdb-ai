@@ -173,6 +173,30 @@ Windows 必须通过 `main.py` 启动，以使用与异步 psycopg 兼容的 Sel
 
 应用启动时 `validate_single_worker_environment` 会检查 `WEB_CONCURRENCY` 与 `UVICORN_WORKERS` 环境变量；任一值大于 1 即抛出 `RuntimeError` 并拒绝启动。Gunicorn 部署时同样须保持 `--workers 1`。
 
+#### 需要更多容量时怎么扩
+
+**先别想 worker 数。** 加 worker 修不了会最先坏掉的东西，反而会让情况变糟：
+
+| 资源 | 默认值 | 加 worker 之后 |
+| :--- | :--- | :--- |
+| 数据库连接池 | `DB_POOL_SIZE=5` + `DB_MAX_OVERFLOW=5` = 10 | **变差**：每进程一份池，N×10 个连接直接压向 PostgreSQL 的 `max_connections` |
+| 设备命令线程池 | `DEVICE_COMMAND_MAX_CONCURRENCY=8` | 不变，本来就是进程内上限 |
+| LLM 服务商限流 | 外部约束 | 不变 |
+| 事件循环 | I/O 密集，Netmiko 等阻塞调用已丢进专用线程池 | **最不容易先满的一个** |
+
+**扩容顺序**：先调 `DB_POOL_SIZE` / `DEVICE_COMMAND_MAX_CONCURRENCY`，观察真实瓶颈；
+这两个都调到位仍不够，再考虑多实例。
+
+**多实例的正确做法是会话亲和，不是拆微服务。** `ws_hub` 持有的是活的 WebSocket
+对象、`turn_registry` 持有的是正在跑的 asyncio.Task——这两样不可序列化、不可跨进程
+搬运。把 Agent 运行时抽成独立服务并不能解除这个约束，那个新服务自己仍然只能单实例。
+
+真正要解决的问题是「**把一个 session 路由到持有它的那个进程**」：跑 N 个应用实例，
+按 `session_id` 做一致性哈希路由（nginx `hash` 或一层小路由），每个实例持有互不相交
+的一组会话，三个进程内 registry 全都保持语义不变。不需要消息总线，不需要序列化 socket。
+
+代价是实例挂掉会丢正在跑的 turn——但这一点单实例下**今天就已经如此**，不是新增风险。
+
 **定时清理 refresh 历史（建议每小时）：**
 
 ```bash
@@ -188,9 +212,47 @@ uv run python cleanup_sessions.py
 因此应用侧的清理脚本**不能也不应该**删除审计数据。该表只增不减，且未认证的失败登录
 （`login_failed`）也会写入，必须由 DBA 建立保留策略，否则分页查询会随时间退化：
 
-- 推荐按 `created_at` 做月度 `PARTITION BY RANGE`，过期分区用 `DETACH PARTITION` + 归档后 `DROP`；
-- 归档/删除操作使用独立的高权限角色，不要向 Web 运行时角色授予 `DELETE`；
-- 保留期按合规要求确定（常见为 180 天或 1 年）。
+- 归档/删除操作使用独立的高权限角色，**不要向 Web 运行时角色授予 `DELETE`**；
+- 保留期按合规要求确定。等保 2.0 要求日志留存不少于 6 个月，推荐取 **1 年**。
+
+**为什么应用不做这件事**：append-only 是一条刻意的安全控制。应用被攻破或代码
+有 bug 时，都无法抹掉已经写下的审计痕迹——对一个能重启交换机的系统，这个取证
+属性比省下的磁盘空间值钱得多。曾经有一版在应用里加了自动清理循环，
+因为违反这条控制而被撤回。
+
+**按量级选方案**（实测约 56 行/天，即 ~13 MB/年；团队放大 20 倍也才 ~260 MB/年）：
+
+| 量级 | 做法 |
+| :--- | :--- |
+| **千万行以下**（绝大多数内部部署） | 定时 `DELETE`，见下方脚本。分区在这个量级没有收益，反而要把主键改成 `(id, created_at)` 复合键——那是一次要迁数据的破坏性变更 |
+| 千万行以上 | 再考虑按 `created_at` 做月度 `PARTITION BY RANGE`，过期分区 `DETACH PARTITION` + 归档后 `DROP`。此时 `DROP PARTITION` 相对 `DELETE` 才有实质优势（不产生大量 WAL、不留膨胀） |
+
+现成的定时清理（用独立的高权限角色执行，**不是** Web 运行时角色）：
+
+```sql
+-- 分批删除，避免长事务与 WAL 堆积；反复执行直到返回 0 行
+DELETE FROM audit_logs
+WHERE id IN (
+    SELECT id FROM audit_logs
+    WHERE created_at < now() - INTERVAL '365 days'
+    ORDER BY created_at, id
+    LIMIT 1000
+);
+```
+
+用 `pg_cron` 每日调度（或宿主机 crontab 调 `psql`）：
+
+```sql
+SELECT cron.schedule('audit-retention', '0 3 * * *', $$
+    DELETE FROM audit_logs WHERE id IN (
+        SELECT id FROM audit_logs
+        WHERE created_at < now() - INTERVAL '365 days'
+        ORDER BY created_at, id LIMIT 10000
+    );
+$$);
+```
+
+按当前量级，这个任务在头一年里每次都会删 0 行——**现在就可以配上，不必等表长大**。
 
 ---
 
