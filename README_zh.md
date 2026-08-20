@@ -10,9 +10,8 @@
 
 ## 产品演示
 
-<!-- 录好的动图放到 docs/images/product_demo.gif，然后把下面这行恢复出来：
 ![产品演示](./docs/images/product_demo.gif)
--->
+
 
 一次完整的运维会话：
 

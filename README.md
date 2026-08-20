@@ -10,9 +10,7 @@ Interact with your IT infrastructure through natural language: query CMDB assets
 
 ## Product Demo
 
-<!-- Drop the recording at docs/images/product_demo.gif and restore the line below:
 ![Product demo](./docs/images/product_demo.gif)
--->
 
 A walkthrough of one full operator session:
 
