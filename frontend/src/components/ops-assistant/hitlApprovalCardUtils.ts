@@ -17,11 +17,32 @@ export function statusLabel(status: string): string {
     case "APPROVED":
     case "EXECUTION_FAILED":
       return "已批准但未执行"
+    case "EXECUTING":
+      return "执行中"
     case "UNKNOWN":
       return "执行结果不确定"
     default:
       return status || "未知状态"
   }
+}
+
+/** 请求没拿到明确答复、正在按提案 ID 查询真实状态时的提示 */
+export const HITL_RECONCILING_MESSAGE = "请求结果尚未确认，正在核对…"
+
+/**
+ * 决定卡片显示哪个状态：WS/快照推来的 prop，还是本卡片请求拿到的结果
+ *
+ * 两路到达的先后没有保证：迟到的 HTTP 响应可能比已经收到的 WS 事件更旧。
+ * EXECUTED、REJECTED 是终态，出现后不会再变，所以 prop 已是终态时以它为准；
+ * 否则以本卡片最近一次请求的结果为准（prop 一变，这个结果就会被清掉）。
+ */
+export function resolveDisplayStatus(
+  propStatus: string,
+  localStatus: string | null,
+): string {
+  const normalized = propStatus.trim().toUpperCase()
+  if (normalized === "EXECUTED" || normalized === "REJECTED") return propStatus
+  return localStatus ?? propStatus
 }
 
 /**
@@ -37,6 +58,69 @@ export function readErrorMessage(error: unknown, fallback: string): string {
     if (typeof detail === "string" && detail.trim()) return detail
   }
   return fallback
+}
+
+/**
+ * 请求是否没拿到明确答复：超时、断网，或网关/服务端 5xx
+ *
+ * 批准和重试接口会同步等设备跑完才返回，所以这些情况下服务端很可能
+ * 已经批准、甚至已经执行完了——不能报「失败」，只能按提案 ID 去查真实状态。
+ * 4xx 是服务端明确拒绝了这次请求，照常报错即可。
+ */
+export function isOutcomeUnknownError(error: unknown): boolean {
+  if (!isAxiosError(error)) return false
+  const status = error.response?.status
+  return status == null || status >= 500
+}
+
+/** 一条结果提示：用哪种 toast、说什么 */
+export interface HitlOutcomeNotice {
+  level: "success" | "info" | "warning"
+  message: string
+}
+
+/**
+ * 按提案的真实状态给出结果提示
+ *
+ * HTTP 200 只说明请求被处理了，不代表设备执行成功：只有 EXECUTED 才报成功。
+ * 执行中、结果不确定（UNKNOWN）、已批准但执行没启动，都不能报成功。
+ *
+ * Args:
+ *   proposal: 最新的提案；核对时一次都没查到则为 null
+ *   successMessage: EXECUTED 时的提示，各入口措辞不同
+ */
+export function describeHitlOutcome(
+  proposal: HitlProposal | null,
+  successMessage: string,
+): HitlOutcomeNotice {
+  if (proposal == null) {
+    return { level: "warning", message: "暂时无法确认结果，请检查网络后刷新页面" }
+  }
+  switch (proposal.status.trim().toUpperCase()) {
+    case "EXECUTED":
+      return { level: "success", message: successMessage }
+    case "EXECUTING":
+      return { level: "info", message: "设备仍在执行，结果稍后会自动更新" }
+    case "UNKNOWN":
+      return {
+        level: "warning",
+        message: "执行结果不确定：命令可能已在设备上生效，请人工核实后处置",
+      }
+    case "APPROVED": {
+      const reason =
+        proposal.execution_error || readLastError(proposal.action_payload)
+      return {
+        level: "warning",
+        message: reason
+          ? `已批准但未执行：${reason}。可重试执行`
+          : "已批准但未执行，可重试执行",
+      }
+    }
+    case "REJECTED":
+      return { level: "info", message: "该提案已被拒绝" }
+    default:
+      return { level: "warning", message: "审批尚未生效，请稍后刷新确认" }
+  }
 }
 
 /**

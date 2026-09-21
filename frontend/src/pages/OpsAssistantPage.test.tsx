@@ -72,8 +72,14 @@ vi.mock("sonner", () => ({
   toast: {
     success: vi.fn(),
     error: vi.fn(),
+    warning: vi.fn(),
+    info: vi.fn(),
+    loading: vi.fn(() => "reconcile-toast"),
+    dismiss: vi.fn(),
   },
 }))
+
+import { toast } from "sonner"
 
 import { usePermission } from "@/hooks/use-permission"
 import { useOpsChat } from "@/hooks/use-ops-chat"
@@ -355,5 +361,35 @@ describe("OpsAssistantPage 审批弹窗：详情没加载成功不能批准", ()
       expect(mockDecideHitlProposal).toHaveBeenCalledTimes(1)
     })
     expect(mockDecideHitlProposal).toHaveBeenCalledWith(901, { approve: true })
+  })
+
+  it("批准请求超时、数据库里实为 UNKNOWN：提示正在核对，最后按真实状态告警，不报成功也不重发", async () => {
+    let serverStatus = "PENDING"
+    mockGetHitlProposal.mockImplementation(async () => ({
+      ...proposalDetail,
+      status: serverStatus,
+    }))
+    mockDecideHitlProposal.mockImplementation(async () => {
+      serverStatus = "UNKNOWN"
+      throw new AxiosError("timeout of 30000ms exceeded", AxiosError.ECONNABORTED)
+    })
+    render(<OpsAssistantPage />)
+
+    const dialog = await screen.findByRole("dialog")
+    await waitFor(() => {
+      expect(within(dialog).getByTestId("hitl-approve-button")).toBeEnabled()
+    })
+    fireEvent.click(within(dialog).getByTestId("hitl-approve-button"))
+
+    await waitFor(() => {
+      expect(toast.warning).toHaveBeenCalledWith(
+        expect.stringContaining("执行结果不确定"),
+        { id: "reconcile-toast" },
+      )
+    })
+    expect(toast.loading).toHaveBeenCalledWith("请求结果尚未确认，正在核对…")
+    expect(toast.success).not.toHaveBeenCalled()
+    expect(toast.error).not.toHaveBeenCalled()
+    expect(mockDecideHitlProposal).toHaveBeenCalledTimes(1)
   })
 })

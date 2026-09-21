@@ -14,10 +14,14 @@ import { HitlApprovalCard } from "./HitlApprovalCard"
 import {
   canSubmitApproval,
   canSubmitRetry,
+  describeHitlOutcome,
+  isOutcomeUnknownError,
   isRetryAvailable,
   needsDynamicCredentialPassword,
   readLastError,
+  resolveDisplayStatus,
   shouldShowResultExcerpt,
+  statusLabel,
   type HitlSubmitState,
 } from "./hitlApprovalCardUtils"
 
@@ -58,8 +62,12 @@ vi.mock("sonner", () => ({
   toast: {
     success: vi.fn(),
     error: vi.fn(),
+    warning: vi.fn(),
+    info: vi.fn(),
   },
 }))
+
+import { toast } from "sonner"
 
 import { usePermission } from "@/hooks/use-permission"
 import {
@@ -163,6 +171,11 @@ function networkError(): AxiosError {
   return new AxiosError("Network Error", AxiosError.ERR_NETWORK)
 }
 
+/** 模拟浏览器等满 30 秒放弃：服务端可能仍在执行 */
+function timeoutError(): AxiosError {
+  return new AxiosError("timeout of 30000ms exceeded", AxiosError.ECONNABORTED)
+}
+
 describe("HitlApprovalCard 执行结果展示（纯函数）", () => {
   it("EXECUTED 且 result_excerpt 有值时应展示", () => {
     expect(shouldShowResultExcerpt("EXECUTED", "show version")).toBe(true)
@@ -248,6 +261,61 @@ describe("HitlApprovalCard 重试与失败文案（纯函数）", () => {
     expect(isRetryAvailable(false, "APPROVED")).toBe(false)
     expect(isRetryAvailable(true, "PENDING")).toBe(false)
     expect(isRetryAvailable(true, "EXECUTED")).toBe(false)
+  })
+
+  it("EXECUTING 有中文状态名", () => {
+    expect(statusLabel("EXECUTING")).toBe("执行中")
+  })
+
+  it("超时、断网、5xx 都算没拿到明确答复；4xx 和代码异常不算", () => {
+    expect(isOutcomeUnknownError(timeoutError())).toBe(true)
+    expect(isOutcomeUnknownError(networkError())).toBe(true)
+    expect(isOutcomeUnknownError(httpError(502, "Bad Gateway"))).toBe(true)
+    expect(isOutcomeUnknownError(httpError(500, "内部错误"))).toBe(true)
+    expect(isOutcomeUnknownError(httpError(409, "状态冲突"))).toBe(false)
+    expect(isOutcomeUnknownError(httpError(422, "缺少动态密码"))).toBe(false)
+    expect(isOutcomeUnknownError(new Error("boom"))).toBe(false)
+  })
+
+  it("只有 EXECUTED 报成功：执行中、结果不确定、未执行都不能报成功", () => {
+    const done = "审批完成"
+    expect(describeHitlOutcome(buildProposal({ status: "EXECUTED" }), done)).toEqual({
+      level: "success",
+      message: done,
+    })
+    expect(describeHitlOutcome(buildProposal({ status: "UNKNOWN" }), done).level).toBe("warning")
+    expect(describeHitlOutcome(buildProposal({ status: "APPROVED" }), done).level).toBe("warning")
+    expect(describeHitlOutcome(buildProposal({ status: "EXECUTING" }), done).level).toBe("info")
+    expect(describeHitlOutcome(buildProposal({ status: "REJECTED" }), done).level).toBe("info")
+    expect(describeHitlOutcome(buildProposal({ status: "PENDING" }), done).level).toBe("warning")
+    expect(describeHitlOutcome(null, done).level).toBe("warning")
+  })
+
+  it("已批准但未执行时带上失败原因，并提示可重试", () => {
+    expect(
+      describeHitlOutcome(
+        buildProposal({ status: "APPROVED", execution_error: "连接设备超时" }),
+        "审批完成",
+      ).message,
+    ).toBe("已批准但未执行：连接设备超时。可重试执行")
+    expect(
+      describeHitlOutcome(
+        buildProposal({ status: "APPROVED", action_payload: { last_error: "认证失败" } }),
+        "审批完成",
+      ).message,
+    ).toContain("认证失败")
+  })
+
+  it("WS/快照已是终态时，迟到的请求结果不能把它退回旧状态", () => {
+    expect(resolveDisplayStatus("EXECUTED", "APPROVED")).toBe("EXECUTED")
+    expect(resolveDisplayStatus("REJECTED", "PENDING")).toBe("REJECTED")
+  })
+
+  it("prop 还不是终态时，以本卡片请求拿到的最新结果为准", () => {
+    expect(resolveDisplayStatus("PENDING", "APPROVED")).toBe("APPROVED")
+    expect(resolveDisplayStatus("APPROVED", "EXECUTED")).toBe("EXECUTED")
+    expect(resolveDisplayStatus("UNKNOWN", "APPROVED")).toBe("APPROVED")
+    expect(resolveDisplayStatus("PENDING", null)).toBe("PENDING")
   })
 
   it("从 action_payload 读取 last_error", () => {
@@ -644,6 +712,172 @@ describe("HitlApprovalCard 详情未就绪时禁止批准/重试", () => {
     })
     expect(mockDecideHitlProposal).toHaveBeenCalledWith(1, { approve: true })
     expect(mockGetHitlProposal).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe("HitlApprovalCard 请求没拿到明确答复时按提案 ID 核对", () => {
+  /** 模拟数据库里这条提案的真实状态：接口处理了、但浏览器没等到响应 */
+  let serverStatus: string
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetHitlProposal.mockReset()
+    mockDecideHitlProposal.mockReset()
+    mockRetryHitlProposal.mockReset()
+    mockUsePermission.mockReturnValue(permissionResult(true))
+    serverStatus = "PENDING"
+    mockGetHitlProposal.mockImplementation(async () =>
+      buildProposal({ status: serverStatus, asset_credential_type: "static" }),
+    )
+  })
+
+  function approvalCard(status = "PENDING") {
+    return (
+      <HitlApprovalCard
+        sessionId={10}
+        proposalId={1}
+        actionType="device_query"
+        status={status}
+        reason="排查交换机"
+        assetId={9}
+        hasFullResult={false}
+      />
+    )
+  }
+
+  async function clickWhenEnabled(testId: string): Promise<void> {
+    await waitFor(() => {
+      expect(screen.getByTestId(testId)).toBeEnabled()
+    })
+    fireEvent.click(screen.getByTestId(testId))
+  }
+
+  /**
+   * 断言「最终」显示的状态。findByText 会在某一帧短暂出现时就通过，
+   * 抓不住随后被 effect 改掉的情况，所以先把 effect 冲完再同步断言。
+   */
+  async function expectSettledBadge(label: string, stale: string): Promise<void> {
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.getByText(label)).toBeInTheDocument()
+    expect(screen.queryByText(stale)).not.toBeInTheDocument()
+  }
+
+  it.each([
+    ["EXECUTED", "已执行", "success"],
+    ["UNKNOWN", "执行结果不确定", "warning"],
+    ["APPROVED", "已批准但未执行", "warning"],
+  ] as const)(
+    "批准请求超时、数据库里实为 %s：按真实状态显示，不报批准失败，也不重发",
+    async (finalStatus, badge, level) => {
+      mockDecideHitlProposal.mockImplementation(async () => {
+        serverStatus = finalStatus
+        throw timeoutError()
+      })
+      render(approvalCard())
+      await clickWhenEnabled("hitl-approve-button")
+
+      await waitFor(() => {
+        expect(toast[level]).toHaveBeenCalled()
+      })
+      await expectSettledBadge(badge, "等待审批")
+      expect(toast.error).not.toHaveBeenCalled()
+      if (finalStatus !== "EXECUTED") {
+        expect(toast.success).not.toHaveBeenCalled()
+      }
+      expect(mockDecideHitlProposal).toHaveBeenCalledTimes(1)
+      expect(mockRetryHitlProposal).not.toHaveBeenCalled()
+    },
+  )
+
+  it("批准请求超时、设备仍在执行：显示执行中与核对提示，不报成功也不报失败", async () => {
+    mockDecideHitlProposal.mockImplementation(async () => {
+      serverStatus = "EXECUTING"
+      throw timeoutError()
+    })
+    render(approvalCard())
+    await clickWhenEnabled("hitl-approve-button")
+
+    expect(await screen.findByText("执行中")).toBeInTheDocument()
+    expect(screen.getByText("请求结果尚未确认，正在核对…")).toBeInTheDocument()
+    expect(toast.success).not.toHaveBeenCalled()
+    expect(toast.error).not.toHaveBeenCalled()
+    expect(mockDecideHitlProposal).toHaveBeenCalledTimes(1)
+  })
+
+  it("重试请求超时、数据库里实为已执行：显示已执行，不报重试失败", async () => {
+    serverStatus = "APPROVED"
+    mockRetryHitlProposal.mockImplementation(async () => {
+      serverStatus = "EXECUTED"
+      throw timeoutError()
+    })
+    render(approvalCard("APPROVED"))
+    await clickWhenEnabled("hitl-retry-button")
+
+    await waitFor(() => {
+      expect(toast.success).toHaveBeenCalledWith("重试执行成功")
+    })
+    await expectSettledBadge("已执行", "已批准但未执行")
+    expect(toast.error).not.toHaveBeenCalled()
+    expect(mockRetryHitlProposal).toHaveBeenCalledTimes(1)
+    expect(mockDecideHitlProposal).not.toHaveBeenCalled()
+  })
+
+  it("4xx 是服务端明确拒绝：照常报错，不进入核对", async () => {
+    mockDecideHitlProposal.mockRejectedValue(httpError(409, "提案状态已变化"))
+    render(approvalCard())
+    await clickWhenEnabled("hitl-approve-button")
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith("提案状态已变化")
+    })
+    expect(screen.queryByText("请求结果尚未确认，正在核对…")).not.toBeInTheDocument()
+    // 只有挂载时拉详情的那一次，没有核对查询
+    expect(mockGetHitlProposal).toHaveBeenCalledTimes(1)
+  })
+
+  it("先收到 WS 终态、后收到迟到的旧状态响应时，保持终态", async () => {
+    let resolveDecide!: (value: HitlProposal) => void
+    mockDecideHitlProposal.mockReturnValue(
+      new Promise<HitlProposal>((resolve) => {
+        resolveDecide = resolve
+      }),
+    )
+    const { rerender } = render(approvalCard())
+    await clickWhenEnabled("hitl-approve-button")
+
+    rerender(approvalCard("EXECUTED"))
+    await act(async () => {
+      resolveDecide(
+        buildProposal({
+          status: "APPROVED",
+          asset_credential_type: "static",
+          execution_error: "迟到的旧结果",
+        }),
+      )
+    })
+
+    expect(screen.getByText("已执行")).toBeInTheDocument()
+    expect(screen.queryByText("已批准但未执行")).not.toBeInTheDocument()
+  })
+
+  it("重试成功后即使 WS 还没到，也显示已执行", async () => {
+    serverStatus = "APPROVED"
+    mockRetryHitlProposal.mockResolvedValue(
+      buildProposal({
+        status: "EXECUTED",
+        executed_at: "2026-08-12T10:01:00Z",
+        asset_credential_type: "static",
+      }),
+    )
+    render(approvalCard("APPROVED"))
+    await clickWhenEnabled("hitl-retry-button")
+
+    await waitFor(() => {
+      expect(toast.success).toHaveBeenCalledWith("重试执行成功")
+    })
+    await expectSettledBadge("已执行", "已批准但未执行")
   })
 })
 

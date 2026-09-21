@@ -31,6 +31,7 @@ import {
 import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
 import { Cancel01Icon, Shield02Icon, Tick02Icon } from "@/lib/icons"
+import { useHitlReconcile } from "@/hooks/use-hitl-reconcile"
 import { usePermission } from "@/hooks/use-permission"
 import {
   decideHitlProposal,
@@ -47,14 +48,18 @@ import {
 import { cn } from "@/lib/utils"
 import type { DeviceQueryResult } from "@/types/agent"
 import {
+  HITL_RECONCILING_MESSAGE,
   canSubmitApproval,
   canSubmitRetry,
+  describeHitlOutcome,
+  isOutcomeUnknownError,
   isRetryAvailable,
   isUnknownResolutionAvailable,
   needsDynamicCredentialPassword,
   readErrorMessage,
   readLastError,
   readPayloadMeta,
+  resolveDisplayStatus,
   shouldShowResultExcerpt,
   statusLabel,
   type HitlSubmitState,
@@ -92,6 +97,7 @@ export function HitlApprovalCard({
   const [detailError, setDetailError] = useState<string | null>(null)
   const [detailReloadKey, setDetailReloadKey] = useState(0)
   const [deciding, setDeciding] = useState(false)
+  const [reconciling, setReconciling] = useState(false)
   const [rejectOpen, setRejectOpen] = useState(false)
   const [localStatus, setLocalStatus] = useState<string | null>(null)
   const [dynamicPassword, setDynamicPassword] = useState("")
@@ -101,8 +107,9 @@ export function HitlApprovalCard({
   const [fullResultError, setFullResultError] = useState<string | null>(null)
   const [summaryRecovering, setSummaryRecovering] = useState(false)
   const fullResultRequestRef = useRef(0)
+  const reconcile = useHitlReconcile(`${sessionId}:${proposalId}`)
 
-  const displayStatus = localStatus ?? status
+  const displayStatus = resolveDisplayStatus(status, localStatus)
   const normalized = displayStatus.trim().toUpperCase()
   const isPending = normalized === "PENDING" || normalized === ""
 
@@ -153,6 +160,7 @@ export function HitlApprovalCard({
     setDetailError(null)
     setDynamicPassword("")
     setDeciding(false)
+    setReconciling(false)
     setRejectOpen(false)
 
     fullResultRequestRef.current += 1
@@ -189,11 +197,29 @@ export function HitlApprovalCard({
     }
   }, [canApprove, sessionId, proposalId, detailReloadKey])
 
+  // prop 状态一变，说明 WS/快照带来了更新的信息，本卡片之前的请求结果作废。
+  // 不能按「prop 不是 PENDING 就作废」：重试时 prop 本来就是 APPROVED，
+  // 那样重试的结果会被立刻丢掉，卡片一直显示「已批准但未执行」。
   useEffect(() => {
-    if (localStatus != null && status.trim().toUpperCase() !== "PENDING") {
-      setLocalStatus(null)
-    }
-  }, [status, localStatus])
+    setLocalStatus(null)
+  }, [status])
+
+  /**
+   * 请求没拿到明确答复（超时/断线/5xx）：设备可能已在执行，不能报「失败」，
+   * 也不自动重发，只按提案 ID 查真实状态并如实显示。
+   */
+  const reconcileOutcome = async (successMessage: string): Promise<void> => {
+    setDynamicPassword("")
+    setReconciling(true)
+    const { proposal, aborted } = await reconcile(proposalId, (latest) => {
+      setDetail(latest)
+      setLocalStatus(latest.status)
+    })
+    if (aborted) return
+    setReconciling(false)
+    const notice = describeHitlOutcome(proposal, successMessage)
+    toast[notice.level](notice.message)
+  }
 
   const handleApprove = async (): Promise<void> => {
     if (!approveAllowed) return
@@ -211,13 +237,14 @@ export function HitlApprovalCard({
       setDetail(updated)
       setLocalStatus(updated.status)
       setDynamicPassword("")
-      toast.success(
-        updated.status.trim().toUpperCase() === "APPROVED" && !updated.executed_at
-          ? "已批准但未执行"
-          : "审批完成",
-      )
+      const notice = describeHitlOutcome(updated, "审批完成")
+      toast[notice.level](notice.message)
     } catch (error: unknown) {
-      toast.error(readErrorMessage(error, "批准失败"))
+      if (isOutcomeUnknownError(error)) {
+        await reconcileOutcome("审批完成")
+      } else {
+        toast.error(readErrorMessage(error, "批准失败"))
+      }
     } finally {
       setDeciding(false)
     }
@@ -253,13 +280,14 @@ export function HitlApprovalCard({
       setDetail(updated)
       setLocalStatus(updated.status)
       setDynamicPassword("")
-      toast.success(
-        updated.status.trim().toUpperCase() === "EXECUTED"
-          ? "重试执行成功"
-          : "重试后仍未执行成功，请检查设备连通性与凭据",
-      )
+      const notice = describeHitlOutcome(updated, "重试执行成功")
+      toast[notice.level](notice.message)
     } catch (error: unknown) {
-      toast.error(readErrorMessage(error, "重试失败"))
+      if (isOutcomeUnknownError(error)) {
+        await reconcileOutcome("重试执行成功")
+      } else {
+        toast.error(readErrorMessage(error, "重试失败"))
+      }
     } finally {
       setDeciding(false)
     }
@@ -390,6 +418,13 @@ export function HitlApprovalCard({
             <p className="text-xs text-destructive" data-testid="hitl-last-error">
               上次执行失败：{lastError}
             </p>
+          ) : null}
+
+          {reconciling ? (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Spinner className="size-3" />
+              <span>{HITL_RECONCILING_MESSAGE}</span>
+            </div>
           ) : null}
 
           {showResultExcerpt ? (

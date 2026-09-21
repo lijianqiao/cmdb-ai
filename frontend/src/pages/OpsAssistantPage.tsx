@@ -39,6 +39,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
+import { useHitlReconcile } from "@/hooks/use-hitl-reconcile"
 import { useOpsChat } from "@/hooks/use-ops-chat"
 import {
   createAgentSession,
@@ -47,7 +48,12 @@ import {
   patchAgentSession,
 } from "@/lib/agent-api"
 import { decideHitlProposal } from "@/lib/hitl-api"
-import { readErrorMessage } from "@/components/ops-assistant/hitlApprovalCardUtils"
+import {
+  HITL_RECONCILING_MESSAGE,
+  describeHitlOutcome,
+  isOutcomeUnknownError,
+  readErrorMessage,
+} from "@/components/ops-assistant/hitlApprovalCardUtils"
 import { cn } from "@/lib/utils"
 import type { ApprovalMode, AgentSession } from "@/types/agent"
 import { APPROVAL_MODE_LABELS } from "@/types/agent"
@@ -222,9 +228,11 @@ export function OpsAssistantPage() {
 
   const [isExecutingHitl, setIsExecutingHitl] = useState(false)
   const isBusy = isSending || isExecutingHitl
+  const reconcileHitl = useHitlReconcile(selectedSessionId)
 
   const handleApproveHitl = async (dynamicPassword?: string): Promise<void> => {
     if (activeHitl == null) return
+    const executedMessage = "执行完成，正在生成回答…"
     setIsExecutingHitl(true)
     try {
       const body: { approve: true; dynamic_credential_password?: string } = {
@@ -234,13 +242,23 @@ export function OpsAssistantPage() {
         body.dynamic_credential_password = dynamicPassword
       }
       const updated = await decideHitlProposal(activeHitl.proposalId, body)
-      toast.success(
-        updated.status.trim().toUpperCase() === "APPROVED" && !updated.executed_at
-          ? "已批准但未执行"
-          : "审批完成，正在执行与生成回答...",
-      )
+      const notice = describeHitlOutcome(updated, executedMessage)
+      toast[notice.level](notice.message)
     } catch (error: unknown) {
-      toast.error(readErrorMessage(error, "批准失败"))
+      if (!isOutcomeUnknownError(error)) {
+        toast.error(readErrorMessage(error, "批准失败"))
+        return
+      }
+      // 没拿到明确答复：设备可能已在执行。不报「批准失败」、不自动重发，
+      // 只按提案 ID 查询真实状态；切换会话或离开页面时核对自动中止
+      const toastId = toast.loading(HITL_RECONCILING_MESSAGE)
+      const { proposal, aborted } = await reconcileHitl(activeHitl.proposalId)
+      if (aborted) {
+        toast.dismiss(toastId)
+        return
+      }
+      const notice = describeHitlOutcome(proposal, executedMessage)
+      toast[notice.level](notice.message, { id: toastId })
     } finally {
       setIsExecutingHitl(false)
       await reloadSnapshot()
