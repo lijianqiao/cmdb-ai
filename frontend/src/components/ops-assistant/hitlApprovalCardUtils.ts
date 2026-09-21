@@ -80,17 +80,58 @@ export function needsDynamicCredentialPassword(
 }
 
 /**
- * 批准按钮是否应禁用（含动态密码必填校验）
+ * 判断能否发出批准/重试请求所需的全部状态
+ *
+ * 按钮的禁用状态和点击处理函数用同一份判定：只禁用按钮不够，
+ * 处理函数里要再查一次，防止程序化触发或旧闭包绕过按钮限制。
  */
-export function isApproveButtonDisabled(
-  deciding: boolean,
-  detailLoading: boolean,
-  needsPassword: boolean,
-  password: string,
-): boolean {
-  if (deciding || detailLoading) return true
-  if (needsPassword && !password.trim()) return true
-  return false
+export interface HitlSubmitState {
+  canApprove: boolean
+  deciding: boolean
+  /** 组件眼下认定的最新状态 */
+  status: string
+  proposalId: number
+  detail: HitlProposal | null | undefined
+  detailLoading: boolean
+  detailError: string | null | undefined
+  needsPassword: boolean
+  password: string
+}
+
+/**
+ * 批准和重试共同的前置条件
+ *
+ * 审批人必须先看到这个提案的真实载荷（具体命令、接口参数）才能放行：
+ * 详情还在加载、加载失败、或是切换提案后留下的旧详情，都不算「看过」。
+ * 安全摘要只有动作类别、资产 ID 和原因，不能替代载荷。
+ */
+function passesSubmitPreconditions(state: HitlSubmitState): boolean {
+  if (!state.canApprove || state.deciding) return false
+  if (state.detailLoading || state.detailError) return false
+  if (state.detail == null || state.detail.id !== state.proposalId) return false
+  if (state.needsPassword && !state.password.trim()) return false
+  return true
+}
+
+/**
+ * 是否允许发出「批准」请求（仅 PENDING）
+ *
+ * 拒绝不走这里：拒绝不会在设备上执行任何东西，不需要先看载荷，也不需要设备密码。
+ */
+export function canSubmitApproval(state: HitlSubmitState): boolean {
+  const normalized = state.status.trim().toUpperCase()
+  const isPending = normalized === "PENDING" || normalized === ""
+  return isPending && passesSubmitPreconditions(state)
+}
+
+/**
+ * 是否允许发出「重试执行」请求：前置条件与批准相同，但仅 APPROVED
+ */
+export function canSubmitRetry(state: HitlSubmitState): boolean {
+  return (
+    isRetryAvailable(state.canApprove, state.status) &&
+    passesSubmitPreconditions(state)
+  )
 }
 
 /**

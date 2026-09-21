@@ -47,7 +47,8 @@ import {
 import { cn } from "@/lib/utils"
 import type { DeviceQueryResult } from "@/types/agent"
 import {
-  isApproveButtonDisabled,
+  canSubmitApproval,
+  canSubmitRetry,
   isRetryAvailable,
   isUnknownResolutionAvailable,
   needsDynamicCredentialPassword,
@@ -56,6 +57,7 @@ import {
   readPayloadMeta,
   shouldShowResultExcerpt,
   statusLabel,
+  type HitlSubmitState,
 } from "@/components/ops-assistant/hitlApprovalCardUtils"
 
 export interface HitlApprovalCardProps {
@@ -88,6 +90,7 @@ export function HitlApprovalCard({
   const [detail, setDetail] = useState<HitlProposal | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
+  const [detailReloadKey, setDetailReloadKey] = useState(0)
   const [deciding, setDeciding] = useState(false)
   const [rejectOpen, setRejectOpen] = useState(false)
   const [localStatus, setLocalStatus] = useState<string | null>(null)
@@ -129,12 +132,19 @@ export function HitlApprovalCard({
     normalized === "EXECUTED" &&
     displayActionType.trim().toLowerCase() === "device_query"
 
-  const approveDisabled = isApproveButtonDisabled(
+  const submitState: HitlSubmitState = {
+    canApprove,
     deciding,
+    status: displayStatus,
+    proposalId,
+    detail,
     detailLoading,
-    needsDynamicPassword,
-    dynamicPassword,
-  )
+    detailError,
+    needsPassword: needsDynamicPassword,
+    password: dynamicPassword,
+  }
+  const approveAllowed = canSubmitApproval(submitState)
+  const retryAllowed = canSubmitRetry(submitState)
 
   useEffect(() => {
     setLocalStatus(null)
@@ -151,7 +161,10 @@ export function HitlApprovalCard({
     setFullResultLoading(false)
     setFullResultError(null)
     setSummaryRecovering(false)
+  }, [canApprove, sessionId, proposalId])
 
+  // 详情单独一个 effect：「重新加载详情」只重拉详情，不重置卡片的其它状态
+  useEffect(() => {
     if (!canApprove) return
 
     let cancelled = false
@@ -174,7 +187,7 @@ export function HitlApprovalCard({
     return () => {
       cancelled = true
     }
-  }, [canApprove, sessionId, proposalId])
+  }, [canApprove, sessionId, proposalId, detailReloadKey])
 
   useEffect(() => {
     if (localStatus != null && status.trim().toUpperCase() !== "PENDING") {
@@ -183,9 +196,8 @@ export function HitlApprovalCard({
   }, [status, localStatus])
 
   const handleApprove = async (): Promise<void> => {
-    if (!canApprove || !isPending || deciding) return
+    if (!approveAllowed) return
     const passwordToUse = dynamicPassword.trim()
-    if (needsDynamicPassword && !passwordToUse) return
 
     setDeciding(true)
     try {
@@ -229,7 +241,7 @@ export function HitlApprovalCard({
   }
 
   const handleRetry = async (): Promise<void> => {
-    if (!retryAvailable || deciding) return
+    if (!retryAllowed) return
     const passwordToUse = dynamicPassword.trim()
     setDeciding(true)
     try {
@@ -476,7 +488,17 @@ export function HitlApprovalCard({
                 <span>加载完整载荷…</span>
               </div>
             ) : detailError ? (
-              <p className="text-xs text-destructive">{detailError}</p>
+              <div className="flex flex-col items-start gap-2">
+                <p className="text-xs text-destructive">{detailError}</p>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  onClick={() => setDetailReloadKey((key) => key + 1)}
+                >
+                  重新加载详情
+                </Button>
+              </div>
             ) : detail ? (
               <pre className="max-h-48 overflow-auto rounded-md bg-muted p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words">
                 {JSON.stringify(detail.action_payload, null, 2)}
@@ -515,7 +537,7 @@ export function HitlApprovalCard({
               <Button
                 type="button"
                 size="sm"
-                disabled={approveDisabled}
+                disabled={!approveAllowed}
                 onClick={() => void handleApprove()}
                 data-testid="hitl-approve-button"
               >
@@ -569,11 +591,7 @@ export function HitlApprovalCard({
             <Button
               type="button"
               size="sm"
-              disabled={
-                deciding ||
-                detailLoading ||
-                (needsDynamicPassword && !dynamicPassword.trim())
-              }
+              disabled={!retryAllowed}
               onClick={() => void handleRetry()}
               data-testid="hitl-retry-button"
             >

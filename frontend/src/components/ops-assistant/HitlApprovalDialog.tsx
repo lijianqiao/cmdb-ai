@@ -34,7 +34,8 @@ import {
 } from "@/lib/hitl-api"
 import { PERMISSIONS } from "@/lib/constants"
 import {
-  isApproveButtonDisabled,
+  canSubmitApproval,
+  canSubmitRetry,
   isRetryAvailable,
   isUnknownResolutionAvailable,
   needsDynamicCredentialPassword,
@@ -42,6 +43,7 @@ import {
   readLastError,
   shouldShowResultExcerpt,
   statusLabel,
+  type HitlSubmitState,
 } from "@/components/ops-assistant/hitlApprovalCardUtils"
 
 export interface HitlApprovalDialogProps {
@@ -91,6 +93,7 @@ export function HitlApprovalDialog({
   const [innerDetail, setInnerDetail] = useState<HitlProposal | null>(null)
   const [innerLoading, setInnerLoading] = useState(false)
   const [innerError, setInnerError] = useState<string | null>(null)
+  const [detailReloadKey, setDetailReloadKey] = useState(0)
   const [innerDeciding, setInnerDeciding] = useState(false)
   const [rejectOpen, setRejectOpen] = useState(false)
   const [dynamicPassword, setDynamicPassword] = useState("")
@@ -128,12 +131,19 @@ export function HitlApprovalDialog({
     effectiveStatus,
   )
 
-  const approveDisabled = isApproveButtonDisabled(
+  const submitState: HitlSubmitState = {
+    canApprove,
     deciding,
+    status: effectiveStatus,
+    proposalId,
+    detail,
     detailLoading,
-    needsDynamicPassword,
-    dynamicPassword,
-  )
+    detailError,
+    needsPassword: needsDynamicPassword,
+    password: dynamicPassword,
+  }
+  const approveAllowed = canSubmitApproval(submitState)
+  const retryAllowed = canSubmitRetry(submitState)
 
   useEffect(() => {
     if (!open) {
@@ -145,6 +155,9 @@ export function HitlApprovalDialog({
     // 若父级未传 detail 且有权限，则内部自动获取
     if (propDetail === undefined && canApprove) {
       let cancelled = false
+      // 页面会把同一个弹窗复用给下一个待审批提案：先丢掉上一个提案的详情，
+      // 否则新详情加载失败时，弹窗会拿旧载荷去批准新提案
+      setInnerDetail(null)
       setInnerLoading(true)
       setInnerError(null)
       void getHitlProposal(proposalId)
@@ -161,12 +174,11 @@ export function HitlApprovalDialog({
         cancelled = true
       }
     }
-  }, [open, propDetail, canApprove, proposalId])
+  }, [open, propDetail, canApprove, proposalId, detailReloadKey])
 
   const handleApproveClick = () => {
-    if (!canApprove || !isPending || deciding || approveDisabled) return
+    if (!approveAllowed) return
     const pwd = dynamicPassword.trim()
-    if (needsDynamicPassword && !pwd) return
 
     // 关键优化：点击批准的第一时间立即关闭弹窗并清空密码，绝不阻塞等待回答输出
     setDynamicPassword("")
@@ -241,6 +253,7 @@ export function HitlApprovalDialog({
   }
 
   const handleRetryClick = () => {
+    if (!retryAllowed) return
     const pwd = dynamicPassword.trim()
     setDynamicPassword("")
     onOpenChange(false)
@@ -314,7 +327,20 @@ export function HitlApprovalDialog({
                   <span>加载动作详情载荷...</span>
                 </div>
               ) : detailError ? (
-                <p className="text-xs text-destructive">{detailError}</p>
+                <div className="flex flex-col items-start gap-2">
+                  <p className="text-xs text-destructive">{detailError}</p>
+                  {/* 详情由父组件传入时，重新加载归父组件管，这里不给一个点了没反应的按钮 */}
+                  {propDetail === undefined ? (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      onClick={() => setDetailReloadKey((key) => key + 1)}
+                    >
+                      重新加载详情
+                    </Button>
+                  ) : null}
+                </div>
               ) : detail ? (
                 <div>
                   <p className="mb-1 text-xs font-medium text-muted-foreground">
@@ -389,7 +415,7 @@ export function HitlApprovalDialog({
                 </Button>
                 <Button
                   type="button"
-                  disabled={approveDisabled}
+                  disabled={!approveAllowed}
                   onClick={handleApproveClick}
                   data-testid="hitl-approve-button"
                 >
@@ -406,11 +432,7 @@ export function HitlApprovalDialog({
             {retryAvailable ? (
               <Button
                 type="button"
-                disabled={
-                  deciding ||
-                  detailLoading ||
-                  (needsDynamicPassword && !dynamicPassword.trim())
-                }
+                disabled={!retryAllowed}
                 onClick={handleRetryClick}
                 data-testid="hitl-retry-button"
               >

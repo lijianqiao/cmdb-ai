@@ -4,10 +4,12 @@
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import "@testing-library/jest-dom/vitest"
+import { AxiosError, AxiosHeaders } from "axios"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { AgentSession } from "@/types/agent"
 import type { OpsChatItem } from "@/hooks/use-ops-chat"
+import type { HitlProposal } from "@/lib/hitl-api"
 
 import { OpsAssistantPage } from "./OpsAssistantPage"
 
@@ -59,6 +61,13 @@ vi.mock("@/lib/agent-api", () => ({
   recoverDeviceQuerySummary: vi.fn(),
 }))
 
+vi.mock("@/lib/hitl-api", () => ({
+  getHitlProposal: vi.fn(),
+  decideHitlProposal: vi.fn(),
+  retryHitlProposal: vi.fn(),
+  resolveUnknownHitlProposal: vi.fn(),
+}))
+
 vi.mock("sonner", () => ({
   toast: {
     success: vi.fn(),
@@ -66,17 +75,22 @@ vi.mock("sonner", () => ({
   },
 }))
 
+import { usePermission } from "@/hooks/use-permission"
 import { useOpsChat } from "@/hooks/use-ops-chat"
 import {
   getDeviceQueryResult,
   listAgentSessions,
   patchAgentSession,
 } from "@/lib/agent-api"
+import { decideHitlProposal, getHitlProposal } from "@/lib/hitl-api"
 
 const mockListAgentSessions = vi.mocked(listAgentSessions)
 const mockPatchAgentSession = vi.mocked(patchAgentSession)
 const mockUseOpsChat = vi.mocked(useOpsChat)
 const mockGetDeviceQueryResult = vi.mocked(getDeviceQueryResult)
+const mockUsePermission = vi.mocked(usePermission)
+const mockGetHitlProposal = vi.mocked(getHitlProposal)
+const mockDecideHitlProposal = vi.mocked(decideHitlProposal)
 
 afterEach(() => {
   cleanup()
@@ -213,5 +227,133 @@ describe("OpsAssistantPage 完整配置会话隔离", () => {
       expect(mockGetDeviceQueryResult).toHaveBeenLastCalledWith(2, 7)
     })
     expect(await screen.findByText("session 2")).toBeInTheDocument()
+  })
+})
+
+describe("OpsAssistantPage 审批弹窗：详情没加载成功不能批准", () => {
+  const pendingProposal: OpsChatItem = {
+    kind: "hitl",
+    id: "hitl:901",
+    proposalId: 901,
+    actionType: "device_control",
+    status: "PENDING",
+    reason: "重启交换机",
+    assetId: 9,
+    resultExcerpt: null,
+    hasFullResult: false,
+  }
+
+  const proposalDetail: HitlProposal = {
+    id: 901,
+    session_id: 1,
+    proposed_by_agent_id: "agent-1",
+    action_type: "device_control",
+    action_payload: { asset_id: 9, proposal_reason: "重启交换机", command: "reboot" },
+    status: "PENDING",
+    reviewed_by_user_id: null,
+    reviewed_at: null,
+    executed_at: null,
+    created_at: "2026-09-21T10:00:00Z",
+    result_excerpt: null,
+    asset_credential_type: "static",
+  }
+
+  const serviceUnavailable = new AxiosError(
+    "Request failed with status code 503",
+    AxiosError.ERR_BAD_RESPONSE,
+    undefined,
+    undefined,
+    {
+      status: 503,
+      statusText: "",
+      data: { detail: "服务暂不可用" },
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    },
+  )
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    Element.prototype.scrollIntoView = vi.fn()
+    mockGetHitlProposal.mockReset()
+    mockDecideHitlProposal.mockReset()
+    mockUsePermission.mockReturnValue({
+      permissions: ["agent:hitl_approve"],
+      hasPermission: () => true,
+      hasAnyPermission: () => true,
+      hasAllPermissions: () => true,
+    })
+    mockListAgentSessions.mockResolvedValue({
+      items: [buildSession(1)],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    })
+    mockUseOpsChat.mockImplementation(({ sessionId }) => ({
+      messages: sessionId == null ? [] : [pendingProposal],
+      isLoadingHistory: false,
+      isSending: false,
+      inputDisabled: false,
+      wsStatus: "open",
+      reconnecting: false,
+      monitorAlert: null,
+      clearMonitorAlert: vi.fn(),
+      sendMessage: vi.fn(),
+      cancelTurn: vi.fn(),
+      reloadSnapshot: vi.fn(),
+      loadOlder: vi.fn(),
+      hasMore: false,
+      isLoadingOlder: false,
+    }))
+  })
+
+  afterEach(() => {
+    // 其它用例按「无审批权限」渲染，别把审批权限漏给它们
+    mockUsePermission.mockReturnValue({
+      permissions: [],
+      hasPermission: () => false,
+      hasAnyPermission: () => false,
+      hasAllPermissions: () => false,
+    })
+  })
+
+  it("详情接口 503 时弹窗的批准按钮禁用，不会发出 approve=true", async () => {
+    mockGetHitlProposal.mockRejectedValue(serviceUnavailable)
+    // 页面会自动选中第一个会话并弹窗；不要再去点侧栏——那算「点弹窗外面」，会把弹窗关掉
+    render(<OpsAssistantPage />)
+
+    const dialog = await screen.findByRole("dialog")
+    expect(await within(dialog).findByText("服务暂不可用")).toBeInTheDocument()
+    const approveButton = within(dialog).getByTestId("hitl-approve-button")
+    expect(approveButton).toBeDisabled()
+    fireEvent.click(approveButton)
+    expect(mockDecideHitlProposal).not.toHaveBeenCalled()
+  })
+
+  it("重新加载详情成功后，才发出一次批准请求", async () => {
+    mockGetHitlProposal.mockRejectedValue(serviceUnavailable)
+    mockDecideHitlProposal.mockResolvedValue({
+      ...proposalDetail,
+      status: "EXECUTED",
+      executed_at: "2026-09-21T10:01:00Z",
+    })
+    render(<OpsAssistantPage />)
+
+    const dialog = await screen.findByRole("dialog")
+    const reloadButton = await within(dialog).findByRole("button", {
+      name: "重新加载详情",
+    })
+    mockGetHitlProposal.mockResolvedValue(proposalDetail)
+    fireEvent.click(reloadButton)
+
+    await waitFor(() => {
+      expect(within(dialog).getByTestId("hitl-approve-button")).toBeEnabled()
+    })
+    fireEvent.click(within(dialog).getByTestId("hitl-approve-button"))
+
+    await waitFor(() => {
+      expect(mockDecideHitlProposal).toHaveBeenCalledTimes(1)
+    })
+    expect(mockDecideHitlProposal).toHaveBeenCalledWith(901, { approve: true })
   })
 })

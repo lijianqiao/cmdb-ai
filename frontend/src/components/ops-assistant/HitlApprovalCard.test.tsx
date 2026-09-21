@@ -4,6 +4,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import "@testing-library/jest-dom/vitest"
+import { AxiosError, AxiosHeaders } from "axios"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { HitlProposal } from "@/lib/hitl-api"
@@ -11,11 +12,13 @@ import type { DeviceQueryResult } from "@/types/agent"
 
 import { HitlApprovalCard } from "./HitlApprovalCard"
 import {
-  isApproveButtonDisabled,
+  canSubmitApproval,
+  canSubmitRetry,
   isRetryAvailable,
   needsDynamicCredentialPassword,
   readLastError,
   shouldShowResultExcerpt,
+  type HitlSubmitState,
 } from "./hitlApprovalCardUtils"
 
 afterEach(() => {
@@ -122,6 +125,44 @@ function buildDeviceQueryResult(
   }
 }
 
+/** 一个「可以批准」的完整状态：各用例只改动自己关心的那一项 */
+function submitState(overrides: Partial<HitlSubmitState> = {}): HitlSubmitState {
+  return {
+    canApprove: true,
+    deciding: false,
+    status: "PENDING",
+    proposalId: 1,
+    detail: buildProposal(),
+    detailLoading: false,
+    detailError: null,
+    needsPassword: false,
+    password: "",
+    ...overrides,
+  }
+}
+
+/** 模拟服务端返回的 HTTP 错误（readErrorMessage 会读出 detail） */
+function httpError(status: number, detail: string): AxiosError {
+  return new AxiosError(
+    `Request failed with status code ${status}`,
+    status >= 500 ? AxiosError.ERR_BAD_RESPONSE : AxiosError.ERR_BAD_REQUEST,
+    undefined,
+    undefined,
+    {
+      status,
+      statusText: "",
+      data: { detail },
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    },
+  )
+}
+
+/** 模拟请求根本没到服务端（断网、代理断开） */
+function networkError(): AxiosError {
+  return new AxiosError("Network Error", AxiosError.ERR_NETWORK)
+}
+
 describe("HitlApprovalCard 执行结果展示（纯函数）", () => {
   it("EXECUTED 且 result_excerpt 有值时应展示", () => {
     expect(shouldShowResultExcerpt("EXECUTED", "show version")).toBe(true)
@@ -151,21 +192,49 @@ describe("HitlApprovalCard 动态凭据密码（纯函数）", () => {
   })
 
   it("device_query + dynamic 时密码为空应禁用批准按钮", () => {
-    expect(isApproveButtonDisabled(false, false, true, "")).toBe(true)
-    expect(isApproveButtonDisabled(false, false, true, "   ")).toBe(true)
+    expect(canSubmitApproval(submitState({ needsPassword: true, password: "" }))).toBe(false)
+    expect(canSubmitApproval(submitState({ needsPassword: true, password: "   " }))).toBe(false)
   })
 
   it("填写密码后应允许批准（未在加载/提交中）", () => {
-    expect(isApproveButtonDisabled(false, false, true, "secret")).toBe(false)
+    expect(canSubmitApproval(submitState({ needsPassword: true, password: "secret" }))).toBe(true)
   })
 
   it("不需要动态密码时不因密码为空而禁用", () => {
-    expect(isApproveButtonDisabled(false, false, false, "")).toBe(false)
+    expect(canSubmitApproval(submitState({ needsPassword: false, password: "" }))).toBe(true)
   })
 
   it("加载或提交中始终禁用批准", () => {
-    expect(isApproveButtonDisabled(true, false, false, "x")).toBe(true)
-    expect(isApproveButtonDisabled(false, true, false, "x")).toBe(true)
+    expect(canSubmitApproval(submitState({ deciding: true }))).toBe(false)
+    expect(canSubmitApproval(submitState({ detailLoading: true }))).toBe(false)
+  })
+})
+
+describe("HitlApprovalCard 批准/重试前置条件（纯函数）", () => {
+  it("详情没加载到、加载失败或不属于当前提案时不能批准", () => {
+    expect(canSubmitApproval(submitState({ detail: null }))).toBe(false)
+    expect(canSubmitApproval(submitState({ detailError: "加载审批详情失败" }))).toBe(false)
+    expect(canSubmitApproval(submitState({ detail: buildProposal({ id: 2 }) }))).toBe(false)
+  })
+
+  it("无审批权限或状态不是 PENDING 时不能批准", () => {
+    expect(canSubmitApproval(submitState({ canApprove: false }))).toBe(false)
+    expect(canSubmitApproval(submitState({ status: "APPROVED" }))).toBe(false)
+  })
+
+  it("重试沿用同样的详情前置条件，但只允许 APPROVED", () => {
+    expect(canSubmitRetry(submitState({ status: "APPROVED" }))).toBe(true)
+    expect(canSubmitRetry(submitState({ status: "PENDING" }))).toBe(false)
+    expect(canSubmitRetry(submitState({ status: "APPROVED", detail: null }))).toBe(false)
+    expect(
+      canSubmitRetry(submitState({ status: "APPROVED", detailError: "加载审批详情失败" })),
+    ).toBe(false)
+    expect(
+      canSubmitRetry(submitState({ status: "APPROVED", detail: buildProposal({ id: 2 }) })),
+    ).toBe(false)
+    expect(
+      canSubmitRetry(submitState({ status: "APPROVED", needsPassword: true, password: " " })),
+    ).toBe(false)
   })
 })
 
@@ -453,6 +522,127 @@ describe("HitlApprovalCard 审批状态会话隔离", () => {
       expect(screen.queryByText("加载审批详情失败")).not.toBeInTheDocument()
       expect(screen.getByText("加载完整载荷…")).toBeInTheDocument()
     })
+    expect(mockGetHitlProposal).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe("HitlApprovalCard 详情未就绪时禁止批准/重试", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetHitlProposal.mockReset()
+    mockDecideHitlProposal.mockReset()
+    mockRetryHitlProposal.mockReset()
+    mockUsePermission.mockReturnValue(permissionResult(true))
+  })
+
+  function approvalCard({ proposalId = 1, status = "PENDING" } = {}) {
+    return (
+      <HitlApprovalCard
+        sessionId={10}
+        proposalId={proposalId}
+        actionType="device_query"
+        status={status}
+        reason="排查交换机"
+        assetId={9}
+        hasFullResult={false}
+      />
+    )
+  }
+
+  it.each([
+    ["403", httpError(403, "无权查看该提案"), "无权查看该提案"],
+    ["404", httpError(404, "提案不存在"), "提案不存在"],
+    ["503", httpError(503, "服务暂不可用"), "服务暂不可用"],
+    ["网络中断", networkError(), "加载审批详情失败"],
+  ])("详情加载失败（%s）时批准按钮禁用，点击也不发请求", async (_label, error, message) => {
+    mockGetHitlProposal.mockRejectedValue(error)
+    render(approvalCard())
+
+    expect(await screen.findByText(message)).toBeInTheDocument()
+    const approveButton = screen.getByTestId("hitl-approve-button")
+    expect(approveButton).toBeDisabled()
+    fireEvent.click(approveButton)
+    expect(mockDecideHitlProposal).not.toHaveBeenCalled()
+  })
+
+  it("APPROVED 但详情加载失败时重试按钮禁用，点击也不发请求", async () => {
+    mockGetHitlProposal.mockRejectedValue(httpError(503, "服务暂不可用"))
+    render(approvalCard({ status: "APPROVED" }))
+
+    expect(await screen.findByText("服务暂不可用")).toBeInTheDocument()
+    const retryButton = screen.getByTestId("hitl-retry-button")
+    expect(retryButton).toBeDisabled()
+    fireEvent.click(retryButton)
+    expect(mockRetryHitlProposal).not.toHaveBeenCalled()
+  })
+
+  it("切换提案后旧详情迟到、新详情失败时，不能拿旧载荷批准新提案", async () => {
+    let resolveOldDetail!: (value: HitlProposal) => void
+    mockGetHitlProposal
+      .mockReturnValueOnce(
+        new Promise<HitlProposal>((resolve) => {
+          resolveOldDetail = resolve
+        }),
+      )
+      .mockRejectedValueOnce(httpError(503, "服务暂不可用"))
+
+    const { rerender } = render(approvalCard({ proposalId: 1 }))
+    rerender(approvalCard({ proposalId: 2 }))
+    expect(await screen.findByText("服务暂不可用")).toBeInTheDocument()
+
+    await act(async () => {
+      resolveOldDetail(
+        buildProposal({
+          id: 1,
+          asset_credential_type: "static",
+          action_payload: { asset_id: 9, command: "proposal-1-command" },
+        }),
+      )
+    })
+
+    expect(screen.queryByText(/proposal-1-command/)).not.toBeInTheDocument()
+    const approveButton = screen.getByTestId("hitl-approve-button")
+    expect(approveButton).toBeDisabled()
+    fireEvent.click(approveButton)
+    expect(mockDecideHitlProposal).not.toHaveBeenCalled()
+  })
+
+  it("详情失败时拒绝仍可用：拒绝不需要看载荷，也不需要设备密码", async () => {
+    mockGetHitlProposal.mockRejectedValue(httpError(503, "服务暂不可用"))
+    render(approvalCard())
+
+    expect(await screen.findByText("服务暂不可用")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "拒绝" })).toBeEnabled()
+  })
+
+  it("重新加载详情成功后才恢复批准，且只发出一次批准请求", async () => {
+    mockGetHitlProposal.mockRejectedValueOnce(httpError(503, "服务暂不可用"))
+    mockDecideHitlProposal.mockResolvedValue(
+      buildProposal({
+        status: "EXECUTED",
+        executed_at: "2026-08-12T10:01:00Z",
+        asset_credential_type: "static",
+      }),
+    )
+    render(approvalCard())
+
+    const reloadButton = await screen.findByRole("button", { name: "重新加载详情" })
+    expect(screen.getByTestId("hitl-approve-button")).toBeDisabled()
+
+    mockGetHitlProposal.mockResolvedValueOnce(
+      buildProposal({ asset_credential_type: "static" }),
+    )
+    fireEvent.click(reloadButton)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("hitl-approve-button")).toBeEnabled()
+    })
+    fireEvent.click(screen.getByTestId("hitl-approve-button"))
+
+    await waitFor(() => {
+      expect(mockDecideHitlProposal).toHaveBeenCalledTimes(1)
+    })
+    expect(mockDecideHitlProposal).toHaveBeenCalledWith(1, { approve: true })
     expect(mockGetHitlProposal).toHaveBeenCalledTimes(2)
   })
 })
