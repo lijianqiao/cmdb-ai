@@ -8,6 +8,8 @@ from sqlalchemy.orm import selectinload
 
 from app.core.security import hash_password_async, verify_and_update_password
 from app.crud.base import CRUDBase, ModelData, RelatedObjectsNotFoundError, contains_pattern
+from app.models.agent_session import AgentSession
+from app.models.hitl_proposal import HitlProposal
 from app.models.permission import Permission
 from app.models.role import Role, role_permissions
 from app.models.user import User, user_roles
@@ -15,6 +17,17 @@ from app.models.user import User, user_roles
 
 class LastActiveSuperuserError(ValueError):
     """Raised when an operation would remove the final active superuser."""
+
+
+class UserHasEvidenceError(ValueError):
+    """Raised when purging a user would destroy or orphan HITL approval evidence."""
+
+    def __init__(self, proposal_count: int) -> None:
+        self.proposal_count = proposal_count
+        super().__init__(
+            f"该用户关联 {proposal_count} 条审批/执行证据（申请、审批或核实），"
+            "为保证可追溯不能永久删除；可以继续留在回收站"
+        )
 
 
 class CRUDUser(CRUDBase[User]):
@@ -419,6 +432,25 @@ class CRUDUser(CRUDBase[User]):
         user = (await db.execute(stmt)).scalar_one_or_none()
         if user is None:
             return False
+        # 审批证据不随用户销毁（R4）：用户会话里的提案会被外键 RESTRICT 挡住，
+        # 但申请人/审批人/核实人字段是 SET NULL，删掉用户会悄悄抹掉「谁批的」。
+        # 两种都在这里先查出来，给出能看懂的冲突原因。
+        evidence_count = await db.scalar(
+            select(func.count())
+            .select_from(HitlProposal)
+            .where(
+                or_(
+                    HitlProposal.session_id.in_(
+                        select(AgentSession.id).where(AgentSession.user_id == user_id)
+                    ),
+                    HitlProposal.requested_by_user_id == user_id,
+                    HitlProposal.reviewed_by_user_id == user_id,
+                    HitlProposal.resolved_by_user_id == user_id,
+                )
+            )
+        )
+        if evidence_count:
+            raise UserHasEvidenceError(evidence_count)
         await db.delete(user)
         await db.flush()
         return True

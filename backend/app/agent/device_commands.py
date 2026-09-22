@@ -310,6 +310,22 @@ def command_type_of(command_name: str) -> CommandType | None:
     return definition.command_type if definition else None
 
 
+def rendered_command_lines(
+    command_name: str, vendor: str, *, interface_name: str | None
+) -> tuple[str, ...]:
+    """返回这条命令在该厂商上实际下发的命令行：config 模式按接口名填好模板，exec 模式一行。
+
+    执行器和审批证据快照都用它，保证证据里记的就是真正发出去的内容。
+    """
+    definition = get_device_command(command_name)
+    if definition.config_templates is not None and vendor in definition.config_templates:
+        return tuple(
+            line.format(interface=interface_name)
+            for line in definition.config_templates[vendor]  # type: ignore[index]
+        )
+    return (get_command_template(command_name, vendor),)
+
+
 def get_command_template(command_name: str, vendor: str) -> str:
     """返回 (命令名, 厂商) 组合对应的真实命令字符串。
 

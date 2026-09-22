@@ -276,7 +276,7 @@ classDiagram
 | CMDB 变更记录、知识文档归类结果、CMDB↔监控差异巡检发现，**全部复用现有 `audit_logs` 表**，不新建审计表                                     | 现有 `utils.audit.log_audit()` 已经是通用工具；新增 `action` 枚举值即可，避免重复造轮子                                     |
 | `AgentRegistry` 就是 [guide.md 7.4](./guide.md#74-childreceipt每次-spawn-必有回执) 的 `ChildReceipt` 落地为表                              | 注册表必须能在压缩/断线后独立查询，不依赖对话正文（guide.md 6.3）                                                           |
 | `AgentTraceEvent` 字段直接照抄 [guide.md 8.3](./guide.md#83-日志字段建议)                                                                  | 保证"卡在哪一步"可回答                                                                                                      |
-| `HitlExecutionResult` 以 `proposal_id` 唯一关联 `device_query`，正文与总结状态独立于 `action_payload`                                      | 完整设备回显可按需读取、不会膨胀提案摘要；删除会话时经 proposal 外键链级联删除结果                                            |
+| `HitlExecutionResult` 以 `proposal_id` 唯一关联 `device_query`，正文与总结状态独立于 `action_payload`                                      | 完整设备回显可按需读取、不会膨胀提案摘要；结果随提案作为证据保留，会话归档不影响它（提案对会话的外键是 RESTRICT）            |
 
 ### 4. Agent 角色目录与工具契约
 
@@ -446,6 +446,7 @@ APPROVED ──preflight: policy_blacklisted──> REJECTED
 EXECUTING ──dispatch_failed_before_send──> APPROVED（确定未下发，可直接重试）
 UNKNOWN ──confirm_executed──> EXECUTED（人工确认）
 UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
+PENDING ──会话归档──> REJECTED（status_reason=withdrawn_on_archive，申请人撤回）
 ```
 
 对应 `HitlProposal.status`，硬规则：
@@ -460,6 +461,7 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 - 待审批期间，`action_payload` 中的敏感字段不通过 WebSocket 回传给发起对话的 Agent 上下文，Agent 只收到"提案已创建，等待审批"的摘要
 - 新增权限码 `agent:hitl_approve`，只有持有该权限的用户能操作 `PENDING → APPROVED/REJECTED`、`UNKNOWN` 人工处置，以及 `POST /api/v1/hitl/proposals/{id}/retry`（复用现有 RBAC，不新建权限体系）
 - 独立权限码 `agent:auto_execute`（种子不分配给任何角色）：只有持有它才能把会话切到 `assist`/`full`（否则 `PATCH` 返回 403，切回 `ask` 永远放行）；门控每个提案都按发起人**当时**的权限判断档位是否生效，会话里存着 `full` 而账号没有该权限时按 `ask` 处理
+- **审批证据独立于聊天（R4）**：提案创建时写入申请人 `requested_by_user_id` 与当时的资产/命令快照 `evidence_snapshot`（资产标识、IP、厂商、凭据类型，命令名、风险分级、目录版本和实际下发的命令行；不含凭据用户名和密码），审批时写入 `approval_method`（`manual` / `auto:<档位>`）。`hitl_proposals.session_id` 外键为 `RESTRICT`：任何入口都不能随会话或用户级联删除提案；永久删除用户前先查该用户作为会话所有者、申请人、审批人或核实人关联的提案，有则返回 409。`GET /api/v1/hitl/proposals/{id}` 允许审批人（`agent:hitl_approve`）或审计员（`audit:read`）查看，审计员可按审计项里的 `hitl_proposal:<id>` 定位证据。迁移前的旧提案只回填能确认的申请人与审批方式，快照留空
 - **执行前复核授权**：`_preflight_and_claim` 在认领 `EXECUTING` 之前复核触发人此刻的账号状态与权限——人工审批/重试路径看 `agent:hitl_approve`，档位自动批准看 `agent:auto_execute`，互不要求对方的权限；不通过则不认领、不下发，提案保持 `APPROVED` 并把原因写入 `last_error`。已经下发的命令无法撤回，照常记录真实结果或 `UNKNOWN`
 
 **`device_query` 结果交付**：`DeviceQueryExecutor` 在内存中返回完整原始输出；执行收尾仅为查询拆分两种数据。完整正文写入 `HitlExecutionResult.content`，只可作为隔离、无工具的总结服务临时不可信输入，或由当前会话所有者通过专用 GET 按需读取；它不进入普通 `agent_messages` / 模型历史、WebSocket、快照、审计或日志。与之对应的 4000 字符 `last_result_excerpt` 预览可进入 HITL 安全摘要、WebSocket 和普通 Agent 工具上下文。
@@ -500,6 +502,8 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 **Session 最小模型**直接对应 [guide.md 6.1](./guide.md#61-session-最小模型)：`AgentSession` + `AgentMessage` 承担 `messages[]`（完整审计历史，不删除）；`meta` 中的"授权集合/预算/子 Agent 注册表"不塞进 JSON 字段，而是用独立的 `AgentRegistry` 表——这样查询和 GC 更容易，也符合 guide.md"注册表不依赖对话正文"的要求（防止压缩后对话文本里丢了 `child_id`，注册表仍占槽）。
 
 **Turn token 串行化**：`AgentSession.active_turn_token` 保证同一会话同一时刻只有一个活跃 turn。`POST /api/v1/agent/sessions/{session_id}/messages` 在短事务内认领 token 后才启动 `run_chat_turn`；进程启动时 `recover_active_turns` 清空遗留 token，避免崩溃后永久锁死。
+
+**会话归档而不是删除（R4）**：`DELETE /api/v1/agent/sessions/{session_id}` 只把会话 `status` 置为 `archived`——列表、快照、发消息、改档位、WebSocket 对所有者也按不存在处理，`claim_turn` 拒绝归档会话，消息与提案全部保留。检查与更新在同一事务内按「会话行 → 该会话未结束的提案行」加锁：有未超时的活跃 turn、运行中的子 Agent，或 `APPROVED`/`EXECUTING`/`UNKNOWN` 提案时返回 409 并说明原因；`PENDING` 提案随归档撤回（转 `REJECTED` + `withdrawn_on_archive`，逐条写 `hitl_withdrawn` 审计），归档后会话里只剩已结束的提案。不能用拒绝归档来处理 `PENDING`：没有审批权限的用户拒绝不了自己的提案，聊天就永远收不起来。知识库分类作业的临时会话不产生提案，仍按原方式物理删除
 
 **快照恢复 vs WebSocket 加速**：
 

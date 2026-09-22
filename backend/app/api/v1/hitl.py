@@ -6,7 +6,8 @@
 @Docs: HITL 提案查询与人工审批 HTTP API。
 
 实现流程：
-1. 全部端点以 agent:hitl_approve 门控，审批人可看到完整 action_payload。
+1. 审批/重试/核实与列表端点以 agent:hitl_approve 门控，审批人可看到完整 action_payload；
+   单个提案详情另允许审计员（audit:read）查看，用于按审计项里的提案 ID 查证据（R4）。
 2. 列表与详情直接复用 hitl_proposal_crud 的会话查询与按 ID 读取。
 3. 审批接口调用 decide_proposal；仅在批准时再调用 resume_proposal（拒绝不恢复执行）。
 4. 人工批准或重试成功的 device_query 通过独立短会话生成并持久化总结；总结失败不改变设备执行结果。
@@ -32,9 +33,10 @@ from app.agent.hitl import (
 )
 from app.agent.ws_hub import BufferedWsHitlEventPublisher, hub
 from app.core.database import get_db
-from app.core.deps import get_client_ip, require_permission
+from app.core.deps import get_client_ip, get_current_user, require_permission
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.hitl_proposal import InvalidHitlTransitionError, hitl_proposal_crud
+from app.crud.user import user_crud
 from app.models.user import User
 from app.schemas.agent_ws import AgentWsServerMessage
 from app.schemas.common import ResponseEnvelope, success_response
@@ -176,9 +178,21 @@ async def list_proposals(
 async def get_proposal(
     proposal_id: int,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_permission("agent:hitl_approve")),
+    current_user: User = Depends(get_current_user),
 ) -> ResponseEnvelope[HitlProposalResponse]:
-    """获取单个 HITL 提案；不存在时返回 404。"""
+    """获取单个 HITL 提案（含申请人、审批方式与当时快照）；不存在时返回 404。
+
+    审批人或审计员可查：审计员从审计项里的 hitl_proposal:<id> 定位到提案，不必持有
+    审批权限；会话归档后提案照样可查。先判权限再查提案，避免借 404 枚举提案 ID。
+    """
+    if not (
+        await user_crud.has_permission_or_superuser(db, current_user, "agent:hitl_approve")
+        or await user_crud.has_permission_or_superuser(db, current_user, "audit:read")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权限查看提案（需要权限：agent:hitl_approve 或 audit:read）",
+        )
     proposal = await hitl_proposal_crud.get(db, proposal_id)
     if proposal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HITL 提案不存在")

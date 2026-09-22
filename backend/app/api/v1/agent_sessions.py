@@ -3,15 +3,17 @@
 @Email: lijianqiao2906@live.com
 @FileName: agent_sessions.py
 @DateTime: 2026-08-13
-@Docs: Agent 会话 REST API：创建、列表、详情、硬删除、历史与发消息触发 chat turn。
+@Docs: Agent 会话 REST API：创建、列表、详情、归档、历史与发消息触发 chat turn。
 
 实现流程：
 1. 全部端点走 require_permission("agent:use")：会话校验与权限判定合并一次查询，
    超管自动放行；没有这个权限的用户完全用不了运维助手（旧版本只做登录校验，
    任何登录用户都能用，属于遗留的权限缺口，这里补上）。
 2. 创建会话时写入当前用户 user_id，status 固定为 active；列表复用 list_for_user 分页。
-3. 详情 / 删除 / 消息历史先查会话，非所有者或不存在一律 404，避免枚举他人会话 ID。
-4. DELETE 为物理删除；消息、HITL、registry、trace 依赖库级 ON DELETE CASCADE。
+3. 详情 / 归档 / 消息历史先查会话，非所有者、不存在或已归档一律 404，避免枚举他人会话 ID。
+4. DELETE 只归档不销毁（R4）：会话从所有者视野里收起，提案与执行结果作为证据保留；
+   还有 turn、子 Agent 或待执行/执行中/结果不确定的提案时返回 409 说明原因；
+   还没审批的提案随归档撤回，逐条写 hitl_withdrawn 审计。
 5. 消息历史优先用 list_for_agent(..., agent_id=None) 只返回根 transcript，按 id 升序。
 6. POST messages：归属校验后 claim turn 租约 → 落库用户消息 → run_chat_turn；
    整轮结束后一次 commit；HITL 事件经 BufferedWsHitlEventPublisher 在 commit 之后再广播。
@@ -86,7 +88,10 @@ async def _owned_session_or_404(
     user_id: int,
 ) -> AgentSession:
     """
-    返回当前用户拥有的会话；不存在或非所有者时抛 404。
+    返回当前用户拥有的未归档会话；不存在、非所有者或已归档时抛 404。
+
+    归档的会话对所有者也表现为不存在：不能再发消息、读快照或改档位，
+    提案证据改由审批/审计权限按提案 ID 查询。
 
     Args:
         db: 数据库会话
@@ -97,10 +102,10 @@ async def _owned_session_or_404(
         归属校验通过的 AgentSession
 
     Raises:
-        HTTPException: 会话不存在或不属于当前用户时 404
+        HTTPException: 会话不存在、不属于当前用户或已归档时 404
     """
     session = await agent_session_crud.get(db, session_id)
-    if session is None or session.user_id != user_id:
+    if session is None or session.user_id != user_id or session.status != "active":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="会话不存在",
@@ -376,6 +381,17 @@ async def patch_session_approval_mode(
     return success_response(AgentSessionResponse.model_validate(session))
 
 
+# 拒绝归档时告诉用户还差什么；聊天一收起就没人能继续核实这些事了
+_ARCHIVE_REFUSAL_MESSAGES: dict[str, str] = {
+    "active_turn": "这个会话还有一轮对话正在进行，请等它结束或先停止后再归档",
+    "active_children": "这个会话还有子 Agent 在运行，请等它们结束后再归档",
+    "unsettled_proposals": (
+        "这个会话还有已批准待执行、执行中或结果不确定的提案，"
+        "请先重试执行或人工核实结果后再归档"
+    ),
+}
+
+
 @router.delete(
     "/sessions/{session_id}",
     response_model=ResponseEnvelope[None],
@@ -385,16 +401,29 @@ async def delete_session(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("agent:use")),
 ) -> ResponseEnvelope[None]:
-    """硬删除当前用户拥有的会话；非所有者或不存在返回 404。"""
+    """归档当前用户拥有的会话（聊天收起，证据保留）；非所有者或不存在返回 404。"""
     await _owned_session_or_404(db, session_id, current_user.id)
-    deleted = await agent_session_crud.hard_delete(db, session_id)
-    if not deleted:
+    result = await agent_session_crud.archive(db, session_id)
+    if result.outcome == "not_found":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="会话不存在",
         )
+    if result.outcome != "archived":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_ARCHIVE_REFUSAL_MESSAGES[result.outcome],
+        )
+    for proposal_id in result.withdrawn_proposal_ids:
+        await log_audit(
+            db,
+            user_id=current_user.id,
+            action="hitl_withdrawn",
+            target=f"hitl_proposal:{proposal_id}",
+            detail="会话归档时撤回待审批提案",
+        )
     await db.commit()
-    return success_response(None, message="删除成功")
+    return success_response(None, message="已归档")
 
 
 @router.get(

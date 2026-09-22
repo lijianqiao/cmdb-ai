@@ -1,7 +1,7 @@
 /** 运维助手 Chat 页
 
  * 左侧会话列表 + 右侧消息/输入；会话 REST + useOpsChat（含 WS）。
- * 有 knowledge:upload 时展示知识库上传入口；会话可硬删除。
+ * 有 knowledge:upload 时展示知识库上传入口；会话可归档（聊天收起，审批与执行记录保留）。
  */
 
 import { useCallback, useEffect, useState } from "react"
@@ -10,7 +10,7 @@ import { toast } from "sonner"
 
 import {
   AiChat01Icon,
-  Delete02Icon,
+  Archive02Icon,
   PanelLeftIcon,
   PlusSignIcon,
 } from "@/lib/icons"
@@ -45,7 +45,7 @@ import { PERMISSIONS } from "@/lib/constants"
 import { useOpsChat } from "@/hooks/use-ops-chat"
 import {
   createAgentSession,
-  deleteAgentSession,
+  archiveAgentSession,
   listAgentSessions,
   patchAgentSession,
 } from "@/lib/agent-api"
@@ -80,7 +80,7 @@ export function OpsAssistantPage() {
   const [creating, setCreating] = useState(false)
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [deleteTarget, setDeleteTarget] = useState<AgentSession | null>(null)
+  const [archiveTarget, setArchiveTarget] = useState<AgentSession | null>(null)
   const [fullAccessTargetSessionId, setFullAccessTargetSessionId] =
     useState<number | null>(null)
   const [patchingApprovalMode, setPatchingApprovalMode] = useState(false)
@@ -171,22 +171,23 @@ export function OpsAssistantPage() {
     }
   }
 
-  const handleDeleteConfirm = async (): Promise<boolean> => {
-    if (deleteTarget == null) return false
-    const deletingId = deleteTarget.id
+  const handleArchiveConfirm = async (): Promise<boolean> => {
+    if (archiveTarget == null) return false
+    const archivingId = archiveTarget.id
     try {
-      await deleteAgentSession(deletingId)
-      toast.success("会话已删除")
-      const remaining = sessions.filter((row) => row.id !== deletingId)
+      await archiveAgentSession(archivingId)
+      toast.success("会话已归档")
+      const remaining = sessions.filter((row) => row.id !== archivingId)
       setSessions(remaining)
       setSelectedSessionId((current) => {
-        if (current !== deletingId) return current
+        if (current !== archivingId) return current
         return remaining[0]?.id ?? null
       })
-      setDeleteTarget(null)
+      setArchiveTarget(null)
       return true
-    } catch {
-      toast.error("删除会话失败")
+    } catch (error) {
+      // 409 时服务端会说明还差什么（进行中的对话、子 Agent、待核实的提案）
+      toast.error(readErrorMessage(error, "归档会话失败"))
       return false
     }
   }
@@ -314,15 +315,16 @@ export function OpsAssistantPage() {
       ) : null}
 
       <ConfirmDialog
-        open={deleteTarget != null}
+        open={archiveTarget != null}
         onOpenChange={(open) => {
-          if (!open) setDeleteTarget(null)
+          if (!open) setArchiveTarget(null)
         }}
-        title="确认删除会话"
-        description={`确定要删除「${
-          deleteTarget?.title || `会话 #${deleteTarget?.id ?? ""}`
-        }」吗？消息与相关记录将一并永久删除，不可恢复。`}
-        onConfirm={handleDeleteConfirm}
+        title="确认归档会话"
+        description={`归档后「${
+          archiveTarget?.title || `会话 #${archiveTarget?.id ?? ""}`
+        }」会从列表中移除，不能再继续对话；还没审批的提案会被撤回。审批与执行记录会保留，供审批人和审计员查询。`}
+        confirmText="确认归档"
+        onConfirm={handleArchiveConfirm}
       />
 
       <Dialog
@@ -455,13 +457,13 @@ export function OpsAssistantPage() {
                         variant="ghost"
                         size="icon-sm"
                         className="mr-1 mt-1 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
-                        aria-label={`删除会话 ${session.title || session.id}`}
+                        aria-label={`归档会话 ${session.title || session.id}`}
                         onClick={(event) => {
                           event.stopPropagation()
-                          setDeleteTarget(session)
+                          setArchiveTarget(session)
                         }}
                       >
-                        <Delete02Icon className="size-3.5" />
+                        <Archive02Icon className="size-3.5" />
                       </Button>
                     </div>
                   )

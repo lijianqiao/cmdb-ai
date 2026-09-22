@@ -23,11 +23,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.device_commands import (
+    DEVICE_COMMAND_CATALOG_VERSION,
     command_supports_vendor,
     command_type_of,
     get_device_command,
     list_command_names,
     list_commands_for_vendor,
+    rendered_command_lines,
     validate_interface_name,
 )
 from app.agent.permissions import HITL_APPROVE, effective_approval_mode
@@ -276,6 +278,19 @@ async def gate_action(
     if asset is None:
         raise HitlProposalRejectedError(f"CMDB 资产不存在：{asset_id}")
 
+    # 证据快照：资产之后可能改名、换 IP、换厂商，审计要看到的是提案当时的样子（R4）。
+    # 只记标识与类型，不记凭据用户名和密码。
+    evidence_snapshot: dict[str, object] = {
+        "asset": {
+            "id": asset.id,
+            "hostname": asset.hostname,
+            "ip_address": asset.ip_address,
+            "asset_type": asset.asset_type,
+            "vendor": asset.vendor,
+            "credential_type": asset.credential_type,
+        }
+    }
+
     if action_type in ("device_query", "device_control"):
         command_name = stored_payload["command_name"]
         assert isinstance(command_name, str)
@@ -320,6 +335,19 @@ async def gate_action(
         )
         if policy_decision == "blacklist":
             raise HitlProposalRejectedError("该命令已被列入黑名单，禁止执行")
+
+        evidence_snapshot["command"] = {
+            "name": command_name,
+            "type": command_type,
+            "catalog_version": DEVICE_COMMAND_CATALOG_VERSION,
+            "rendered": list(
+                rendered_command_lines(
+                    command_name,
+                    asset.vendor,
+                    interface_name=interface_name if isinstance(interface_name, str) else None,
+                )
+            ),
+        }
     else:
         policy_decision = None
 
@@ -338,6 +366,8 @@ async def gate_action(
         proposed_by_agent_id=proposed_by_agent_id,
         action_type=action_type,
         action_payload=stored_payload,
+        requested_by_user_id=actor_user_id,
+        evidence_snapshot=evidence_snapshot,
     )
     await _publish(publisher, proposal=proposal, event_type="hitl_pending")
 
@@ -399,6 +429,9 @@ async def decide_proposal(
         proposal_id,
         approve=approve,
         reviewed_by_user_id=reviewed_by_user_id,
+        approval_method=(
+            f"auto:{auto_approval_mode}" if auto_approval_mode is not None else "manual"
+        ),
     )
     if not approve:
         action = "hitl_rejected"

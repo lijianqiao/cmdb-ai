@@ -11,6 +11,7 @@ import asyncio
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1 import agent_sessions as agent_sessions_api
@@ -20,6 +21,7 @@ from app.crud.agent_registry import agent_registry_crud
 from app.crud.agent_session import agent_session_crud
 from app.crud.hitl_execution_result import hitl_execution_result_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
+from app.models.audit_log import AuditLog
 from app.models.permission import Permission
 from app.models.role import Role, role_permissions
 from app.models.user import User
@@ -421,7 +423,7 @@ async def test_list_messages_root_transcript_only(
     assert denied.status_code == 404
 
 
-async def test_delete_session_hard_and_cascade(
+async def test_delete_session_archives_instead_of_destroying(
     client: AsyncClient,
     db_session: AsyncSession,
     test_user: User,
@@ -429,7 +431,7 @@ async def test_delete_session_hard_and_cascade(
     auth_headers: Headers,
     login_user,
 ) -> None:
-    """所有者可硬删会话；消息级联删除；非所有者 404。"""
+    """删除聊天 = 归档（R4）：会话从所有者视野里消失，但消息不被销毁；非所有者 404。"""
     session = await agent_session_crud.create(
         db_session,
         {"user_id": test_user.id, "title": "待删除", "status": "active"},
@@ -439,7 +441,7 @@ async def test_delete_session_hard_and_cascade(
         db_session,
         session_id=session.id,
         role="user",
-        content="将被级联删除",
+        content="归档后仍保留",
         agent_id=None,
     )
     await db_session.commit()
@@ -470,7 +472,138 @@ async def test_delete_session_hard_and_cascade(
         session_id,
         agent_id=None,
     )
-    assert messages == []
+    assert [message.content for message in messages] == ["归档后仍保留"]
+    db_session.expire_all()
+    archived = await agent_session_crud.get(db_session, session_id)
+    assert archived is not None and archived.status == "archived"
+
+
+async def test_archiving_keeps_approval_and_execution_evidence(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    grant_permissions,
+) -> None:
+    """审查报告 R4 的复现：已执行的设备变更提案，发起人删除会话后提案不见了。
+    现在删除只归档：提案、完整执行结果都还在，审批人仍能按提案 ID 查到。"""
+    session = await agent_session_crud.create(
+        db_session, {"user_id": test_user.id, "title": "变更留痕", "status": "active"}
+    )
+    await db_session.flush()
+    proposal = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session.id,
+        proposed_by_agent_id=None,
+        action_type="device_query",
+        action_payload={"asset_id": 1, "command_name": "show_version"},
+    )
+    proposal.status = "EXECUTED"
+    await db_session.flush()
+    await hitl_execution_result_crud.create_for_proposal(
+        db_session, proposal_id=proposal.id, content="Cisco IOS XE Software"
+    )
+    await db_session.commit()
+    session_id, proposal_id = session.id, proposal.id
+    await grant_permissions(test_user, "agent:hitl_approve")
+
+    archived = await client.delete(f"/api/v1/agent/sessions/{session_id}", headers=auth_headers)
+    assert archived.status_code == 200, archived.text
+
+    db_session.expire_all()
+    assert await hitl_proposal_crud.get(db_session, proposal_id) is not None
+    assert await hitl_execution_result_crud.get_by_proposal(db_session, proposal_id) is not None
+    evidence = await client.get(f"/api/v1/hitl/proposals/{proposal_id}", headers=auth_headers)
+    assert evidence.status_code == 200, evidence.text
+    assert evidence.json()["data"]["status"] == "EXECUTED"
+
+
+@pytest.mark.parametrize("status", ["APPROVED", "EXECUTING", "UNKNOWN"])
+async def test_archive_refused_while_proposal_unsettled(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    status: str,
+) -> None:
+    session = await agent_session_crud.create(
+        db_session, {"user_id": test_user.id, "title": "还在执行", "status": "active"}
+    )
+    await db_session.flush()
+    proposal = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session.id,
+        proposed_by_agent_id=None,
+        action_type="device_control",
+        action_payload={"asset_id": 1, "command_name": "reboot"},
+    )
+    proposal.status = status
+    await db_session.commit()
+
+    response = await client.delete(f"/api/v1/agent/sessions/{session.id}", headers=auth_headers)
+
+    assert response.status_code == 409, response.text
+    assert "提案" in response.json()["message"]
+    listed = await client.get("/api/v1/agent/sessions", headers=auth_headers)
+    assert [item["id"] for item in listed.json()["data"]["items"]] == [session.id]
+
+
+async def test_archive_withdraws_pending_proposal_with_audit_trail(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+) -> None:
+    """归档时撤回待审批提案，并按提案 ID 留下审计记录，事后能查到是谁、何时撤回的。"""
+    session = await agent_session_crud.create(
+        db_session, {"user_id": test_user.id, "title": "不做了", "status": "active"}
+    )
+    await db_session.flush()
+    proposal = await hitl_proposal_crud.create(
+        db_session,
+        session_id=session.id,
+        proposed_by_agent_id=None,
+        action_type="device_control",
+        action_payload={"asset_id": 1, "command_name": "reboot"},
+    )
+    await db_session.commit()
+    session_id, proposal_id, user_id = session.id, proposal.id, test_user.id
+
+    response = await client.delete(f"/api/v1/agent/sessions/{session_id}", headers=auth_headers)
+
+    assert response.status_code == 200, response.text
+    db_session.expire_all()
+    withdrawn = await hitl_proposal_crud.get(db_session, proposal_id)
+    assert withdrawn is not None and withdrawn.status == "REJECTED"
+    audits = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.target == f"hitl_proposal:{proposal_id}")
+        )
+    ).scalars().all()
+    assert [(audit.action, audit.user_id) for audit in audits] == [("hitl_withdrawn", user_id)]
+
+
+async def test_archived_session_rejects_chat_operations(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+) -> None:
+    """归档后不能再继续聊天、读快照或改档位：对所有者也表现为不存在。"""
+    session = await agent_session_crud.create(
+        db_session, {"user_id": test_user.id, "title": "已归档", "status": "archived"}
+    )
+    await db_session.commit()
+    base = f"/api/v1/agent/sessions/{session.id}"
+
+    responses = [
+        await client.get(f"{base}/messages", headers=auth_headers),
+        await client.get(f"{base}/snapshot", headers=auth_headers),
+        await client.post(f"{base}/messages", json={"content": "还在吗"}, headers=auth_headers),
+        await client.patch(base, json={"approval_mode": "ask"}, headers=auth_headers),
+    ]
+
+    assert [response.status_code for response in responses] == [404, 404, 404, 404]
 
 
 async def test_session_endpoints_require_agent_use_permission(

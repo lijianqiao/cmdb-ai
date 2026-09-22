@@ -55,7 +55,7 @@ vi.mock("@/components/ops-assistant/ChatInput", () => ({
 vi.mock("@/lib/agent-api", () => ({
   listAgentSessions: vi.fn(),
   createAgentSession: vi.fn(),
-  deleteAgentSession: vi.fn(),
+  archiveAgentSession: vi.fn(),
   patchAgentSession: vi.fn(),
   getDeviceQueryResult: vi.fn(),
   recoverDeviceQuerySummary: vi.fn(),
@@ -84,6 +84,7 @@ import { toast } from "sonner"
 import { usePermission } from "@/hooks/use-permission"
 import { useOpsChat } from "@/hooks/use-ops-chat"
 import {
+  archiveAgentSession,
   getDeviceQueryResult,
   listAgentSessions,
   patchAgentSession,
@@ -92,6 +93,7 @@ import { decideHitlProposal, getHitlProposal } from "@/lib/hitl-api"
 
 const mockListAgentSessions = vi.mocked(listAgentSessions)
 const mockPatchAgentSession = vi.mocked(patchAgentSession)
+const mockArchiveAgentSession = vi.mocked(archiveAgentSession)
 const mockUseOpsChat = vi.mocked(useOpsChat)
 const mockGetDeviceQueryResult = vi.mocked(getDeviceQueryResult)
 const mockUsePermission = vi.mocked(usePermission)
@@ -512,5 +514,60 @@ describe("OpsAssistantPage 自动执行档位授权", () => {
     await waitFor(() => {
       expect(toast.error).toHaveBeenCalledWith(reason)
     })
+  })
+})
+
+describe("OpsAssistantPage 归档会话", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    Element.prototype.scrollIntoView = vi.fn()
+    mockListAgentSessions.mockResolvedValue({
+      items: [buildSession(1), buildSession(2)],
+      total: 2,
+      page: 1,
+      page_size: 50,
+    })
+  })
+
+  async function confirmArchive(sessionId: number): Promise<void> {
+    await screen.findAllByText(`会话 #${sessionId}`)
+    fireEvent.click(screen.getByRole("button", { name: `归档会话 会话 #${sessionId}` }))
+    const dialog = await screen.findByRole("alertdialog")
+    expect(within(dialog).getByText(/审批与执行记录会保留/)).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认归档" }))
+  }
+
+  it("归档成功后会话从列表中移除", async () => {
+    mockArchiveAgentSession.mockResolvedValue(undefined)
+    render(<OpsAssistantPage />)
+
+    await confirmArchive(2)
+
+    await waitFor(() => {
+      expect(toast.success).toHaveBeenCalledWith("会话已归档")
+    })
+    expect(mockArchiveAgentSession).toHaveBeenCalledWith(2)
+    expect(screen.queryByText("会话 #2")).not.toBeInTheDocument()
+  })
+
+  it("服务端拒绝归档时显示原因，会话留在列表里", async () => {
+    const reason = "这个会话还有已批准待执行、执行中或结果不确定的提案，请先重试执行或人工核实结果后再归档"
+    mockArchiveAgentSession.mockRejectedValue(
+      new AxiosError("Request failed with status code 409", AxiosError.ERR_BAD_REQUEST, undefined, undefined, {
+        status: 409,
+        statusText: "",
+        data: { code: 409, data: null, message: reason },
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+      }),
+    )
+    render(<OpsAssistantPage />)
+
+    await confirmArchive(2)
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(reason)
+    })
+    expect(screen.getAllByText("会话 #2").length).toBeGreaterThan(0)
   })
 })

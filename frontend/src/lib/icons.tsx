@@ -35,6 +35,7 @@ import {
   PlusSignIcon as PlusSign,
   PencilEdit02Icon as PencilEdit02,
   Delete02Icon as Delete02,
+  Archive02Icon as Archive02,
   MoreHorizontalIcon as MoreHorizontal,
   UserAdd02Icon as UserAssign02,
   InboxIcon as Inbox,
@@ -103,6 +104,7 @@ export const UserCheck02Icon = makeIcon(UserCheck02)
 export const PlusSignIcon = makeIcon(PlusSign)
 export const PencilEdit02Icon = makeIcon(PencilEdit02)
 export const Delete02Icon = makeIcon(Delete02)
+export const Archive02Icon = makeIcon(Archive02)
 export const MoreHorizontalIcon = makeIcon(MoreHorizontal)
 export const UserAssign02Icon = makeIcon(UserAssign02)
 export const InboxIcon = makeIcon(Inbox)

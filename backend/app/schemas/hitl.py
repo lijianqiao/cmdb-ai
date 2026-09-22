@@ -66,6 +66,11 @@ class HitlProposalResponse(ApiModel):
     status_reason: str | None = None
     resolved_by_user_id: int | None = None
     resolved_at: datetime | None = None
+    # 提案当时的证据（R4）：申请人、审批方式（manual / auto:<档位>）、资产与命令快照。
+    # 迁移前的旧提案没有这些事实，保持为空而不是拿当前值补。
+    requested_by_user_id: int | None = None
+    approval_method: str | None = None
+    evidence_snapshot: dict[str, object] | None = None
     created_at: datetime
     result_excerpt: str | None = None
     asset_credential_type: str | None = None

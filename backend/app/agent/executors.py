@@ -55,6 +55,7 @@ from app.agent.device_commands import (
     command_supports_vendor,
     get_command_template,
     get_device_command,
+    rendered_command_lines,
     validate_interface_name,
 )
 from app.core.cmdb_credential import decrypt_credential_password
@@ -308,10 +309,9 @@ def _run_device_command(
         dispatched = True
 
         if definition.config_templates is not None and vendor in definition.config_templates:
-            rendered = [
-                line.format(interface=interface_name)
-                for line in definition.config_templates[vendor]
-            ]
+            rendered = list(
+                rendered_command_lines(command_name, vendor, interface_name=interface_name)
+            )
             if any("<" in line or ">" in line for line in rendered):
                 return ExecutionResult(ok=False, message="命令模板含未解析占位符")
             try:

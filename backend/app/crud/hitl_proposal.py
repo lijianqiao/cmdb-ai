@@ -78,14 +78,22 @@ class CRUDHitlProposal:
         proposed_by_agent_id: str | None,
         action_type: str,
         action_payload: dict[str, object],
+        requested_by_user_id: int | None = None,
+        evidence_snapshot: dict[str, object] | None = None,
     ) -> HitlProposal:
-        """Create a new proposal in PENDING status and flush."""
+        """Create a new proposal in PENDING status and flush.
+
+        requested_by_user_id / evidence_snapshot 是提案当时的事实（申请人、资产与命令快照），
+        写入后不再修改。
+        """
         proposal = HitlProposal(
             session_id=session_id,
             proposed_by_agent_id=proposed_by_agent_id,
             action_type=action_type,
             action_payload=action_payload,
             status="PENDING",
+            requested_by_user_id=requested_by_user_id,
+            evidence_snapshot=evidence_snapshot,
         )
         db.add(proposal)
         await db.flush()
@@ -98,8 +106,11 @@ class CRUDHitlProposal:
         *,
         approve: bool,
         reviewed_by_user_id: int,
+        approval_method: str | None = None,
     ) -> HitlProposal:
         """Move a PENDING proposal to APPROVED or REJECTED. Only PENDING may be decided.
+
+        approval_method 记录这次决定是怎么做出的：manual（人工）/ auto:<档位>。
 
         使用进程内锁 + ``SELECT … FOR UPDATE`` 串行化并发审批，避免两个会话都读到
         PENDING 后互相覆盖（甚至把已 EXECUTED 的行改回 APPROVED/REJECTED）。
@@ -122,6 +133,7 @@ class CRUDHitlProposal:
             proposal.status = target
             proposal.reviewed_by_user_id = reviewed_by_user_id
             proposal.reviewed_at = datetime.now(UTC)
+            proposal.approval_method = approval_method
             await db.flush()
             return proposal
 

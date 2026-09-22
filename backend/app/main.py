@@ -29,7 +29,7 @@ from app.core.security import PasswordHashOverloadedError
 from app.crud.agent_session import agent_session_crud
 from app.crud.base import RelatedObjectsNotFoundError
 from app.crud.role import RoleInUseError
-from app.crud.user import LastActiveSuperuserError
+from app.crud.user import LastActiveSuperuserError, UserHasEvidenceError
 from app.services.cmdb_diff import run_cmdb_diff_loop
 from app.services.monitor_sweep import run_monitor_sweep_loop
 from app.services.session_cleanup import run_session_cleanup_loop
@@ -258,6 +258,21 @@ def create_app() -> FastAPI:
     ) -> JSONResponse:
         """Prevent an administrative lockout."""
         return JSONResponse(status_code=409, content=_error_content(409, str(exc)))
+
+    @app.exception_handler(UserHasEvidenceError)
+    async def user_has_evidence_exception_handler(
+        _: Request,
+        exc: UserHasEvidenceError,
+    ) -> JSONResponse:
+        """Refuse a purge that would destroy or orphan approval evidence."""
+        return JSONResponse(
+            status_code=409,
+            content=_error_content(
+                409,
+                str(exc),
+                {"proposal_count": exc.proposal_count},
+            ),
+        )
 
     @app.exception_handler(RoleInUseError)
     async def role_in_use_exception_handler(

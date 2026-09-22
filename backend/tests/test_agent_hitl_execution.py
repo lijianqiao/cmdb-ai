@@ -14,6 +14,7 @@ import pytest
 import pytest_asyncio
 from netmiko.exceptions import ConfigInvalidException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.agent import hitl_execution
@@ -389,11 +390,11 @@ async def test_device_control_only_persists_preview_without_full_result(
     assert result_row is None
 
 
-async def test_execution_result_rows_cascade_when_proposal_or_session_is_deleted(
+async def test_execution_result_follows_proposal_but_session_delete_is_blocked(
     db_session: AsyncSession,
     test_user: User,
 ) -> None:
-    """删除提案或所属会话时，数据库外键必须删除其完整查询结果。"""
+    """完整查询结果随提案一起删除；但有提案的会话删不掉（R4），结果作为证据保留。"""
     proposal, _ = await _approved_device_proposal(db_session, test_user)
     await hitl_execution_result_crud.create_for_proposal(
         db_session,
@@ -412,13 +413,16 @@ async def test_execution_result_rows_cascade_when_proposal_or_session_is_deleted
         content="session result",
     )
     await db_session.commit()
+    session_proposal_id = session_proposal.id
     session = await db_session.get(AgentSession, session_proposal.session_id)
     assert session is not None
     await db_session.delete(session)
-    await db_session.commit()
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
     assert (
-        await hitl_execution_result_crud.get_by_proposal(db_session, session_proposal.id)
-        is None
+        await hitl_execution_result_crud.get_by_proposal(db_session, session_proposal_id)
+        is not None
     )
 
 

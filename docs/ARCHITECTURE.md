@@ -1093,7 +1093,7 @@ npx shadcn add card input label form dialog alert-dialog dropdown-menu select ch
 - 关联表（UserRole, RolePermission）：只有外键 + created_at，无 id
 - 表名：蛇形命名（users, roles, permissions, user_roles, role_permissions, audit_logs）
 - 字段名：蛇形命名（hashed_password, is_active, created_at）
-- 外键约束：ON DELETE CASCADE（删除用户时级联删除关联记录）
+- 外键约束：ON DELETE CASCADE（删除用户时级联删除关联记录）；例外是 HITL 提案对会话的外键为 RESTRICT，审批证据不随会话或用户删除（见 AGENT_ARCHITECTURE.md §6）
 - 索引：username, email, permission.code 唯一索引；is_deleted 普通索引
 ```
 

@@ -96,12 +96,13 @@ export async function patchAgentSession(
 }
 
 /**
- * 硬删除会话（仅所有者；关联消息等由后端 CASCADE）。
+ * 归档会话（仅所有者）：聊天从列表收起、不能再继续，审批与执行记录保留供审计。
+ * 还没审批的提案会被撤回；仍有进行中的事项时后端返回 409 并在 message 里说明原因。
  *
  * Args:
  *   sessionId: 会话 ID
  */
-export async function deleteAgentSession(sessionId: number): Promise<void> {
+export async function archiveAgentSession(sessionId: number): Promise<void> {
   await api.delete(`/agent/sessions/${sessionId}`)
 }
 
