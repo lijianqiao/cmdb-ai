@@ -7,6 +7,7 @@
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -28,7 +29,16 @@ from app.utils.audit import log_audit
 router = APIRouter()
 
 
-def _to_response(policy: DeviceCommandPolicy) -> DeviceCommandPolicyResponse:
+async def _to_response(
+    db: AsyncSession, policy: DeviceCommandPolicy
+) -> DeviceCommandPolicyResponse:
+    """把策略转成响应。按单台设备创建时，关联资产还没随 INSERT 加载。
+
+    直接读 ``policy.asset`` 会在异步会话里发起同步查询，抛出 MissingGreenlet，
+    接口变成 500，但前面的 commit 已经成功。这里在序列化前用异步 refresh 补上。
+    """
+    if policy.asset_id is not None and "asset" in inspect(policy).unloaded:
+        await db.refresh(policy, attribute_names=["asset"])
     return DeviceCommandPolicyResponse.model_validate(policy)
 
 
@@ -51,7 +61,7 @@ async def list_policies(
         skip=(page - 1) * page_size,
         limit=page_size,
     )
-    items = [_to_response(policy) for policy in policies]
+    items = [await _to_response(db, policy) for policy in policies]
     return paginated_response(items, total, page, page_size)
 
 
@@ -86,7 +96,7 @@ async def create_policy(
         ip=get_client_ip(request),
     )
     await db.commit()
-    return success_response(_to_response(policy), message="创建成功", code=status.HTTP_201_CREATED)
+    return success_response(await _to_response(db, policy), message="创建成功", code=status.HTTP_201_CREATED)
 
 
 @router.get("/policies/deleted", response_model=ResponseEnvelope[PaginatedData[DeviceCommandPolicyResponse]])
@@ -100,7 +110,7 @@ async def list_deleted_policies(
     policies, total = await device_command_policy_crud.get_deleted_multi(
         db, skip=(page - 1) * page_size, limit=page_size
     )
-    items = [_to_response(policy) for policy in policies]
+    items = [await _to_response(db, policy) for policy in policies]
     return paginated_response(items, total, page, page_size)
 
 
@@ -114,7 +124,7 @@ async def get_policy(
     policy = await device_command_policy_crud.get(db, policy_id)
     if policy is None:
         raise HTTPException(status_code=404, detail="策略不存在")
-    return success_response(_to_response(policy))
+    return success_response(await _to_response(db, policy))
 
 
 @router.patch("/policies/{policy_id}", response_model=ResponseEnvelope[DeviceCommandPolicyResponse])
@@ -151,7 +161,7 @@ async def update_policy(
         ip=get_client_ip(request),
     )
     await db.commit()
-    return success_response(_to_response(updated), message="更新成功")
+    return success_response(await _to_response(db, updated), message="更新成功")
 
 
 @router.delete("/policies/{policy_id}", response_model=ResponseEnvelope[None])
@@ -208,7 +218,7 @@ async def restore_policy(
         ip=get_client_ip(request),
     )
     await db.commit()
-    return success_response(_to_response(restored), message="恢复成功")
+    return success_response(await _to_response(db, restored), message="恢复成功")
 
 
 @router.delete("/policies/{policy_id}/purge", response_model=ResponseEnvelope[None])

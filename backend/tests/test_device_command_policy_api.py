@@ -72,6 +72,55 @@ async def test_create_asset_type_policy_success(
     assert body["created_by_user_id"] == test_user.id
 
 
+async def test_create_asset_scoped_policy_returns_asset_brief(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user,
+    auth_headers: Headers,
+) -> None:
+    """按单台设备创建时，响应要带上资产摘要，不能在写库成功后因懒加载变成 500。"""
+    from app.crud.cmdb_asset import cmdb_asset_crud
+
+    await _grant_policy_permissions(db_session, test_user)
+    asset = await cmdb_asset_crud.create(
+        db_session,
+        {
+            "asset_type": "switch",
+            "hostname": "sw-dynamic-01",
+            "ip_address": "10.11.210.69",
+            "vendor": "huawei_vrp",
+            "credential_type": "dynamic",
+            "credential_username": "admin",
+        },
+    )
+    await db_session.commit()
+
+    response = await client.post(
+        "/api/v1/device-command-policies/policies",
+        json={
+            "scope": "asset",
+            "asset_id": asset.id,
+            "command_name": "show_running_config",
+            "decision": "whitelist",
+        },
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()["data"]
+    assert body["asset_id"] == asset.id
+    assert body["asset"]["hostname"] == "sw-dynamic-01"
+    assert body["asset"]["ip_address"] == "10.11.210.69"
+
+    updated = await client.patch(
+        f"/api/v1/device-command-policies/policies/{body['id']}",
+        json={"decision": "blacklist"},
+        headers=auth_headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["data"]["asset"]["ip_address"] == "10.11.210.69"
+
+
 async def test_create_policy_rejects_asset_type_scope_for_state_changing_command(
     client: AsyncClient,
     db_session: AsyncSession,
