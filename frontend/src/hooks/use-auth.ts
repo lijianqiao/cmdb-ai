@@ -5,7 +5,7 @@
 
 import { useCallback } from "react"
 
-import api, { refreshAccessToken, setAccessToken } from "@/lib/api"
+import api, { markSessionChanged, refreshAccessToken, setAccessToken } from "@/lib/api"
 import { ROUTES } from "@/lib/constants"
 import { useAuthStore } from "@/store/auth"
 import type { LoginRequest } from "@/types/auth"
@@ -48,6 +48,8 @@ export function useAuth() {
         }
 
         setAccessToken(accessToken)
+        // 换代：登录前发起、迟到的刷新结果不能覆盖这次新登录，其它标签页的也一样
+        markSessionChanged()
 
         // 获取用户信息
         const profileResponse = await api.get("/me")
@@ -71,6 +73,8 @@ export function useAuth() {
       // 忽略退出登录的 API 错误
     } finally {
       setAccessToken(null)
+      // 换代并通知其它标签页：退出之后不会被迟到的刷新把旧会话写回来
+      markSessionChanged()
       logout()
       window.location.href = ROUTES.LOGIN
     }

@@ -352,6 +352,13 @@ server {
 sudo certbot --nginx -d your-domain.com
 ```
 
+**多标签页登录稳定性依赖 HTTPS。** refresh_token 是一次性的，同一浏览器的多个标签页
+几乎同时刷新登录时，后到的请求会被后端当成重放、撤销整个登录会话。前端用浏览器的
+Web Locks 保证同一时刻只有一个标签页在刷新，而 Web Locks 只在安全上下文（HTTPS 或
+localhost）里可用。支持的浏览器：Chrome / Edge 69+、Firefox 96+、Safari 15.4+。
+在纯 HTTP 或更旧的浏览器上只能做到单个标签页内去重，页面会明确提示「同时打开多个
+标签页时可能被要求重新登录」。
+
 ---
 
 ## 5. 系统服务（Systemd）

@@ -82,6 +82,7 @@ vi.mock("@/lib/api", () => ({
   setAccessToken: vi.fn(),
   getAccessToken: vi.fn(),
   refreshAccessToken: vi.fn(),
+  markSessionChanged: vi.fn(),
 }))
 
 vi.mock("sonner", () => ({
