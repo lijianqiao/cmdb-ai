@@ -48,8 +48,8 @@ type CommandName = Literal[
 type CommandType = Literal["read_only", "state_changing"]
 type RequiresArgument = Literal["none", "interface_name"]
 
-# t14：加入按厂商的错误识别、Junos 提交成功回显、多轮确认与重启/关机的人工核实语义
-DEVICE_COMMAND_CATALOG_VERSION = "t14-v1"
+# t15：H3C Comware 补上端口启停。配置在 system-view 里立即生效，和华为一样不自动保存。
+DEVICE_COMMAND_CATALOG_VERSION = "t15-v1"
 
 # 命令级正则、按厂商 CLI 语法书写；只用于 send_interactive 匹配确认提示，
 # 不接受任何运行时输入，跟 templates 一样是代码层常量。
@@ -249,6 +249,8 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
             "cisco_iosxe": ("interface {interface}", "no shutdown"),
             "cisco_small_business": ("interface {interface}", "no shutdown"),
             "huawei_vrp": ("interface {interface}", "undo shutdown"),
+            # H3C Comware 与华为一样：进接口视图后 undo shutdown。Netmiko 会先发 system-view。
+            "hp_comware": ("interface {interface}", "undo shutdown"),
             "juniper_junos": ("delete interfaces {interface} disable", "commit"),
         },
     ),
@@ -263,6 +265,7 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
             "cisco_iosxe": ("interface {interface}", "shutdown"),
             "cisco_small_business": ("interface {interface}", "shutdown"),
             "huawei_vrp": ("interface {interface}", "shutdown"),
+            "hp_comware": ("interface {interface}", "shutdown"),
             "juniper_junos": ("set interfaces {interface} disable", "commit"),
         },
     ),

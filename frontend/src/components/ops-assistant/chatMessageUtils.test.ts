@@ -162,4 +162,24 @@ describe("groupMessagesIntoTurns", () => {
     expect(turns[0].deviceQueryWait).toBeNull()
     expect(turns[0].assistantMessage?.id).toBe("a:2")
   })
+
+  it("端口启停执行完成后，即使还留着排队标记也不再显示生成中", () => {
+    const turns = groupMessagesIntoTurns([
+      { kind: "user", id: "u:1", content: "开启端口" },
+      { kind: "assistant", id: "a:1", content: "已提交审批", streaming: false },
+      {
+        kind: "hitl",
+        id: "hitl:1",
+        proposalId: 1,
+        actionType: "device_control",
+        status: "EXECUTED",
+        reason: "开启 15 号端口",
+        assetId: 9,
+        resultExcerpt: null,
+        hasFullResult: false,
+        executionState: "running",
+      },
+    ])
+    expect(turns[0].deviceQueryWait).toBeNull()
+  })
 })

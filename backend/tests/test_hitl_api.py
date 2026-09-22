@@ -571,7 +571,12 @@ async def test_decide_device_query_with_password_executes(
     assert [message.content for message in messages] == [fixed_summary]
 
     assert event_order == ["hitl_resolved", "assistant_delta"]
-    assert ws_envelopes[-1].payload == {"text": fixed_summary, "done": True}
+    assert ws_envelopes[-1].payload == {
+        "text": fixed_summary,
+        "done": True,
+        "source": "device_query_summary",
+        "proposal_id": proposal_id,
+    }
     assert model_messages
     model_text = "\n".join(message.content for call in model_messages for message in call)
     ws_text = "\n".join(str(envelope.model_dump(mode="json")) for envelope in ws_envelopes)
@@ -643,7 +648,7 @@ async def test_assistant_broadcast_failure_keeps_executed_query_and_summary(
         if record.name == "app.agent.hitl_executor"
     ]
     assert route_warnings == [
-        f"设备查询总结广播失败 proposal_id={proposal_id} exc_type=RuntimeError"
+        f"助手消息广播失败 proposal_id={proposal_id} source=device_query_summary exc_type=RuntimeError"
     ]
     assert fixed_summary not in route_warnings[0]
     assert "private broadcast detail" not in route_warnings[0]
@@ -852,7 +857,12 @@ async def test_retry_executed_device_query_delivers_one_summary(
     assert response.status_code == 202, response.text
     assert (await _proposal_after_execution(client, proposal_id, auth_headers))["status"] == "EXECUTED"
     assert event_order == ["hitl_resolved", "assistant_delta"]
-    assert envelopes[-1].payload == {"text": fixed_summary, "done": True}
+    assert envelopes[-1].payload == {
+        "text": fixed_summary,
+        "done": True,
+        "source": "device_query_summary",
+        "proposal_id": proposal_id,
+    }
     db_session.expire_all()
     result_row = await hitl_execution_result_crud.get_by_proposal(db_session, proposal_id)
     assert result_row is not None

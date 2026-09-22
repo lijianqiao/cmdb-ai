@@ -118,11 +118,12 @@ function TurnRow({
   isLastTurn: boolean
   isSending?: boolean
 }) {
+  // 「还没有最终回答」不能单独当成生成中：模型可以只调 device_control 就把这一轮
+  // 交给人工审批，永远不会再有文字。发送状态本身已经覆盖了进行中的那段时间。
   const isGenerating = Boolean(
     turn.deviceQueryWait ||
       turn.assistantMessage?.streaming ||
-      (isLastTurn && isSending) ||
-      (!turn.assistantMessage && isLastTurn && turn.processItems.length > 0),
+      (isLastTurn && isSending),
   )
 
   return (

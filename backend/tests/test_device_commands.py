@@ -136,18 +136,30 @@ def test_port_commands_require_interface_argument() -> None:
         assert get_device_command(name).requires_argument == "none"
 
 
-def test_port_commands_config_templates_exclude_generic_driver_vendors() -> None:
-    """hp_comware/linux/generic 未登记配置模式模板，不提供端口启停命令。"""
+def test_port_commands_config_templates_exclude_hosts_without_interface_views() -> None:
+    """linux/generic 没有网络设备的接口视图，不提供端口启停。H3C Comware 要提供。"""
     port_disable = get_device_command("port_disable")
+    port_enable = get_device_command("port_enable")
     assert port_disable.config_templates is not None
+    assert port_enable.config_templates is not None
+    assert set(port_disable.config_templates) == set(port_enable.config_templates)
     assert set(port_disable.config_templates) == {
         "cisco_iosxe",
         "cisco_small_business",
         "huawei_vrp",
+        "hp_comware",
         "juniper_junos",
     }
-    assert "hp_comware" not in port_disable.config_templates
     assert "linux" not in port_disable.config_templates
+    assert "generic" not in port_disable.config_templates
+    assert port_enable.config_templates["hp_comware"] == (
+        "interface {interface}",
+        "undo shutdown",
+    )
+    assert port_disable.config_templates["hp_comware"] == (
+        "interface {interface}",
+        "shutdown",
+    )
 
 
 def test_list_commands_for_vendor_includes_config_mode_only_commands() -> None:
@@ -155,7 +167,9 @@ def test_list_commands_for_vendor_includes_config_mode_only_commands() -> None:
     names = {item.name for item in list_commands_for_vendor("cisco_iosxe")}
     assert {"port_enable", "port_disable", "reboot", "show_version"} <= names
     assert command_supports_vendor("port_disable", "cisco_iosxe") is True
-    assert command_supports_vendor("port_disable", "hp_comware") is False
+    assert command_supports_vendor("port_enable", "hp_comware") is True
+    assert command_supports_vendor("port_disable", "hp_comware") is True
+    assert command_supports_vendor("port_enable", "linux") is False
 
 
 def test_junos_port_config_template_includes_explicit_commit() -> None:

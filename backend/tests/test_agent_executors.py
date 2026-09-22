@@ -190,23 +190,21 @@ async def test_device_query_executor_rejects_invalid_interface_name_before_conne
 async def test_device_query_executor_rejects_unsupported_vendor_before_connecting(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """厂商不支持这条命令时，同样要在连接设备之前就失败（不是连接后才发现）。"""
+    """整机关机在网络设备上没有模板，要在连接之前就失败。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     ciphertext = encrypt_credential_password("whatever")
     asset = await _make_asset(
         db_session,
         credential_password_encrypted=ciphertext,
-        vendor="cisco_iosxe",
+        vendor="hp_comware",
     )
-    asset.vendor = "hp_comware"
     executor = DeviceQueryExecutor()
     with patch("app.agent.executors._open_netmiko_connection") as mock_connect:
         result = await executor.execute(
             db_session,
             asset=asset,
-            command_name="port_disable",
+            command_name="shutdown",
             dynamic_password=None,
-            interface_name="GigabitEthernet0/1",
         )
     assert result.ok is False
     assert result.message == "该设备厂商不支持这个命令"

@@ -262,4 +262,33 @@ describe("ChatMessageList scroll and pagination", () => {
 
     expect(screen.getByText("生成中...")).toBeInTheDocument()
   })
+
+  it("整轮已结束、只有工具调用和已执行的变更审批时，不再显示生成中", () => {
+    render(
+      <ChatMessageList
+        sessionId={10}
+        messages={[
+          { kind: "user", id: "msg:1", content: "帮我开启 15 号端口" },
+          { kind: "tool_call", id: "tc:1", toolCallId: "c1", name: "query_cmdb" },
+          { kind: "tool_call", id: "tc:2", toolCallId: "c2", name: "device_control" },
+          {
+            kind: "hitl",
+            id: "hitl:1",
+            proposalId: 1,
+            actionType: "device_control",
+            status: "EXECUTED",
+            reason: "开启 15 号端口",
+            assetId: 2,
+            resultExcerpt: null,
+            hasFullResult: false,
+            executionState: "running",
+          },
+        ]}
+        isSending={false}
+      />,
+    )
+
+    expect(screen.queryByText("生成中...")).not.toBeInTheDocument()
+    expect(screen.queryByText(/正在登录设备/)).not.toBeInTheDocument()
+  })
 })

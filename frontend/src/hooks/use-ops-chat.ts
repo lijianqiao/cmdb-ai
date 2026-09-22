@@ -61,8 +61,8 @@ export type OpsChatItem =
       createdAt?: string
       /** 整轮用量，只有每轮最后一条回复带；流式过程中拿不到，刷新后由快照补上 */
       usage?: TurnUsage
-      /** 设备查询摘要。用来结束「正在生成摘要」的等待，避免和审批前那句回复混在一起 */
-      source?: "device_query_summary"
+      /** 后台写回的消息来源：设备查询摘要或变更结论。用来结束等待、避免拼进上一句流式回复 */
+      source?: "device_query_summary" | "device_control_result"
       proposalId?: number
     }
   | {
@@ -442,9 +442,10 @@ function applyWsMessage(
     case "assistant_delta": {
       const text = readString(message.payload, "text")
       const done = Boolean(message.payload.done)
+      const rawSource = readString(message.payload, "source")
       const source =
-        readString(message.payload, "source") === "device_query_summary"
-          ? ("device_query_summary" as const)
+        rawSource === "device_query_summary" || rawSource === "device_control_result"
+          ? rawSource
           : undefined
       const summaryProposalId = readProposalId(message.payload)
       const items = [...state.items]
@@ -516,6 +517,11 @@ function applyWsMessage(
         message.type === "hitl_execution_failed"
           ? readString(message.payload, "status") || "execution_failed"
           : readString(message.payload, "status") || "resolved"
+      const normalized = status.trim().toUpperCase()
+      const executionFinished =
+        normalized === "EXECUTED" ||
+        normalized === "REJECTED" ||
+        normalized === "UNKNOWN"
       const items = state.items.map((item) => {
         if (item.kind !== "hitl" || item.proposalId !== proposalId) return item
         return {
@@ -536,6 +542,7 @@ function applyWsMessage(
             message.payload.has_full_result !== undefined
               ? readHasFullResult(message.payload)
               : item.hasFullResult,
+          executionState: executionFinished ? null : item.executionState,
         }
       })
       const exists = items.some(

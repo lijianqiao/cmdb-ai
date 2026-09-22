@@ -52,6 +52,12 @@ export function deviceQueryWait(items: OpsChatItem[]): DeviceQueryWait | null {
       wait = summaryLanded ? null : "summarizing"
       continue
     }
+    // 开端口这类变更没有配置摘要。执行一旦结束就不能再看旧的排队标记，
+    // 否则 WebSocket 只更新了状态、没清掉 executionState，界面会一直停在生成中。
+    if (status === "EXECUTED" || status === "REJECTED" || status === "UNKNOWN") {
+      wait = null
+      continue
+    }
     if (
       executionState === "queued" ||
       executionState === "running" ||

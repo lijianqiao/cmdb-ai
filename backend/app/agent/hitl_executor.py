@@ -17,6 +17,9 @@
    前端再用 execution_state（排队 / 执行中）与轮询兜底丢失的事件。
 6. 设备查询执行成功后再单独生成总结并广播；总结失败不影响已落库的设备结果，也不会
    再次连接设备。
+6a. 设备变更（开关端口、重启）执行结束后，往对话里写一条固定格式的结论：做了什么、
+   在哪台设备、结果如何。这里不调模型：结论的每个字都来自提案记录和设备回显，
+   不需要推理，也避免把「模型没回话」当成「没做」。
 7. 执行请求的非秘密元数据落在 hitl_execution_requests：提案、发起人、请求 ID、
    尝试号、队列状态、凭据种类。动态密码只留在这个任务的内存里。
 8. 进程崩溃后：启动时先把遗留 EXECUTING 转成 UNKNOWN（不重跑）。静态凭据且提案
@@ -38,10 +41,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agent.device_result_summary import SummaryDelivery, deliver_device_query_summary
 from app.agent.hitl import HitlResumeError
 from app.agent.hitl_execution import execute_approved_proposal
+from app.agent.session import append_assistant_message
 from app.agent.ws_hub import WsHitlEventPublisher, hub
 from app.core.config import settings
 from app.crud import hitl_execution_request as execution_request_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
+from app.models.hitl_proposal import HitlProposal
 from app.schemas.agent_ws import AgentWsServerMessage
 
 logger = logging.getLogger(__name__)
@@ -89,23 +94,121 @@ async def broadcast_summary_delivery(delivery: SummaryDelivery | None) -> None:
     """只广播本次新建的总结消息；广播失败不改变执行结果。"""
     if delivery is None or not delivery.created_message:
         return
+    await _broadcast_assistant_text(
+        delivery.session_id,
+        delivery.content,
+        source="device_query_summary",
+        proposal_id=delivery.proposal_id,
+    )
+
+
+_CONTROL_COMMAND_LABELS: dict[str, str] = {
+    "port_enable": "开启端口",
+    "port_disable": "关闭端口",
+    "reboot": "重启设备",
+    "shutdown": "关闭设备",
+}
+
+
+def _describe_control_target(proposal: HitlProposal) -> str:
+    """从证据快照拼「在哪台设备做了什么」。快照是提案当时的事实，不用现在的资产值。"""
+    payload = proposal.action_payload if isinstance(proposal.action_payload, dict) else {}
+    snapshot = proposal.evidence_snapshot if isinstance(proposal.evidence_snapshot, dict) else {}
+    asset = snapshot.get("asset") if isinstance(snapshot.get("asset"), dict) else {}
+    command_name = str(payload.get("command_name", ""))
+    label = _CONTROL_COMMAND_LABELS.get(command_name, command_name or "设备变更")
+    interface_name = payload.get("interface_name")
+    action = f"{label} {interface_name}" if isinstance(interface_name, str) else label
+    hostname = asset.get("hostname") if isinstance(asset, dict) else None
+    ip_address = asset.get("ip_address") if isinstance(asset, dict) else None
+    if hostname and ip_address:
+        return f"在 {hostname}（{ip_address}）上{action}"
+    if ip_address:
+        return f"在 {ip_address} 上{action}"
+    return action
+
+
+def build_device_control_conclusion(proposal: HitlProposal) -> str | None:
+    """按提案终态生成结论文案；提案还没结束时返回 None。"""
+    payload = proposal.action_payload if isinstance(proposal.action_payload, dict) else {}
+    target = _describe_control_target(proposal)
+    last_error = payload.get("last_error")
+    reason = f"（{last_error}）" if isinstance(last_error, str) and last_error else ""
+    if proposal.status == "EXECUTED":
+        excerpt = payload.get("last_result_excerpt")
+        lines = [f"已{target}，设备已接受命令。"]
+        if isinstance(excerpt, str) and excerpt.strip():
+            lines.append("")
+            lines.append("设备回显：")
+            lines.append("```")
+            lines.append(excerpt.strip())
+            lines.append("```")
+        lines.append("")
+        lines.append("这类变更不会自动保存配置，需要长期生效请另行保存。")
+        return "\n".join(lines)
+    if proposal.status == "UNKNOWN":
+        return (
+            f"尝试{target}，但没有拿到明确的成功证据{reason}。"
+            "命令可能已在设备上生效，请人工核实后在审批卡片上处置。"
+        )
+    if proposal.status == "APPROVED":
+        return f"{target}的命令没有下发到设备{reason}，设备状态未改变，可在审批卡片上重试。"
+    if proposal.status == "REJECTED":
+        return f"{target}的请求已被拒绝，没有在设备上执行。"
+    return None
+
+
+async def deliver_device_control_conclusion(
+    session_factory: async_sessionmaker[AsyncSession], proposal_id: int
+) -> None:
+    """把变更结果写进对话并广播。写失败只记日志，不改变已落库的设备结果。"""
+    session_id: int | None = None
+    content: str | None = None
+    try:
+        async with session_factory() as db:
+            proposal = await hitl_proposal_crud.get(db, proposal_id)
+            if proposal is None or proposal.action_type != "device_control":
+                return
+            content = build_device_control_conclusion(proposal)
+            if content is None:
+                return
+            session_id = proposal.session_id
+            await append_assistant_message(db, session_id, content, agent_id=None)
+            await db.commit()
+    except Exception as exc:
+        logger.warning(
+            "设备变更结论写入失败 proposal_id=%s exc_type=%s", proposal_id, type(exc).__name__
+        )
+        return
+    if session_id is None or content is None:
+        return
+    await _broadcast_assistant_text(
+        session_id, content, source="device_control_result", proposal_id=proposal_id
+    )
+
+
+async def _broadcast_assistant_text(
+    session_id: int, content: str, *, source: str, proposal_id: int
+) -> None:
+    """整段推送一条助手消息；广播失败不影响已经写好的记录。"""
     try:
         await hub.broadcast(
-            delivery.session_id,
+            session_id,
             AgentWsServerMessage(
                 type="assistant_delta",
                 payload={
-                    "text": delivery.content,
+                    "text": content,
                     "done": True,
-                    "source": "device_query_summary",
-                    "proposal_id": delivery.proposal_id,
+                    "source": source,
+                    "proposal_id": proposal_id,
                 },
             ),
         )
     except Exception as exc:
         logger.warning(
-            "设备查询总结广播失败 proposal_id=%s exc_type=%s",
-            delivery.proposal_id,
+            "助手消息广播失败 proposal_id=%s source=%s exc_type=%s",
+            proposal_id,
+            source,
             type(exc).__name__,
         )
 
@@ -202,6 +305,8 @@ class HitlExecutionQueue:
                         session_factory, ticket.proposal_id
                     )
                     await broadcast_summary_delivery(delivery)
+                elif summary.action_type == "device_control":
+                    await deliver_device_control_conclusion(session_factory, ticket.proposal_id)
                 await _set_request_status(session_factory, ticket.request_id, "finished")
                 finished = True
         except HitlResumeError as exc:

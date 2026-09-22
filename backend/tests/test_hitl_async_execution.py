@@ -471,3 +471,48 @@ async def test_two_open_execution_requests_for_one_proposal_are_rejected(
     with pytest.raises(IntegrityError):
         await db_session.commit()
     await db_session.rollback()
+
+
+async def test_device_control_writes_a_conclusion_into_the_chat(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    grant_permissions,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """开端口这类变更没有配置摘要，执行完要往对话里写一条结论，不能只剩工具调用。"""
+    from app.crud.agent_message import agent_message_crud
+
+    await grant_permissions(test_user, "agent:hitl_approve")
+    session_id, proposal_id = await _pending_proposal(
+        db_session,
+        test_user.id,
+        action_type="device_control",
+        payload={"command_name": "port_enable", "interface_name": "GigabitEthernet1/0/15"},
+    )
+
+    async def execute(self: DeviceQueryExecutor, db: object, **kwargs: Any) -> ExecutionResult:
+        return ExecutionResult(
+            ok=True,
+            message="命令执行完成",
+            detail={"output": "[SW-ASYNC-01-GigabitEthernet1/0/15]", "truncated": False},
+            dispatched=True,
+        )
+
+    monkeypatch.setattr(DeviceQueryExecutor, "execute", execute)
+    response = await client.post(
+        f"/api/v1/hitl/proposals/{proposal_id}/decide", json={"approve": True}, headers=auth_headers
+    )
+    assert response.status_code == 202, response.text
+    await hitl_execution_queue.drain()
+
+    assert await _status(db_session, proposal_id) == "EXECUTED"
+    messages, _ = await agent_message_crud.list_root_before_id(
+        db_session, session_id, before_id=None, limit=20
+    )
+    conclusions = [m for m in messages if m.role == "assistant" and "开启端口" in m.content]
+    assert len(conclusions) == 1
+    assert "SW-ASYNC-01" in conclusions[0].content
+    assert "GigabitEthernet1/0/15" in conclusions[0].content
+    assert "设备已接受命令" in conclusions[0].content
