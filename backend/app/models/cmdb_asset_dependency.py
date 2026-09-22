@@ -1,4 +1,4 @@
-"""CMDB asset dependency edge — e.g. a switch (parent) hosting servers (children).
+"""CMDB asset dependency edge — e.g. a core switch (parent) feeding access switches (children).
 
 Composite primary key, no surrogate id, matching this project's existing
 relation-table convention (see UserRole/RolePermission).

@@ -43,7 +43,6 @@ export const DEVICE_COMMAND_NAMES = [
   "show_interfaces",
   "ping",
   "reboot",
-  "shutdown",
   "port_enable",
   "port_disable",
 ] as const
@@ -51,7 +50,6 @@ export const DEVICE_COMMAND_NAMES = [
 /** 跟后端 app/agent/device_commands.py::command_type 手动保持一致，用于表单风险提示 */
 export const STATE_CHANGING_COMMAND_NAMES = new Set([
   "reboot",
-  "shutdown",
   "port_enable",
   "port_disable",
 ])

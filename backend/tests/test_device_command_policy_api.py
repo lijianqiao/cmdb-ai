@@ -54,7 +54,7 @@ async def test_create_asset_type_policy_success(
         "/api/v1/device-command-policies/policies",
         json={
             "scope": "asset_type",
-            "asset_type": "server",
+            "asset_type": "switch",
             "command_name": "show_version",
             "decision": "whitelist",
             "note": "允许查看版本",
@@ -65,7 +65,7 @@ async def test_create_asset_type_policy_success(
     assert response.status_code == 201, response.text
     body = response.json()["data"]
     assert body["scope"] == "asset_type"
-    assert body["asset_type"] == "server"
+    assert body["asset_type"] == "switch"
     assert body["asset_id"] is None
     assert body["command_name"] == "show_version"
     assert body["decision"] == "whitelist"
@@ -153,7 +153,7 @@ async def test_create_unknown_command_name_rejected(
         "/api/v1/device-command-policies/policies",
         json={
             "scope": "asset_type",
-            "asset_type": "server",
+            "asset_type": "switch",
             "command_name": "not_in_catalog",
             "decision": "whitelist",
         },
@@ -172,7 +172,7 @@ async def test_create_duplicate_policy_returns_409(
     await _grant_policy_permissions(db_session, test_user)
     payload = {
         "scope": "asset_type",
-        "asset_type": "server",
+        "asset_type": "switch",
         "command_name": "ping",
         "decision": "whitelist",
     }
@@ -204,7 +204,7 @@ async def test_read_only_permission_cannot_create(
         "/api/v1/device-command-policies/policies",
         json={
             "scope": "asset_type",
-            "asset_type": "server",
+            "asset_type": "switch",
             "command_name": "show_version",
             "decision": "whitelist",
         },

@@ -52,7 +52,7 @@ async def test_full_lifecycle_with_encrypted_credential_round_trips(
             "asset_type": "switch",
             "hostname": "sw-integration-01",
             "ip_address": "10.0.10.1",
-            "vendor": "generic",
+            "vendor": "other",
             "credential_type": "static",
             "credential_username": "admin",
             "credential_password": secret,

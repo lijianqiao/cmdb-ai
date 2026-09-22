@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import executors
-from app.agent.device_commands import get_device_command
+from app.agent.device_commands import get_device_command, list_device_commands
 from app.agent.executors import DeviceQueryExecutor, NotifyExecutor
 from app.core.cmdb_credential import encrypt_credential_password
 from app.core.config import settings
@@ -190,7 +190,35 @@ async def test_device_query_executor_rejects_invalid_interface_name_before_conne
 async def test_device_query_executor_rejects_unsupported_vendor_before_connecting(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """整机关机在网络设备上没有模板，要在连接之前就失败。"""
+    """other 厂商没有登记任何模板，要在连接之前就失败。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    ciphertext = encrypt_credential_password("whatever")
+    asset = await _make_asset(
+        db_session,
+        credential_password_encrypted=ciphertext,
+        vendor="other",
+    )
+    executor = DeviceQueryExecutor()
+    with patch("app.agent.executors._open_netmiko_connection") as mock_connect:
+        result = await executor.execute(
+            db_session,
+            asset=asset,
+            command_name="show_version",
+            dynamic_password=None,
+        )
+    assert result.ok is False
+    assert result.message == "该设备厂商不支持这个命令"
+    mock_connect.assert_not_called()
+
+
+async def test_device_query_executor_refuses_vendor_without_netmiko_platform(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """目录给厂商登记了模板、却漏了 Netmiko 平台映射：宁可不连，也不按 generic 硬连。
+
+    generic 平台不关分页，大输出会卡在分页提示符上读超时；连上之后失败又只能落
+    UNKNOWN 等人工核实。一条命令都没发，所以 dispatched 必须是 False。
+    """
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     ciphertext = encrypt_credential_password("whatever")
     asset = await _make_asset(
@@ -198,17 +226,34 @@ async def test_device_query_executor_rejects_unsupported_vendor_before_connectin
         credential_password_encrypted=ciphertext,
         vendor="hp_comware",
     )
+    without_comware = {
+        vendor: device_type
+        for vendor, device_type in executors._NETMIKO_DEVICE_TYPES.items()
+        if vendor != "hp_comware"
+    }
+    monkeypatch.setattr(executors, "_NETMIKO_DEVICE_TYPES", without_comware)
     executor = DeviceQueryExecutor()
     with patch("app.agent.executors._open_netmiko_connection") as mock_connect:
         result = await executor.execute(
             db_session,
             asset=asset,
-            command_name="shutdown",
+            command_name="show_version",
             dynamic_password=None,
         )
     assert result.ok is False
-    assert result.message == "该设备厂商不支持这个命令"
+    assert result.dispatched is False
+    assert "Netmiko" in result.message
     mock_connect.assert_not_called()
+
+
+async def test_every_catalog_vendor_has_a_netmiko_platform() -> None:
+    """目录里登记了模板的厂商都要有 Netmiko 平台，漏了就在测试阶段暴露，而不是上线后连不上。"""
+    catalog_vendors = {
+        vendor
+        for item in list_device_commands()
+        for vendor in (*item.templates, *(item.config_templates or {}))
+    }
+    assert catalog_vendors <= set(executors._NETMIKO_DEVICE_TYPES)
 
 
 async def test_notify_executor_writes_audit_and_succeeds(
@@ -272,7 +317,7 @@ async def test_notify_executor_rejects_blank_message(
 
 # ---------------------------------------------------------------------------
 # R3：设备回了文本不等于成功。按厂商识别明确的错误、确认流程必须走完，
-# 重启/关机拿不到成功证据时如实交给人工核实，而不是标成已执行。
+# 重启拿不到成功证据时如实交给人工核实，而不是标成已执行。
 # ---------------------------------------------------------------------------
 
 
@@ -475,17 +520,3 @@ async def test_error_words_deep_inside_normal_output_are_not_false_positives(
 
     assert result.ok is True
     assert result.detail["output"] == output
-
-
-async def test_linux_sudo_refusal_is_detected(monkeypatch: pytest.MonkeyPatch) -> None:
-    connection = MagicMock()
-    connection.send_command.return_value = (
-        "sudo: a terminal is required to read the password; "
-        "either use the -S option to read from standard input\n"
-    )
-
-    result = _run(monkeypatch, connection, vendor="linux", command_name="reboot")
-
-    assert result.ok is False
-    assert result.dispatched is True
-    assert "设备拒绝" in result.message

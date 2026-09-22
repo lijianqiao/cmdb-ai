@@ -9,6 +9,9 @@ from app.agent.device_commands import VendorName
 from app.schemas.common import ApiModel
 
 type CredentialType = Literal["none", "static", "dynamic"]
+# CMDB 只登记网络设备；服务器、负载均衡、存储不在这里登记。只在创建/编辑时校验：
+# 响应模型的 asset_type 仍是普通字符串，清理之前的旧数据照样能读出来。
+type AssetTypeName = Literal["switch", "router", "firewall", "wireless_controller", "other"]
 
 _CREDENTIAL_FIELDS = {"credential_type", "credential_username", "credential_password"}
 
@@ -16,7 +19,7 @@ _CREDENTIAL_FIELDS = {"credential_type", "credential_username", "credential_pass
 class CmdbAssetCreate(ApiModel):
     """Create a CMDB asset, optionally with a login credential."""
 
-    asset_type: str = Field(min_length=1, max_length=50)
+    asset_type: AssetTypeName
     vendor: VendorName
     hostname: str = Field(min_length=1, max_length=255)
     ip_address: str = Field(min_length=1, max_length=45)
@@ -50,7 +53,7 @@ class CmdbAssetCreate(ApiModel):
 class CmdbAssetUpdate(ApiModel):
     """Partially update a CMDB asset; unset fields are left untouched."""
 
-    asset_type: str | None = Field(default=None, min_length=1, max_length=50)
+    asset_type: AssetTypeName | None = None
     vendor: VendorName | None = None
     hostname: str | None = Field(default=None, min_length=1, max_length=255)
     ip_address: str | None = Field(default=None, min_length=1, max_length=45)

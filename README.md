@@ -2,9 +2,9 @@
 
 [中文文档](./README_zh.md)
 
-An enterprise-grade, full-stack **AI Operations Agent & RBAC Management Platform** built with **FastAPI** and **React 19**.
+An enterprise-grade, full-stack **AI Network Operations Assistant & Management Platform** built with **FastAPI** and **React 19**.
 
-Interact with your IT infrastructure through natural language: query CMDB assets, probe device health, execute network commands via Netmiko, manage whitelist/blacklist policies, and perform secure Human-In-The-Loop (HITL) change approvals.
+Interact with your network infrastructure through natural language: query CMDB assets, probe device health, execute network commands via Netmiko, manage whitelist/blacklist policies, and perform secure Human-In-The-Loop (HITL) change approvals.
 
 ---
 
@@ -27,7 +27,7 @@ A walkthrough of one full operator session:
 
 - **🤖 Ops Assistant (AI Agent)**:
   - Natural language troubleshooting, CMDB lookups, TCP port probes, and device configuration inspection.
-  - Multi-vendor network automation via Netmiko (Cisco IOS-XE, Cisco Small Business, Huawei VRP, HP Comware, Juniper Junos, Linux).
+  - Multi-vendor network automation via Netmiko (Cisco IOS-XE, Cisco Small Business, Huawei VRP, H3C / HP Comware, Juniper Junos).
   - Streaming responses over WebSocket with Turn-grouped execution processes, collapsible thinking traces, and sticky copy buttons.
   - Cancel a running turn mid-flight; token usage and per-reply cost shown under every answer.
   - Three configurable model tiers (cheap / balanced / strong) with wholesale fallback when a tier is unset.
@@ -36,7 +36,7 @@ A walkthrough of one full operator session:
   - Global auto-popup approval modal; dynamic-password assets take a masked one-time password (1–256 characters, submitted exactly as typed, never stored).
   - Idempotent AI configuration summarization for large device command outputs.
 - **🗄️ CMDB & Credential Management**:
-  - Unified inventory for network switches, routers, and servers with subnet CIDR and topological dependency graphs.
+  - Unified inventory for network devices (switches, routers, firewalls, wireless controllers) with subnet CIDR and topological dependency graphs.
   - Fernet symmetric encryption (`CMDB_CREDENTIAL_KEY`) for static passwords, plus support for dynamic one-time credentials.
 - **⚡ Device Command Policies**:
   - Fine-grained whitelist and blacklist rules by asset type or specific device to bypass or enforce approval workflows.

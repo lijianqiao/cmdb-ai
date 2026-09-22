@@ -34,7 +34,7 @@ async def test_cmdb_asset_round_trip(db_session: AsyncSession, test_user: User) 
 
 async def test_cmdb_asset_dependency_composite_key(db_session: AsyncSession) -> None:
     parent = CmdbAsset(asset_type="switch", hostname="sw-01", ip_address="10.0.0.1", subnet_cidr="")
-    child = CmdbAsset(asset_type="server", hostname="srv-01", ip_address="10.0.0.2", subnet_cidr="")
+    child = CmdbAsset(asset_type="switch", hostname="srv-01", ip_address="10.0.0.2", subnet_cidr="")
     db_session.add_all([parent, child])
     await db_session.flush()
 
@@ -56,7 +56,7 @@ async def test_cmdb_asset_dependency_composite_key(db_session: AsyncSession) -> 
 
 
 async def test_monitor_target_defaults(db_session: AsyncSession) -> None:
-    asset = CmdbAsset(asset_type="server", hostname="srv-02", ip_address="10.0.0.5", subnet_cidr="")
+    asset = CmdbAsset(asset_type="switch", hostname="srv-02", ip_address="10.0.0.5", subnet_cidr="")
     db_session.add(asset)
     await db_session.flush()
 
@@ -99,7 +99,7 @@ async def test_cmdb_asset_credential_fields_default_to_none_type(
 ) -> None:
     """新建资产不填凭据字段时，应落在安全的默认值上。"""
     asset = CmdbAsset(
-        asset_type="server",
+        asset_type="switch",
         hostname="srv-cred-01",
         ip_address="10.0.0.90",
     )
@@ -116,7 +116,7 @@ async def test_cmdb_asset_can_store_static_credential_ciphertext(
 ) -> None:
     """静态凭据把密文原样存取，模型层不关心加密细节。"""
     asset = CmdbAsset(
-        asset_type="server",
+        asset_type="switch",
         hostname="srv-cred-02",
         ip_address="10.0.0.91",
         credential_type="static",

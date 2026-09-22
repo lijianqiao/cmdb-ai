@@ -240,7 +240,7 @@ repeat: 3
 
 1. **设备命令是代码写死的目录**（`app/agent/device_commands.py`），模型发明不出
    新命令。目录只有 `show_version` / `show_running_config` / `show_interfaces` /
-   `ping` / `reboot` / `shutdown` / `port_enable` / `port_disable` 八条，
+   `ping` / `reboot` / `port_enable` / `port_disable` 七条，
    **没有「清空配置」**。破坏性动作改用真实存在的 `reboot`。
 2. **只读与变更是两个不同的工具**：`query_device_command` 管只读，
    `device_control` 管变更。

@@ -12,7 +12,7 @@ pytestmark = pytest.mark.asyncio
 async def _make_asset(db_session: AsyncSession, hostname: str) -> int:
     asset = await cmdb_asset_crud.create(
         db_session,
-        {"asset_type": "server", "hostname": hostname, "ip_address": "", "subnet_cidr": ""},
+        {"asset_type": "switch", "hostname": hostname, "ip_address": "", "subnet_cidr": ""},
     )
     await db_session.flush()
     return asset.id

@@ -106,7 +106,6 @@ _CONTROL_COMMAND_LABELS: dict[str, str] = {
     "port_enable": "开启端口",
     "port_disable": "关闭端口",
     "reboot": "重启设备",
-    "shutdown": "关闭设备",
 }
 
 

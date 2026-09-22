@@ -14,7 +14,7 @@ from app.models.base import Base, TimestampMixin
 
 
 class CmdbAsset(Base, TimestampMixin):
-    """One managed asset (server, switch, router, ...)."""
+    """One managed network device (switch, router, firewall, ...)."""
 
     __tablename__ = "cmdb_assets"
 

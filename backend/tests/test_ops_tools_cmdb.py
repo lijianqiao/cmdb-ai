@@ -14,7 +14,7 @@ async def _make_asset(db_session: AsyncSession, hostname: str, ip: str, business
     asset = await cmdb_asset_crud.create(
         db_session,
         {
-            "asset_type": "server",
+            "asset_type": "switch",
             "hostname": hostname,
             "ip_address": ip,
             "business_system": business_system,
@@ -74,6 +74,27 @@ async def test_query_cmdb_dependencies_reports_empty_graph(db_session: AsyncSess
     await db_session.commit()
 
     result = await query_cmdb_dependencies(db_session, asset_id, direction="down")
+
+    assert result.control == "ok"
+    assert result.content == "没有找到依赖关系"
+
+
+async def test_query_cmdb_dependencies_with_only_deleted_neighbors_says_none(
+    db_session: AsyncSession,
+) -> None:
+    """下游只剩已删除（在回收站里）的资产时，要明确说没有依赖关系，不能返回空内容。
+
+    软删除不会删依赖边：清理服务器类资产时只删到回收站，这种情况会成批出现。
+    """
+    parent_id = await _make_asset(db_session, "sw-01", "10.0.0.1")
+    child_id = await _make_asset(db_session, "sw-02", "10.0.0.2")
+    await cmdb_asset_dependency_crud.create(
+        db_session, parent_asset_id=parent_id, child_asset_id=child_id, relation_type="uplink"
+    )
+    await cmdb_asset_crud.soft_delete(db_session, child_id)
+    await db_session.commit()
+
+    result = await query_cmdb_dependencies(db_session, parent_id, direction="down")
 
     assert result.control == "ok"
     assert result.content == "没有找到依赖关系"

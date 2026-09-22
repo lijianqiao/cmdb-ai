@@ -2,9 +2,15 @@
 
 // @vitest-environment jsdom
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
 import "@testing-library/jest-dom/vitest"
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { CmdbAsset } from "@/types/cmdb"
 
@@ -16,15 +22,19 @@ import { CmdbAssetFormDialog } from "./CmdbAssetFormDialog"
 import { isVendorName, VENDOR_ITEMS } from "./cmdbVendors"
 
 const baseAssetFields = {
-  asset_type: "server",
-  vendor: "generic",
-  hostname: "srv-01",
+  asset_type: "switch",
+  vendor: "huawei_vrp",
+  hostname: "sw-01",
   ip_address: "10.0.0.1",
   location: "",
   business_system: "",
   subnet_cidr: "",
   notes: "",
 }
+
+// 没开 vitest 全局模式，Testing Library 不会自动卸载：上一条用例的对话框留在页面上时，
+// 两个对话框的输入框 id 相同，按标签找到的会是旧对话框里的输入框。
+afterEach(cleanup)
 
 describe("CmdbAssetFormDialog 凭据校验规则", () => {
   it("编辑 Small Business 静态凭据资产时保留厂商且不提交空密码", async () => {
@@ -67,6 +77,64 @@ describe("CmdbAssetFormDialog 凭据校验规则", () => {
   it("仅将已登记的厂商值识别为 VendorName", () => {
     expect(isVendorName("cisco_small_business")).toBe(true)
     expect(isVendorName("unknown_vendor")).toBe(false)
+  })
+
+  it("厂商只剩网络设备厂商，外加「其他 / 未指定」", () => {
+    expect(VENDOR_ITEMS.map((item) => item.value)).toEqual([
+      "cisco_iosxe",
+      "cisco_small_business",
+      "huawei_vrp",
+      "hp_comware",
+      "juniper_junos",
+      "other",
+    ])
+    expect(VENDOR_ITEMS).toContainEqual({
+      label: "H3C / HP Comware",
+      value: "hp_comware",
+    })
+    expect(VENDOR_ITEMS).toContainEqual({
+      label: "其他 / 未指定",
+      value: "other",
+    })
+    expect(isVendorName("linux")).toBe(false)
+    expect(isVendorName("generic")).toBe(false)
+    expect(isVendorName("other")).toBe(true)
+  })
+
+  it("表单拒绝服务器等非网络资产类型", () => {
+    const result = createFormSchema(null).safeParse({
+      ...baseAssetFields,
+      asset_type: "server",
+      credential_type: "none",
+      ...clearedCredentialFields(),
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it("新增资产默认是交换机、厂商未指定", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(true)
+
+    render(
+      <CmdbAssetFormDialog
+        open
+        onOpenChange={vi.fn()}
+        asset={null}
+        onSubmit={onSubmit}
+      />
+    )
+    fireEvent.change(screen.getByLabelText("主机名"), {
+      target: { value: "sw-new" },
+    })
+    fireEvent.change(screen.getByLabelText("IP 地址"), {
+      target: { value: "10.0.0.8" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: "确定" }))
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce())
+    expect(onSubmit.mock.calls[0]?.[0]).toMatchObject({
+      asset_type: "switch",
+      vendor: "other",
+    })
   })
 
   it("显示 SG350X 对应的 Cisco Small Business 厂商选项", () => {

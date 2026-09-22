@@ -26,6 +26,27 @@ def test_state_changing_command_accepts_asset_scope() -> None:
     assert policy.command_name == "reboot"
 
 
+def test_asset_type_scope_rejects_non_network_asset_type() -> None:
+    """CMDB 只登记网络设备，按服务器类型建策略没有意义，直接拒绝。"""
+    with pytest.raises(ValidationError):
+        DeviceCommandPolicyCreate(
+            scope="asset_type",
+            asset_type="server",
+            command_name="show_version",
+            decision="whitelist",
+        )
+
+
+def test_retired_shutdown_command_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="未知命令名"):
+        DeviceCommandPolicyCreate(
+            scope="asset",
+            asset_id=1,
+            command_name="shutdown",
+            decision="blacklist",
+        )
+
+
 def test_read_only_command_still_accepts_asset_type_scope() -> None:
     """回归：只读命令不受这条新规则影响。"""
     policy = DeviceCommandPolicyCreate(

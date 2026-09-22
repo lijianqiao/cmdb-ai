@@ -111,8 +111,8 @@ async def _make_session_and_asset(db: AsyncSession, user_id: int) -> tuple[int, 
     asset = await cmdb_asset_crud.create(
         db,
         {
-            "asset_type": "server",
-            "hostname": "srv-hitl-int",
+            "asset_type": "switch",
+            "hostname": "sw-hitl-int",
             "ip_address": "10.0.0.40",
             "business_system": "测试系统",
             "subnet_cidr": "",

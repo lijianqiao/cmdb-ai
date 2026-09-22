@@ -160,10 +160,10 @@ async def test_create_with_existing_cmdb_asset(
     asset = await cmdb_asset_crud.create(
         db_session,
         {
-            "asset_type": "server",
-            "hostname": "srv-mon-01",
+            "asset_type": "switch",
+            "hostname": "sw-mon-01",
             "ip_address": "10.0.0.5",
-            "vendor": "generic",
+            "vendor": "other",
         },
     )
     await db_session.commit()

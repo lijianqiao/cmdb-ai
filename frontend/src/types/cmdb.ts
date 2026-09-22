@@ -9,8 +9,7 @@ export type VendorName =
   | "huawei_vrp"
   | "hp_comware"
   | "juniper_junos"
-  | "linux"
-  | "generic"
+  | "other"
 
 /** CMDB 资产（列表/详情响应） */
 export interface CmdbAsset {

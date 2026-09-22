@@ -185,7 +185,7 @@ export function DashboardPage() {
     },
     {
       title: "录入 CMDB 设备资产",
-      desc: "新增交换机、路由器或服务器",
+      desc: "新增交换机、路由器或防火墙",
       icon: PlusSignIcon,
       route: `${ROUTES.CMDB}?create=1`,
       perm: PERMISSIONS.CMDB_MANAGE,

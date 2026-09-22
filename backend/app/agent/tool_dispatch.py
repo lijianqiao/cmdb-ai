@@ -326,7 +326,7 @@ def root_tool_schemas() -> list[dict[str, Any]]:
                 "name": "device_control",
                 "description": (
                     f"[{ROOT_TOOL_SCHEMA_VERSION}] 对已配置凭据的资产发起会改变设备状态的命令"
-                    "（reboot/shutdown/port_enable/port_disable）。是否当场执行取决于当前会话"
+                    "（reboot/port_enable/port_disable）。是否当场执行取决于当前会话"
                     "审批档位，以 list_device_commands 策略句与工具返回为准。"
                     "port_enable/port_disable 必须提供 interface_name。"
                     "不确定这台设备支持哪些变更类命令时先调用 list_device_commands。"

@@ -101,8 +101,8 @@ async def _make_context(db: AsyncSession, user_id: int) -> tuple[int, int]:
     asset = await cmdb_asset_crud.create(
         db,
         {
-            "asset_type": "server",
-            "hostname": "srv-hitl",
+            "asset_type": "switch",
+            "hostname": "sw-hitl",
             "ip_address": "10.0.0.20",
             "business_system": "测试系统",
             "subnet_cidr": "",
@@ -787,7 +787,6 @@ async def test_device_control_connection_failure_reverts_to_approved(
     ciphertext = encrypt_credential_password("whatever")
     asset_id = await _make_query_asset(
         db_session,
-        vendor="linux",
         credential_type="static",
         credential_password_encrypted=ciphertext,
     )
@@ -797,7 +796,7 @@ async def test_device_control_connection_failure_reverts_to_approved(
         proposed_by_agent_id=None,
         action_type="device_control",
         asset_id=asset_id,
-        payload={"command_name": "shutdown"},
+        payload={"command_name": "reboot"},
         reason="维护窗口",
         actor_user_id=test_user.id,
     )
@@ -839,7 +838,6 @@ async def test_resume_retry_after_unknown_requires_allow_retry(
     ciphertext = encrypt_credential_password("whatever")
     asset_id = await _make_query_asset(
         db_session,
-        vendor="linux",
         credential_type="static",
         credential_password_encrypted=ciphertext,
     )
@@ -883,14 +881,16 @@ async def test_resume_retry_after_unknown_requires_allow_retry(
     await db_session.commit()
 
     fake_connection = MagicMock()
-    fake_connection.send_command = MagicMock(return_value="Linux host info")
+    fake_connection.send_command = MagicMock(return_value="Cisco IOS XE Software, Version 17.9.4")
     with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         retried = await resume_proposal(db_session, proposal_id=proposal_id, actor_user_id=user_id)
 
     stored = await hitl_proposal_crud.get(db_session, proposal_id)
     assert stored is not None
     assert retried.status == "EXECUTED"
-    assert stored.action_payload.get("last_result_excerpt") == "Linux host info"
+    assert (
+        stored.action_payload.get("last_result_excerpt") == "Cisco IOS XE Software, Version 17.9.4"
+    )
 
 
 async def test_unclassified_device_control_stays_pending(
@@ -1316,8 +1316,8 @@ async def test_device_query_rejects_unknown_command_name(db_session: AsyncSessio
 async def test_device_query_rejects_command_unsupported_by_vendor(db_session: AsyncSession, test_user: User) -> None:
     """命令存在，但目录里没给这个厂商登记模板——报错要明确说"厂商不支持"，不是"未知命令名"。"""
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
-    # show_running_config 命令目录里没有 linux 的模板（见 device_commands.py）
-    asset_id = await _make_query_asset(db_session, vendor="linux")
+    # other 是暂不支持的厂商的占位值，目录里故意不给它登记任何模板（见 device_commands.py）
+    asset_id = await _make_query_asset(db_session, vendor="other")
 
     with pytest.raises(HitlProposalRejectedError) as exc_info:
         await propose_action(
@@ -1333,8 +1333,8 @@ async def test_device_query_rejects_command_unsupported_by_vendor(db_session: As
 
     assert "该设备厂商不支持这个命令" in str(exc_info.value)
     assert "未知命令名" not in str(exc_info.value)
-    # 拒绝原因必须可行动：列出该厂商真正支持的命令供模型纠正。
-    assert "show_version" in str(exc_info.value)
+    # 拒绝原因必须可行动：告诉模型这个厂商一条命令都没有，别再换命令重试。
+    assert "该厂商当前没有任何可用命令" in str(exc_info.value)
 
 
 async def test_device_query_blacklist_rejects_without_creating_proposal(

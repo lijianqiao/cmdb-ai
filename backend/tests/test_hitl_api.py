@@ -76,8 +76,8 @@ async def _make_pending_proposal(
     asset = await cmdb_asset_crud.create(
         db,
         {
-            "asset_type": "server",
-            "hostname": "srv-hitl-api",
+            "asset_type": "switch",
+            "hostname": "sw-hitl-api",
             "ip_address": "10.0.0.30",
             "business_system": "测试系统",
             "subnet_cidr": "",
@@ -328,10 +328,10 @@ async def test_approve_device_control_stays_approved_second_decide_conflicts(
     asset = await cmdb_asset_crud.create(
         db_session,
         {
-            "asset_type": "server",
-            "hostname": "srv-hitl-ctrl",
+            "asset_type": "switch",
+            "hostname": "sw-hitl-ctrl",
             "ip_address": "10.0.0.32",
-            "vendor": "linux",
+            "vendor": "cisco_iosxe",
             "credential_type": "static",
             "credential_username": "admin",
             "credential_password_encrypted": ciphertext,

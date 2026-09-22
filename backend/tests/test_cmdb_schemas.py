@@ -8,10 +8,10 @@ from app.schemas.cmdb import CmdbAssetCreate, CmdbAssetResponse, CmdbAssetUpdate
 
 def _base_create_kwargs(**overrides: object) -> dict[str, object]:
     kwargs: dict[str, object] = {
-        "asset_type": "server",
-        "hostname": "srv-01",
+        "asset_type": "switch",
+        "hostname": "sw-01",
         "ip_address": "10.0.0.1",
-        "vendor": "generic",
+        "vendor": "huawei_vrp",
     }
     kwargs.update(overrides)
     return kwargs
@@ -64,8 +64,8 @@ def test_create_dynamic_requires_username_and_rejects_password() -> None:
 
 
 def test_update_allows_partial_fields_without_touching_credentials() -> None:
-    payload = CmdbAssetUpdate.model_validate({"hostname": "srv-renamed"})
-    assert payload.hostname == "srv-renamed"
+    payload = CmdbAssetUpdate.model_validate({"hostname": "sw-renamed"})
+    assert payload.hostname == "sw-renamed"
     assert "credential_type" not in payload.model_fields_set
 
 
@@ -103,3 +103,63 @@ def test_create_accepts_cisco_small_business_vendor() -> None:
         _base_create_kwargs(vendor="cisco_small_business")
     )
     assert payload.vendor == "cisco_small_business"
+
+
+# 定位收敛到网络设备：主机类厂商和非网络资产类型不再能登记，
+# 旧数据仍能读出来（响应模型是普通字符串），只在创建/编辑时拒绝。
+
+
+@pytest.mark.parametrize("vendor", ["linux", "generic"])
+def test_create_rejects_retired_host_vendors(vendor: str) -> None:
+    with pytest.raises(ValidationError):
+        CmdbAssetCreate.model_validate(_base_create_kwargs(vendor=vendor))
+
+
+def test_create_accepts_other_vendor_for_devices_not_yet_supported() -> None:
+    """暂不支持的网络设备厂商以 other 登记：能进台账和依赖图，只是不能下命令。"""
+    payload = CmdbAssetCreate.model_validate(_base_create_kwargs(vendor="other"))
+    assert payload.vendor == "other"
+
+
+@pytest.mark.parametrize("asset_type", ["server", "load_balancer", "storage", "anything"])
+def test_create_rejects_non_network_asset_types(asset_type: str) -> None:
+    with pytest.raises(ValidationError):
+        CmdbAssetCreate.model_validate(_base_create_kwargs(asset_type=asset_type))
+
+
+@pytest.mark.parametrize(
+    "asset_type", ["switch", "router", "firewall", "wireless_controller", "other"]
+)
+def test_create_accepts_network_asset_types(asset_type: str) -> None:
+    payload = CmdbAssetCreate.model_validate(_base_create_kwargs(asset_type=asset_type))
+    assert payload.asset_type == asset_type
+
+
+def test_update_rejects_non_network_asset_type() -> None:
+    with pytest.raises(ValidationError):
+        CmdbAssetUpdate.model_validate({"asset_type": "server"})
+
+
+def test_response_still_reads_legacy_asset_type_and_vendor() -> None:
+    """清理前的旧数据（服务器、linux）还在库里时，列表和详情必须照样能返回。"""
+    response = CmdbAssetResponse.model_validate(
+        {
+            "id": 1,
+            "asset_type": "server",
+            "vendor": "linux",
+            "hostname": "srv-legacy",
+            "ip_address": "10.0.20.11",
+            "location": "",
+            "owner_user_id": None,
+            "business_system": "",
+            "subnet_cidr": "",
+            "notes": "",
+            "credential_type": "none",
+            "credential_username": "",
+            "credential_password_set": False,
+            "created_at": "2026-09-01T00:00:00Z",
+            "updated_at": "2026-09-01T00:00:00Z",
+        }
+    )
+    assert response.asset_type == "server"
+    assert response.vendor == "linux"

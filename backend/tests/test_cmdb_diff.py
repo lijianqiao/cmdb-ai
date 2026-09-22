@@ -39,7 +39,7 @@ async def test_flags_cmdb_asset_never_reachable(db_session: AsyncSession) -> Non
     await cmdb_asset_crud.create(
         db_session,
         {
-            "asset_type": "server",
+            "asset_type": "switch",
             "hostname": "srv-ghost",
             "ip_address": "10.0.0.50",
             "subnet_cidr": "",
@@ -60,7 +60,7 @@ async def test_flags_cmdb_asset_never_reachable(db_session: AsyncSession) -> Non
 async def test_no_findings_when_cmdb_and_monitoring_agree(db_session: AsyncSession) -> None:
     asset = await cmdb_asset_crud.create(
         db_session,
-        {"asset_type": "server", "hostname": "srv-ok", "ip_address": "10.0.0.10", "subnet_cidr": ""},
+        {"asset_type": "switch", "hostname": "srv-ok", "ip_address": "10.0.0.10", "subnet_cidr": ""},
     )
     await db_session.flush()
     target = await monitor_target_crud.create(

@@ -4,6 +4,7 @@ import { z } from "zod"
 
 import type { CredentialType } from "@/types/cmdb"
 
+import { isAssetTypeName } from "./cmdbAssetTypes"
 import { VENDOR_VALUES } from "./cmdbVendors"
 
 /** 切换凭据类型时返回应写入 RHF 的空凭据字段，避免隐藏字段残留导致 zod 失败 */
@@ -26,7 +27,9 @@ export function clearedCredentialFields(): {
 export function createFormSchema(existingCredentialType: CredentialType | null) {
   return z
     .object({
-      asset_type: z.string().min(1, "请选择资产类型").max(50),
+      // 字段值保持 string：编辑清理前的旧资产（如 server）时要把旧值原样显示出来，
+      // 提交时才拦下，让人自己改成网络设备类型，而不是悄悄换掉。
+      asset_type: z.string().refine(isAssetTypeName, "请选择资产类型"),
       vendor: z.enum(VENDOR_VALUES, { message: "请选择厂商" }),
       hostname: z.string().min(1, "请输入主机名").max(255),
       ip_address: z.string().min(1, "请输入 IP 地址").max(45),

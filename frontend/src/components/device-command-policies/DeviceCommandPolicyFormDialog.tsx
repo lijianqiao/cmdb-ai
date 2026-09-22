@@ -11,6 +11,7 @@ import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
 
 import { CmdbAssetPicker } from "@/components/cmdb/CmdbAssetPicker"
+import { ASSET_TYPE_ITEMS } from "@/components/cmdb/cmdbAssetTypes"
 import { Alert02Icon } from "@/lib/icons"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -51,16 +52,6 @@ import {
   type PolicyDecision,
   type PolicyScope,
 } from "@/types/device-command-policy"
-
-const ASSET_TYPE_ITEMS: { label: string; value: string }[] = [
-  { label: "服务器", value: "server" },
-  { label: "交换机", value: "switch" },
-  { label: "路由器", value: "router" },
-  { label: "防火墙", value: "firewall" },
-  { label: "负载均衡", value: "load_balancer" },
-  { label: "存储", value: "storage" },
-  { label: "其他", value: "other" },
-]
 
 const SCOPE_ITEMS: { label: string; value: PolicyScope }[] = [
   { label: "设备类型级别", value: "asset_type" },
@@ -153,7 +144,7 @@ export function DeviceCommandPolicyFormDialog({
     resolver: zodResolver(createSchema),
     defaultValues: {
       scope: "asset_type",
-      asset_type: "server",
+      asset_type: "switch",
       asset_id: "",
       command_name: DEVICE_COMMAND_NAMES[0],
       decision: "whitelist",
@@ -192,7 +183,7 @@ export function DeviceCommandPolicyFormDialog({
     } else {
       createForm.reset({
         scope: "asset_type",
-        asset_type: "server",
+        asset_type: "switch",
         asset_id: "",
         command_name: DEVICE_COMMAND_NAMES[0],
         decision: "whitelist",

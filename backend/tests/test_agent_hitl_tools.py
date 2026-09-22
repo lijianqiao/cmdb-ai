@@ -38,8 +38,8 @@ async def _make_session_and_asset(
     asset = await cmdb_asset_crud.create(
         db,
         {
-            "asset_type": "server",
-            "hostname": "srv-device-query",
+            "asset_type": "switch",
+            "hostname": "sw-device-query",
             "ip_address": "10.0.0.50",
             "business_system": "测试系统",
             "subnet_cidr": "",
@@ -193,8 +193,8 @@ async def test_gate_before_notify_rejects_extra_secret_without_echo(
     asset = await cmdb_asset_crud.create(
         db_session,
         {
-            "asset_type": "server",
-            "hostname": "srv-hitl-tool",
+            "asset_type": "switch",
+            "hostname": "sw-hitl-tool",
             "ip_address": "10.0.0.21",
             "business_system": "测试系统",
             "subnet_cidr": "",
@@ -327,7 +327,6 @@ def test_root_schema_has_notify_and_device_control_without_propose() -> None:
         "show_interfaces",
         "ping",
         "reboot",
-        "shutdown",
         "port_enable",
         "port_disable",
     }

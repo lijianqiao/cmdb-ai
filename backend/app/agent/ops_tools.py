@@ -116,7 +116,8 @@ async def query_cmdb_dependencies(
             break
         lines.append(line)
         used += len(line) + 1
-    return ToolResult(control="ok", content="\n".join(lines))
+    # 遍历不看软删除：下游只剩回收站里的资产时 lines 为空，照样要说没有依赖关系。
+    return ToolResult(control="ok", content="\n".join(lines) or "没有找到依赖关系")
 
 
 async def query_monitor_status(

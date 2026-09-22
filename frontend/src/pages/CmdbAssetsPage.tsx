@@ -32,6 +32,7 @@ import { DataTable } from "@/components/common/DataTable"
 import { Pagination } from "@/components/common/Pagination"
 import { ConfirmDialog } from "@/components/common/ConfirmDialog"
 import { CmdbAssetFormDialog, CmdbCredentialRevealDialog } from "@/components/cmdb/CmdbAssetFormDialog"
+import { assetTypeLabel } from "@/components/cmdb/cmdbAssetTypes"
 import { fetchCmdbAssetCredential } from "@/lib/cmdb-credential-api"
 import api from "@/lib/api"
 import { usePaginatedQuery } from "@/hooks/use-paginated-query"
@@ -175,18 +176,7 @@ export function CmdbAssetsPage() {
       {
         accessorKey: "asset_type",
         header: "类型",
-        cell: ({ row }) => {
-          const labels: Record<string, string> = {
-            server: "服务器",
-            switch: "交换机",
-            router: "路由器",
-            firewall: "防火墙",
-            load_balancer: "负载均衡",
-            storage: "存储",
-            other: "其他",
-          }
-          return labels[row.original.asset_type] ?? row.original.asset_type
-        },
+        cell: ({ row }) => assetTypeLabel(row.original.asset_type),
       },
       {
         accessorKey: "business_system",

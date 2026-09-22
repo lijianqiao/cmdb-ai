@@ -1260,7 +1260,7 @@ describe("HitlApprovalCard UNKNOWN 人工处置", () => {
         action_type: "device_control",
         action_payload: {
           asset_id: 9,
-          last_error: "命令已发送，设备正在重启/关机；这期间无法自动确认结果，请在设备恢复后人工核实",
+          last_error: "命令已发送，设备正在重启；这期间无法自动确认结果，请在设备恢复后人工核实",
         },
       }),
     )
@@ -1277,7 +1277,7 @@ describe("HitlApprovalCard UNKNOWN 人工处置", () => {
     )
 
     expect(await screen.findByTestId("hitl-last-error")).toHaveTextContent(
-      "设备正在重启/关机",
+      "设备正在重启",
     )
   })
 

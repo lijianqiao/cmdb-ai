@@ -74,10 +74,10 @@ async def test_create_asset_with_static_credential_never_echoes_plaintext(
     response = await client.post(
         "/api/v1/cmdb/assets",
         json={
-            "asset_type": "server",
+            "asset_type": "switch",
             "hostname": "srv-api-01",
             "ip_address": "10.0.9.1",
-            "vendor": "generic",
+            "vendor": "other",
             "credential_type": "static",
             "credential_username": "admin",
             "credential_password": secret,
@@ -100,10 +100,10 @@ async def test_create_dynamic_credential_stores_username_only(
     response = await client.post(
         "/api/v1/cmdb/assets",
         json={
-            "asset_type": "server",
+            "asset_type": "switch",
             "hostname": "srv-api-02",
             "ip_address": "10.0.9.2",
-            "vendor": "generic",
+            "vendor": "other",
             "credential_type": "dynamic",
             "credential_username": "otp-admin",
         },
@@ -129,10 +129,10 @@ async def test_update_without_password_keeps_existing_secret(
     create_resp = await client.post(
         "/api/v1/cmdb/assets",
         json={
-            "asset_type": "server",
+            "asset_type": "switch",
             "hostname": "srv-api-03",
             "ip_address": "10.0.9.3",
-            "vendor": "generic",
+            "vendor": "other",
             "credential_type": "static",
             "credential_username": "admin",
             "credential_password": "orig-pwd",
@@ -165,10 +165,10 @@ async def test_update_hostname_with_unchanged_credentials_audit_not_changed(
     create_resp = await client.post(
         "/api/v1/cmdb/assets",
         json={
-            "asset_type": "server",
+            "asset_type": "switch",
             "hostname": "srv-audit-01",
             "ip_address": "10.0.9.11",
-            "vendor": "generic",
+            "vendor": "other",
             "credential_type": "static",
             "credential_username": "admin",
             "credential_password": "orig-pwd",
@@ -206,10 +206,10 @@ async def test_update_credential_change_audit_reports_changed(
     create_resp = await client.post(
         "/api/v1/cmdb/assets",
         json={
-            "asset_type": "server",
+            "asset_type": "switch",
             "hostname": "srv-audit-02",
             "ip_address": "10.0.9.12",
-            "vendor": "generic",
+            "vendor": "other",
             "credential_type": "static",
             "credential_username": "admin",
             "credential_password": "orig-pwd",
@@ -241,10 +241,10 @@ async def test_switch_to_static_without_password_is_rejected_when_no_existing_se
     create_resp = await client.post(
         "/api/v1/cmdb/assets",
         json={
-            "asset_type": "server",
+            "asset_type": "switch",
             "hostname": "srv-api-04",
             "ip_address": "10.0.9.4",
-            "vendor": "generic",
+            "vendor": "other",
         },
         headers=auth_headers,
     )
@@ -265,10 +265,10 @@ async def test_soft_delete_restore_purge_flow(
     create_resp = await client.post(
         "/api/v1/cmdb/assets",
         json={
-            "asset_type": "server",
+            "asset_type": "switch",
             "hostname": "srv-api-05",
             "ip_address": "10.0.9.5",
-            "vendor": "generic",
+            "vendor": "other",
         },
         headers=auth_headers,
     )
@@ -303,10 +303,10 @@ async def test_read_only_role_cannot_create(
     response = await client.post(
         "/api/v1/cmdb/assets",
         json={
-            "asset_type": "server",
+            "asset_type": "switch",
             "hostname": "srv-forbidden",
             "ip_address": "10.0.9.9",
-            "vendor": "generic",
+            "vendor": "other",
         },
         headers=auth_headers,
     )
@@ -319,11 +319,11 @@ async def _make_asset_pair(db_session: AsyncSession) -> tuple[int, int]:
 
     parent = await cmdb_asset_crud.create(
         db_session,
-        {"asset_type": "switch", "hostname": "sw-dep-01", "ip_address": "10.0.9.20", "vendor": "generic"},
+        {"asset_type": "switch", "hostname": "sw-dep-01", "ip_address": "10.0.9.20", "vendor": "other"},
     )
     child = await cmdb_asset_crud.create(
         db_session,
-        {"asset_type": "server", "hostname": "srv-dep-01", "ip_address": "10.0.9.21", "vendor": "generic"},
+        {"asset_type": "switch", "hostname": "srv-dep-01", "ip_address": "10.0.9.21", "vendor": "other"},
     )
     await db_session.commit()
     return parent.id, child.id
@@ -477,10 +477,10 @@ async def _create_static_asset(
     response = await client.post(
         "/api/v1/cmdb/assets",
         json={
-            "asset_type": "server",
+            "asset_type": "switch",
             "hostname": hostname,
             "ip_address": "10.0.9.31",
-            "vendor": "generic",
+            "vendor": "other",
             "credential_type": "static",
             "credential_username": "admin",
             "credential_password": secret,
@@ -592,10 +592,10 @@ async def test_reveal_credential_rejects_non_static_asset(
     create_resp = await client.post(
         "/api/v1/cmdb/assets",
         json={
-            "asset_type": "server",
+            "asset_type": "switch",
             "hostname": "srv-no-cred",
             "ip_address": "10.0.9.32",
-            "vendor": "generic",
+            "vendor": "other",
         },
         headers=auth_headers,
     )

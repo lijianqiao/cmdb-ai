@@ -11,6 +11,9 @@
 3. VendorName 定义在这里而不是 app/schemas/cmdb.py：厂商是否有效，唯一
    权威来源就是这个目录——目录里没有任何命令给这个厂商登记模板，这个厂商
    值本身就没有意义。CmdbAsset 的 vendor 字段校验从这里导入这个类型。
+   唯一的例外是 other：暂不支持的网络设备厂商先以它登记，能进 CMDB 台账和
+   依赖图，但故意不登记任何模板，所有命令都按「厂商不支持」拒绝。项目只面向
+   网络设备，Linux 等主机厂商和只对主机有意义的整机关机命令已经下线。
 4. 「设备回了文本」不等于「命令成功」，判定规则也登记在这里（R3）：
    - DEVICE_ERROR_PATTERNS：按厂商登记的明确报错句式（行首锚定的具体短语），
      配置命令交给 Netmiko 的 error_pattern 逐行检查，普通命令只看输出开头几行；
@@ -18,7 +21,7 @@
    - CONFIG_SUCCESS_MARKERS：需要明确成功回显的厂商（Junos 必须看到 commit complete）。
    - confirmation：按顺序登记每一轮确认提示与应答；设备问了目录里没登记的问题
      （例如「要不要保存配置」），执行器停下、不替人回答、报告不确定。
-   - verify_manually：重启/关机发出后连接会断，拿不到成功证据，结果只能交给人工核实。
+   - verify_manually：重启发出后连接会断，拿不到成功证据，结果只能交给人工核实。
 """
 
 import re
@@ -32,8 +35,7 @@ type VendorName = Literal[
     "huawei_vrp",
     "hp_comware",
     "juniper_junos",
-    "linux",
-    "generic",
+    "other",
 ]
 type CommandName = Literal[
     "show_version",
@@ -41,7 +43,6 @@ type CommandName = Literal[
     "show_interfaces",
     "ping",
     "reboot",
-    "shutdown",
     "port_enable",
     "port_disable",
 ]
@@ -49,7 +50,8 @@ type CommandType = Literal["read_only", "state_changing"]
 type RequiresArgument = Literal["none", "interface_name"]
 
 # t15：H3C Comware 补上端口启停。配置在 system-view 里立即生效，和华为一样不自动保存。
-DEVICE_COMMAND_CATALOG_VERSION = "t15-v1"
+# t16：只面向网络设备——下线 linux/generic 厂商和只对主机有意义的 shutdown，新增占位厂商 other。
+DEVICE_COMMAND_CATALOG_VERSION = "t16-v1"
 
 # 命令级正则、按厂商 CLI 语法书写；只用于 send_interactive 匹配确认提示，
 # 不接受任何运行时输入，跟 templates 一样是代码层常量。
@@ -58,9 +60,6 @@ _INTERFACE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9/.\-]{1,64}$")
 # 各厂商 CLI 拒绝命令时的明确报错句式。行首锚定、只认具体短语：
 # 这些正则会被 Netmiko 以 re.M 逐条检查配置命令的回显，也会被执行器用来检查
 # 普通命令输出的开头几行（报错总是紧跟在命令回显之后）。
-_UNIX_ERROR_PATTERN = (
-    r"^(?:sudo: .*|.*: (?:command not found|Permission denied|Operation not permitted))$"
-)
 DEVICE_ERROR_PATTERNS: Mapping[VendorName, str] = {
     "cisco_iosxe": (
         r"^\s*%\s*(?:Invalid input|Incomplete command|Ambiguous command|Unknown command"
@@ -77,8 +76,6 @@ DEVICE_ERROR_PATTERNS: Mapping[VendorName, str] = {
         r"|Too many parameters|Ambiguous command|Permission denied|Authorization failed)"
     ),
     "juniper_junos": r"^\s*(?:syntax error|unknown command|error:)",
-    "linux": _UNIX_ERROR_PATTERN,
-    "generic": _UNIX_ERROR_PATTERN,
 }
 
 # 配置命令需要看到的明确成功回显；没登记的厂商以「逐行无报错」为成功。
@@ -121,7 +118,7 @@ class DeviceCommandDefinition:
     config_templates: Mapping[VendorName, tuple[str, ...]] | None = None
     # 仅需要人工确认提示的 exec-mode 命令使用：按顺序登记每一轮提示与应答。
     confirmation: Mapping[VendorName, tuple[CommandConfirmation, ...]] | None = None
-    # 发出后拿不到成功证据（重启/关机会断开连接）：结果交给人工核实，不标成已执行。
+    # 发出后拿不到成功证据（重启会断开连接）：结果交给人工核实，不标成已执行。
     verify_manually: bool = False
 
 
@@ -137,11 +134,9 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
     "show_version": DeviceCommandDefinition(
         name="show_version",
         version=DEVICE_COMMAND_CATALOG_VERSION,
-        description="查看设备/系统版本信息",
+        description="查看设备版本信息",
         command_type="read_only",
         templates={
-            "generic": "cat /etc/os-release && uname -a",
-            "linux": "cat /etc/os-release && uname -a",
             "cisco_iosxe": "show version",
             "cisco_small_business": "show version",
             "huawei_vrp": "display version",
@@ -178,15 +173,9 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
     "ping": DeviceCommandDefinition(
         name="ping",
         version=DEVICE_COMMAND_CATALOG_VERSION,
-        description=(
-            "从设备本机发起连通性测试："
-            "Linux/generic 解析本机默认网关；"
-            "网络厂商固定探测 1.1.1.1（非用户参数，避免被当探测跳板）"
-        ),
+        description="从设备本机发起连通性测试：固定探测 1.1.1.1（非用户参数，避免被当探测跳板）",
         command_type="read_only",
         templates={
-            "generic": "ping -c 4 -W 2 $(ip route | awk '/default/ {print $3}')",
-            "linux": "ping -c 4 -W 2 $(ip route | awk '/default/ {print $3}')",
             # 网络设备 CLI 无法在单条命令里可靠解析默认网关；v1 用固定公网探测地址，
             # 禁止 <placeholder> 原样下发（见 test_templates_have_no_angle_bracket_placeholders）。
             "cisco_iosxe": "ping 1.1.1.1",
@@ -200,11 +189,9 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
     "reboot": DeviceCommandDefinition(
         name="reboot",
         version=DEVICE_COMMAND_CATALOG_VERSION,
-        description="重启设备（网络设备走 reload 语义）；执行前会等待设备确认提示",
+        description="重启设备（reload 语义）；执行前会等待设备确认提示",
         command_type="state_changing",
         templates={
-            "generic": "sudo reboot",
-            "linux": "sudo reboot",
             "cisco_iosxe": "reload",
             "cisco_small_business": "reload",
             "huawei_vrp": "reboot",
@@ -221,20 +208,6 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
             "juniper_junos": (
                 CommandConfirmation(prompt_pattern=_REBOOT_CONFIRM_PROMPT, response="yes"),
             ),
-        },
-        verify_manually=True,
-    ),
-    "shutdown": DeviceCommandDefinition(
-        name="shutdown",
-        version=DEVICE_COMMAND_CATALOG_VERSION,
-        description=(
-            "关闭设备电源；仅 Linux/generic 主机有意义（网络设备没有通用整机断电 CLI，"
-            "调用会按厂商不支持 fail-closed，不会被当成重启执行）"
-        ),
-        command_type="state_changing",
-        templates={
-            "generic": "sudo shutdown -h now",
-            "linux": "sudo shutdown -h now",
         },
         verify_manually=True,
     ),

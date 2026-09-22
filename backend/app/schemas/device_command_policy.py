@@ -12,6 +12,7 @@ from typing import Literal, Self
 from pydantic import ConfigDict, Field, model_validator
 
 from app.agent.device_commands import command_type_of, list_device_commands
+from app.schemas.cmdb import AssetTypeName
 from app.schemas.common import ApiModel
 
 type PolicyScope = Literal["asset_type", "asset"]
@@ -30,7 +31,7 @@ class DeviceCommandPolicyCreate(ApiModel):
     """Create a device command policy."""
 
     scope: PolicyScope
-    asset_type: str | None = Field(default=None, max_length=50)
+    asset_type: AssetTypeName | None = None
     asset_id: int | None = None
     command_name: str = Field(min_length=1, max_length=100)
     decision: PolicyDecision
@@ -50,7 +51,7 @@ class DeviceCommandPolicyCreate(ApiModel):
                 raise ValueError("scope 为 asset_type 时不能填写 asset_id")
             if command_type_of(self.command_name) == "state_changing":
                 raise ValueError(
-                    "变更类命令（reboot/shutdown/port_enable/port_disable）只能按单台设备（scope=asset）"
+                    "变更类命令（reboot/port_enable/port_disable）只能按单台设备（scope=asset）"
                     "配置白/黑名单，不允许按设备类型一次性放行"
                 )
         else:

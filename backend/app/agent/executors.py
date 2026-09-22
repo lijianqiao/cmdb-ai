@@ -9,7 +9,7 @@
 1. ExecutionResult 是 hitl.resume 与各类执行器之间的统一返回契约（ok/message/detail）。
 2. NotifyExecutor 从 payload 读取 message，校验非空后调用 log_audit(action=hitl_notify_executed)。
 3. DeviceQueryExecutor 同时服务只读诊断与变更管控：按目录分派 send_command、
-   send_command_timing（reboot/shutdown 的确认提示）或 send_config_set（接口启停）。
+   send_command_timing（reboot 的确认提示）或 send_config_set（接口启停）。
 4. ExecutionResult.dispatched 回答"这次失败有没有可能已经把命令发到设备上"：
    连接建立之前的任何失败都是 False（确定没下发，上层可安全回退重试），连接一旦
    建立就置 True（之后失败无法确定命令是否已生效，上层必须走 UNKNOWN 人工核实）。
@@ -21,7 +21,7 @@
      需要提交回显的厂商（Junos 的 commit complete）没看到回显也不算成功；
    - 普通命令只检查输出开头几行的厂商报错句式，避免把配置正文里的 error 字样误判；
    - 确认流程按目录逐轮匹配，设备问了没登记的问题就停下、不替人回答；
-   - 重启/关机发出后拿不到成功证据，返回「待人工核实」，由上层落 UNKNOWN。
+   - 重启发出后拿不到成功证据，返回「待人工核实」，由上层落 UNKNOWN。
 
 为什么用 Netmiko 而不是 Scrapli：本项目要同时管思科/华三/华为/锐捷等多厂商设备，
 而"关闭分页"这一步各厂商命令完全不同（华为 screen-length 0 temporary、华三
@@ -154,14 +154,12 @@ _NETMIKO_DEVICE_TYPES: Mapping[str, str] = {
     "huawei_vrp": "huawei_vrp",
     "hp_comware": "hp_comware",
     "juniper_junos": "juniper_junos",
-    "linux": "linux",
-    "generic": "generic",
 }
 
 
 def _netmiko_device_type_for_vendor(vendor: str) -> str:
-    """按 CMDB 厂商字段选择 Netmiko device_type，未登记的厂商退回 generic。"""
-    return _NETMIKO_DEVICE_TYPES.get(vendor, "generic")
+    """按 CMDB 厂商字段选择 Netmiko device_type；调用方已确认厂商有映射（见 execute）。"""
+    return _NETMIKO_DEVICE_TYPES[vendor]
 
 
 def _open_netmiko_connection(
@@ -359,7 +357,7 @@ def _run_device_command(
             dispatched,
         )
         message = (
-            "连接或执行命令失败；如果是重启/关机类命令，设备可能已经生效，请人工核实"
+            "连接或执行命令失败；如果是重启类命令，设备可能已经生效，请人工核实"
             if dispatched
             else "无法建立设备连接，命令未下发"
         )
@@ -377,9 +375,9 @@ def _run_device_command(
                 pass
 
     if definition.verify_manually:
-        # 重启/关机发出后设备就断开了：断线或没有报错都不是成功证据。
+        # 重启发出后设备就断开了：断线或没有报错都不是成功证据。
         return _unconfirmed(
-            "命令已发送，设备正在重启/关机；这期间无法自动确认结果，请在设备恢复后人工核实"
+            "命令已发送，设备正在重启；这期间无法自动确认结果，请在设备恢复后人工核实"
         )
     return ExecutionResult(
         ok=True,
@@ -439,6 +437,10 @@ class DeviceQueryExecutor:
 
         if not command_supports_vendor(command_name, asset.vendor):
             return ExecutionResult(ok=False, message="该设备厂商不支持这个命令")
+        if asset.vendor not in _NETMIKO_DEVICE_TYPES:
+            # 目录登记了模板却漏了平台映射：宁可不连，也不按 generic 硬连——generic 不关分页，
+            # 大输出会卡在分页提示符上读超时，连上之后的失败又只能落 UNKNOWN 等人工核实。
+            return ExecutionResult(ok=False, message="该厂商没有对应的 Netmiko 平台，命令未下发")
 
         vendor = cast(VendorName, asset.vendor)
         # Netmiko 全同步，丢到工作线程避免阻塞事件循环。注意线程不可取消：

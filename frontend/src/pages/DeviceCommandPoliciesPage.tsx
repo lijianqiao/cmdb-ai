@@ -34,6 +34,7 @@ import { DeviceCommandPolicyFormDialog } from "@/components/device-command-polic
 import api from "@/lib/api"
 import { usePaginatedQuery } from "@/hooks/use-paginated-query"
 import { usePermission } from "@/hooks/use-permission"
+import { assetTypeLabel } from "@/components/cmdb/cmdbAssetTypes"
 import { PERMISSIONS, ROUTES } from "@/lib/constants"
 import type {
   DeviceCommandPolicy,
@@ -41,25 +42,13 @@ import type {
   DeviceCommandPolicyUpdate,
 } from "@/types/device-command-policy"
 
-const ASSET_TYPE_LABELS: Record<string, string> = {
-  server: "服务器",
-  switch: "交换机",
-  router: "路由器",
-  firewall: "防火墙",
-  load_balancer: "负载均衡",
-  storage: "存储",
-  other: "其他",
-}
-
 function formatTarget(policy: DeviceCommandPolicy): string {
   if (policy.scope === "asset_type") {
-    const label =
-      ASSET_TYPE_LABELS[policy.asset_type ?? ""] ?? policy.asset_type
+    const label = assetTypeLabel(policy.asset_type ?? "")
     return `类型：${label}`
   }
   if (policy.asset) {
-    const typeLabel =
-      ASSET_TYPE_LABELS[policy.asset.asset_type] ?? policy.asset.asset_type
+    const typeLabel = assetTypeLabel(policy.asset.asset_type)
     return `${policy.asset.hostname} (${policy.asset.ip_address}) · ${typeLabel}`
   }
   return `设备 #${policy.asset_id}`
@@ -145,8 +134,7 @@ export function DeviceCommandPoliciesPage() {
         cell: ({ row }) => {
           const policy = row.original
           if (policy.scope === "asset_type") {
-            const label =
-              ASSET_TYPE_LABELS[policy.asset_type ?? ""] ?? policy.asset_type
+            const label = assetTypeLabel(policy.asset_type ?? "")
             return (
               <span
                 className="block max-w-[200px] truncate font-medium text-foreground"
@@ -157,8 +145,7 @@ export function DeviceCommandPoliciesPage() {
             )
           }
           if (policy.asset) {
-            const typeLabel =
-              ASSET_TYPE_LABELS[policy.asset.asset_type] ?? policy.asset.asset_type
+            const typeLabel = assetTypeLabel(policy.asset.asset_type)
             return (
               <div
                 className="flex flex-col min-w-0 max-w-[220px]"

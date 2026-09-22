@@ -14,7 +14,7 @@ async def _make_asset(
     asset = await cmdb_asset_crud.create(
         db_session,
         {
-            "asset_type": "server",
+            "asset_type": "switch",
             "hostname": hostname,
             "ip_address": ip,
             "business_system": business_system,
@@ -83,7 +83,7 @@ async def test_get_multi_filtered_paginates_and_searches(db_session: AsyncSessio
         await cmdb_asset_crud.create(
             db_session,
             {
-                "asset_type": "server",
+                "asset_type": "switch",
                 "hostname": f"srv-list-{i}",
                 "ip_address": f"10.0.1.{i}",
                 "business_system": "财务系统" if i == 0 else "",
@@ -113,7 +113,7 @@ async def test_soft_delete_restore_and_hard_delete_round_trip(
 ) -> None:
     asset = await cmdb_asset_crud.create(
         db_session,
-        {"asset_type": "server", "hostname": "srv-trash-01", "ip_address": "10.0.2.1"},
+        {"asset_type": "switch", "hostname": "srv-trash-01", "ip_address": "10.0.2.1"},
     )
     await db_session.flush()
 

@@ -166,7 +166,7 @@ async def test_vendor_unsupported_command_gives_specific_message(
     )
     asset = await cmdb_asset_crud.get(db_session, asset_id)
     assert asset is not None
-    asset.vendor = "linux"  # show_running_config 目录里没有 linux 模板
+    asset.vendor = "other"  # other 是占位厂商，目录里没有任何模板
 
     executor = DeviceQueryExecutor()
     result = await executor.execute(

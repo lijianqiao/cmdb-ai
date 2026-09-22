@@ -325,7 +325,7 @@ classDiagram
 | :------------------------ | :------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------- | :----------------- |
 | `notify`                  | `asset_id, payload, reason`                       | 站内通知：`assist`/`full` 档可自动批准并当场执行，默认 `ask` 档弹卡待审批                                         | 写（HITL 门控）    |
 | `query_device_command`    | `asset_id, command_name, reason`                  | 只读诊断命令：按会话 `approval_mode` 判定——`assist` 且白名单+非动态凭据可当场返回输出；`full` 另可当场执行未分类非动态命令；默认 `ask` 及动态凭据走 `PENDING` | 读（经 HITL 门控） |
-| `device_control`          | `asset_id, command_name, interface_name?, reason` | 变更类命令（`reboot`/`shutdown`/`port_enable`/`port_disable`）：`assist` 且白名单+非动态凭据可当场执行；`full` 另可当场执行未分类非动态命令；默认 `ask` 及动态凭据 `PENDING` 待审批 | 写（HITL 门控）    |
+| `device_control`          | `asset_id, command_name, interface_name?, reason` | 变更类命令（`reboot`/`port_enable`/`port_disable`）：`assist` 且白名单+非动态凭据可当场执行；`full` 另可当场执行未分类非动态命令；默认 `ask` 及动态凭据 `PENDING` 待审批 | 写（HITL 门控）    |
 | `list_device_commands`    | `asset_id`                                        | 该资产可用命令名、说明、白/黑名单策略与凭据前提（只读，无审批）；策略文案随当前会话 `approval_mode` 变化，避免模型误判自动执行范围 | 读                 |
 | `get_device_query_result` | `proposal_id`                                     | 按会话回查已提交的设备命令查询提案状态或执行结果（只读，无审批）                                                 | 读                 |
 
@@ -456,7 +456,7 @@ PENDING ──会话归档──> REJECTED（status_reason=withdrawn_on_archive�
 - **`EXECUTING` 先提交**：认领 `EXECUTING` 的事务提交后，外部执行器（Netmiko / notify）才启动；执行器内可观测已提交的 `EXECUTING` 状态
 - **`UNKNOWN` 不自动重试**：执行失败、进程崩溃或启动恢复（`reconcile_executing_proposals` 将遗留 `EXECUTING` 批量转 `UNKNOWN`）后，系统不会自动再次执行；须管理员人工处置（见 [guide.md §5.3.2](./guide.md#532-管理员处置-unknown-提案本项目)）
 - **`UNKNOWN` 只留给真正不确定的失败**：执行器用 `ExecutionResult.dispatched` 区分两类失败——连接尚未建立就失败（平台/驱动不支持、认证失败、主机不可达）说明命令确定没下发、设备状态未被改动，原子转回 `APPROVED` 并写 `status_reason=dispatch_failed_before_send`，管理员修好前置条件即可直接重试；连接建立之后的任何失败都无法确定命令是否已生效，仍走 `UNKNOWN` 人工核实
-- **设备回了文本不等于成功**：只有明确的成功证据才落 `EXECUTED`，判定规则登记在命令目录（`device_commands.py`）里——配置命令把按厂商登记的报错句式交给 Netmiko `error_pattern` 逐行检查，命中即失败（可能部分生效，走 `UNKNOWN`）；Junos 必须看到 `commit complete`；普通命令只检查输出开头几行的厂商报错句式（不用宽泛的 `error` 正则扫整段输出，避免把配置正文里的 logging errors 误判）；确认流程按目录逐轮匹配，设备问了没登记的问题（例如「要不要保存配置」）就停下、不替人回答；重启/关机发出后连接会断、拿不到成功证据，一律落 `UNKNOWN` 并提示在设备恢复后人工核实（管理员在卡片上「确认已执行」即转 `EXECUTED`）。设备报错不改变 `dispatched=True`：连上设备之后的失败都按「可能已触及设备」处理
+- **设备回了文本不等于成功**：只有明确的成功证据才落 `EXECUTED`，判定规则登记在命令目录（`device_commands.py`）里——配置命令把按厂商登记的报错句式交给 Netmiko `error_pattern` 逐行检查，命中即失败（可能部分生效，走 `UNKNOWN`）；Junos 必须看到 `commit complete`；普通命令只检查输出开头几行的厂商报错句式（不用宽泛的 `error` 正则扫整段输出，避免把配置正文里的 logging errors 误判）；确认流程按目录逐轮匹配，设备问了没登记的问题（例如「要不要保存配置」）就停下、不替人回答；重启发出后连接会断、拿不到成功证据，一律落 `UNKNOWN` 并提示在设备恢复后人工核实（管理员在卡片上「确认已执行」即转 `EXECUTED`）。设备报错不改变 `dispatched=True`：连上设备之后的失败都按「可能已触及设备」处理
 - **失败原因可追**：分类原因（含异常类名）写入 `action_payload.last_error`，经安全摘要透出到审批卡片与 Agent 上下文；完整异常堆栈只进服务端日志，不外泄。审计日志 `detail` 刻意不含异常文本
 - 待审批期间，`action_payload` 中的敏感字段不通过 WebSocket 回传给发起对话的 Agent 上下文，Agent 只收到"提案已创建，等待审批"的摘要
 - 新增权限码 `agent:hitl_approve`，只有持有该权限的用户能操作 `PENDING → APPROVED/REJECTED`、`UNKNOWN` 人工处置，以及 `POST /api/v1/hitl/proposals/{id}/retry`（复用现有 RBAC，不新建权限体系）
@@ -481,7 +481,7 @@ PENDING ──会话归档──> REJECTED（status_reason=withdrawn_on_archive�
 | action_type      | 执行器                                                                                            | 当前状态                                                                                                                                                                                                                       |
 | :--------------- | :------------------------------------------------------------------------------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `notify`         | 写 `audit_logs` + 站内消息经 WebSocket 推给相关人                                                 | 已实现，无额外基建需求                                                                                                                                                                                                         |
-| `device_control` | Netmiko 执行通道（`send_command_timing` 按目录逐轮确认 / `send_config_set` 带厂商 `error_pattern`），复用 `device_query` 的命令目录与策略解析；重启/关机发出后落 `UNKNOWN` 等人工核实 | **已接入**：按会话 `AgentSession.approval_mode` 判定是否当场执行——默认 `ask` 白名单亦需人工审批；`assist`/`full` 可当场执行白名单+非动态凭据；`full` 另放开未分类非动态命令；黑名单不可绕过；动态凭据始终须人工批准并输入本次密码（见 [docs/superpowers/plans/2026-08-13-device-control-execution.md](./superpowers/plans/2026-08-13-device-control-execution.md)） |
+| `device_control` | Netmiko 执行通道（`send_command_timing` 按目录逐轮确认 / `send_config_set` 带厂商 `error_pattern`），复用 `device_query` 的命令目录与策略解析；重启发出后落 `UNKNOWN` 等人工核实 | **已接入**：按会话 `AgentSession.approval_mode` 判定是否当场执行——默认 `ask` 白名单亦需人工审批；`assist`/`full` 可当场执行白名单+非动态凭据；`full` 另放开未分类非动态命令；黑名单不可绕过；动态凭据始终须人工批准并输入本次密码（见 [docs/superpowers/plans/2026-08-13-device-control-execution.md](./superpowers/plans/2026-08-13-device-control-execution.md)） |
 
 ### 7. 确定性管道
 

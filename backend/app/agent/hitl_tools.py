@@ -277,7 +277,7 @@ async def list_device_commands_for_asset(
     elif asset.credential_type == "dynamic":
         lines.append("注意：该资产使用动态凭据，所有命令都需要人工审批并当场输入密码。")
     lines.append(
-        "变更类命令（reboot/shutdown/port_enable/port_disable）请用 device_control；"
+        "变更类命令（reboot/port_enable/port_disable）请用 device_control；"
         "只读诊断请用 query_device_command。"
     )
 

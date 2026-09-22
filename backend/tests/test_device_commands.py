@@ -27,10 +27,25 @@ def test_catalog_contains_expected_commands() -> None:
         "show_interfaces",
         "ping",
         "reboot",
-        "shutdown",
         "port_enable",
         "port_disable",
     }
+
+
+def test_host_vendors_and_power_off_command_are_retired() -> None:
+    """命令只面向网络设备：整机关机只对 Linux 主机有意义，随主机厂商一起下线。"""
+    with pytest.raises(UnknownDeviceCommandError):
+        get_device_command("shutdown")
+    for item in list_device_commands():
+        vendors = set(item.templates) | set(item.config_templates or {})
+        assert not vendors & {"linux", "generic"}, item.name
+
+
+def test_other_vendor_has_no_commands() -> None:
+    """other 是暂不支持的网络设备厂商的占位值：能登记进 CMDB，但任何命令都不支持。"""
+    assert list_commands_for_vendor("other") == ()
+    for item in list_device_commands():
+        assert command_supports_vendor(item.name, "other") is False
 
 
 def test_every_command_is_versioned_and_has_description() -> None:
@@ -54,7 +69,7 @@ def test_show_version_has_templates_for_multiple_vendors() -> None:
 
 def test_command_supports_vendor_reflects_template_presence() -> None:
     assert command_supports_vendor("show_version", "cisco_iosxe") is True
-    assert command_supports_vendor("show_running_config", "linux") is False
+    assert command_supports_vendor("show_running_config", "other") is False
 
 
 def test_command_supports_vendor_returns_false_for_unknown_command() -> None:
@@ -97,23 +112,17 @@ def test_get_command_template_raises_unknown_command_error_for_unknown_name() ->
 def test_get_command_template_raises_unsupported_vendor_error_for_known_command() -> None:
     """命令存在，但目录里没给这个厂商登记模板——不能跟"未知命令名"报同一个错。"""
     with pytest.raises(UnsupportedVendorError):
-        get_command_template("show_running_config", "linux")
+        get_command_template("show_running_config", "other")
 
 
 def test_catalog_contains_state_changing_commands() -> None:
     names = {item.name for item in list_device_commands()}
-    assert {"reboot", "shutdown", "port_enable", "port_disable"} <= names
+    assert {"reboot", "port_enable", "port_disable"} <= names
 
 
 def test_state_changing_commands_are_flagged() -> None:
-    for name in ("reboot", "shutdown", "port_enable", "port_disable"):
+    for name in ("reboot", "port_enable", "port_disable"):
         assert get_device_command(name).command_type == "state_changing"
-
-
-def test_shutdown_only_supports_linux_generic() -> None:
-    """网络设备没有通用整机关机语义，shutdown 只登记 linux/generic。"""
-    shutdown = get_device_command("shutdown")
-    assert set(shutdown.templates) == {"linux", "generic"}
 
 
 def test_reboot_has_confirmation_for_network_vendors() -> None:
@@ -132,12 +141,12 @@ def test_reboot_has_confirmation_for_network_vendors() -> None:
 def test_port_commands_require_interface_argument() -> None:
     for name in ("port_enable", "port_disable"):
         assert get_device_command(name).requires_argument == "interface_name"
-    for name in ("show_version", "reboot", "shutdown"):
+    for name in ("show_version", "reboot"):
         assert get_device_command(name).requires_argument == "none"
 
 
-def test_port_commands_config_templates_exclude_hosts_without_interface_views() -> None:
-    """linux/generic 没有网络设备的接口视图，不提供端口启停。H3C Comware 要提供。"""
+def test_port_commands_config_templates_cover_all_network_vendors() -> None:
+    """五个网络厂商都登记端口启停，包括 H3C Comware。"""
     port_disable = get_device_command("port_disable")
     port_enable = get_device_command("port_enable")
     assert port_disable.config_templates is not None
@@ -150,8 +159,6 @@ def test_port_commands_config_templates_exclude_hosts_without_interface_views() 
         "hp_comware",
         "juniper_junos",
     }
-    assert "linux" not in port_disable.config_templates
-    assert "generic" not in port_disable.config_templates
     assert port_enable.config_templates["hp_comware"] == (
         "interface {interface}",
         "undo shutdown",
@@ -169,7 +176,7 @@ def test_list_commands_for_vendor_includes_config_mode_only_commands() -> None:
     assert command_supports_vendor("port_disable", "cisco_iosxe") is True
     assert command_supports_vendor("port_enable", "hp_comware") is True
     assert command_supports_vendor("port_disable", "hp_comware") is True
-    assert command_supports_vendor("port_enable", "linux") is False
+    assert command_supports_vendor("port_enable", "other") is False
 
 
 def test_junos_port_config_template_includes_explicit_commit() -> None:
@@ -191,10 +198,6 @@ def test_command_type_of_returns_risk_level_for_known_commands() -> None:
 
 def test_command_type_of_returns_none_for_unknown_command() -> None:
     assert command_type_of("drop_table") is None
-
-
-def test_shutdown_unsupported_on_network_vendors() -> None:
-    assert command_supports_vendor("shutdown", "cisco_iosxe") is False
 
 
 def test_get_command_template_rejects_config_mode_only_commands() -> None:
@@ -233,7 +236,6 @@ def test_cisco_small_business_uses_sg350x_commands() -> None:
         "interface {interface}",
         "shutdown",
     )
-    assert command_supports_vendor("shutdown", "cisco_small_business") is False
 
 
 @pytest.mark.parametrize(
@@ -302,7 +304,7 @@ def test_every_vendor_has_a_device_error_pattern() -> None:
     assert vendors <= set(DEVICE_ERROR_PATTERNS)
 
 
-def test_only_reboot_and_shutdown_need_manual_verification() -> None:
-    """重启/关机后连接会断：拿不到成功证据，结果只能交给人工核实。"""
+def test_only_reboot_needs_manual_verification() -> None:
+    """重启后连接会断：拿不到成功证据，结果只能交给人工核实。"""
     needs_manual = {item.name for item in list_device_commands() if item.verify_manually}
-    assert needs_manual == {"reboot", "shutdown"}
+    assert needs_manual == {"reboot"}

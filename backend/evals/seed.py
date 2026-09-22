@@ -67,16 +67,17 @@ SEED_DOCUMENTS: tuple[SeedDocument, ...] = (
 SEED_ASSETS: tuple[tuple[int, str, str], ...] = (
     (1, "SW-01", "10.0.30.1"),
     (2, "SW-02", "10.0.30.2"),
-    (3, "SRV-01", "10.0.20.11"),
-    (4, "SRV-02", "10.0.20.12"),
+    (3, "SW-03", "10.0.30.3"),
+    (4, "SW-04", "10.0.30.4"),
     (5, "FW-01", "10.0.30.254"),
 )
 
-# 依赖链 SW-01 → SW-02 → SRV-01/SRV-02。cmdb-dependency 用例靠它测
+# 依赖链 SW-01 → SW-02 → SW-03/SW-04（接入交换机）。CMDB 只登记网络设备，
+# 所以下游是接入交换机而不是服务器。cmdb-dependency 用例靠它测
 # 「模型会不会偷懒只查一层就瞎答」——只调 query_cmdb 是查不出下游的。
 SEED_DEPENDENCIES: tuple[tuple[int, int], ...] = ((1, 2), (2, 3), (2, 4))
 
-# (监控目标 id, 设备 id, 状态, 延迟)。SRV-02 故意是 down，供告警类提问使用。
+# (监控目标 id, 设备 id, 状态, 延迟)。SW-04 故意是 down，供告警类提问使用。
 SEED_MONITORS: tuple[tuple[int, int, str, int | None], ...] = (
     (1, 1, "up", 2),
     (2, 3, "up", 5),
@@ -227,7 +228,7 @@ async def seed_all(session: AsyncSession, paths: EvalPaths) -> None:
         session.add(
             CmdbAsset(
                 id=asset_id,
-                asset_type="server" if hostname.startswith("SRV") else "switch",
+                asset_type="switch",
                 hostname=hostname,
                 ip_address=ip,
                 location="机房 A",

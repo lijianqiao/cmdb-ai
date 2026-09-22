@@ -1,4 +1,4 @@
-# 依赖链是 SW-01 → SW-02 → SRV-01/SRV-02。
+# 依赖链是 SW-01 → SW-02 → SW-03/SW-04。
 # 只调 query_cmdb 查不出下游，必须调 query_cmdb_dependencies。
 # 这条测「会不会偷懒只查一层就瞎答」。
 id: cmdb-dependency

@@ -61,17 +61,8 @@ import {
   createFormSchema,
   type CmdbAssetFormValues,
 } from "./cmdbAssetFormSchema"
+import { ASSET_TYPE_ITEMS } from "./cmdbAssetTypes"
 import { isVendorName, VENDOR_ITEMS } from "./cmdbVendors"
-
-const ASSET_TYPE_ITEMS: { label: string; value: string }[] = [
-  { label: "服务器", value: "server" },
-  { label: "交换机", value: "switch" },
-  { label: "路由器", value: "router" },
-  { label: "防火墙", value: "firewall" },
-  { label: "负载均衡", value: "load_balancer" },
-  { label: "存储", value: "storage" },
-  { label: "其他", value: "other" },
-]
 
 const CREDENTIAL_TYPE_ITEMS: { label: string; value: CredentialType }[] = [
   { label: "无", value: "none" },
@@ -159,12 +150,12 @@ interface CmdbAssetFormDialogProps {
 }
 
 function resolveVendor(value: string | undefined): VendorName {
-  return isVendorName(value) ? value : "generic"
+  return isVendorName(value) ? value : "other"
 }
 
 function defaultValues(asset?: CmdbAsset | null): CmdbAssetFormValues {
   return {
-    asset_type: asset?.asset_type || "server",
+    asset_type: asset?.asset_type || "switch",
     vendor: resolveVendor(asset?.vendor),
     hostname: asset?.hostname ?? "",
     ip_address: asset?.ip_address ?? "",
@@ -306,7 +297,7 @@ export function CmdbAssetFormDialog({
                       items={assetTypeItems}
                       value={field.value}
                       onValueChange={(value) =>
-                        field.onChange(value ?? "server")
+                        field.onChange(value ?? "switch")
                       }
                     >
                       <SelectTrigger id="asset-type">
@@ -336,7 +327,7 @@ export function CmdbAssetFormDialog({
                       items={vendorItems}
                       value={field.value}
                       onValueChange={(value) =>
-                        field.onChange(value ?? "generic")
+                        field.onChange(value ?? "other")
                       }
                     >
                       <SelectTrigger id="asset-vendor">
