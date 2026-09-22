@@ -34,6 +34,8 @@ type ToolControl = Literal["ok", "rejected", "failed", "clarification", "pending
 _EARLY_EXIT_CONTROLS: frozenset[ToolControl] = frozenset({"pending_approval"})
 _FAILURE_CONTROLS: frozenset[ToolControl] = frozenset({"clarification", "rejected", "failed"})
 _MAX_CONSECUTIVE_FAILED_ROUNDS = 3
+# 同一轮里排在「等待审批」之后的调用写成这句；人批准后写结论时按它数出被跳过了几个。
+SKIPPED_TOOL_RESULT = "已跳过：等待前一个工具调用的处理结果"
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,10 +211,7 @@ async def run_loop(
                     pending_tool_results.append(
                         (
                             skipped_call,
-                            ToolResult(
-                                control="ok",
-                                content="已跳过：等待前一个工具调用的处理结果",
-                            ),
+                            ToolResult(control="ok", content=SKIPPED_TOOL_RESULT),
                         )
                     )
                 pending.append(

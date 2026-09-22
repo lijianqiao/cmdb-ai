@@ -22,10 +22,16 @@
    - confirmation：按顺序登记每一轮确认提示与应答；设备问了目录里没登记的问题
      （例如「要不要保存配置」），执行器停下、不替人回答、报告不确定。
    - verify_manually：重启发出后连接会断，拿不到成功证据，结果只能交给人工核实。
+5. 端口类命令一次接一组接口（interface_names，最多 48 个）。config_templates 只写
+   一个接口的那几行，按接口逐个展开，不用各厂商的 range 语法：四家写法各不相同，
+   range 里某个口报错时也分不清是哪一个。进配置模式的命令（CONFIG_MODE_COMMANDS）
+   和提交命令（CONFIG_COMMIT_COMMANDS）是厂商级规则：Junos 进私有候选配置
+   configure private，中途失败时改动随会话丢弃，不会留在所有人共享的候选配置里；
+   整批只在最后 commit 一次。
 """
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -47,11 +53,15 @@ type CommandName = Literal[
     "port_disable",
 ]
 type CommandType = Literal["read_only", "state_changing"]
-type RequiresArgument = Literal["none", "interface_name"]
+type ArgName = Literal["interface_names"]
 
 # t15：H3C Comware 补上端口启停。配置在 system-view 里立即生效，和华为一样不自动保存。
 # t16：只面向网络设备——下线 linux/generic 厂商和只对主机有意义的 shutdown，新增占位厂商 other。
-DEVICE_COMMAND_CATALOG_VERSION = "t16-v1"
+# t17：端口启停一次接一组接口；Junos 进私有候选配置，commit 改为整批最后提交一次。
+DEVICE_COMMAND_CATALOG_VERSION = "t17-v1"
+
+# 一条提案最多带的接口数：一台接入交换机的口数，超过要求分两次。
+MAX_INTERFACES_PER_PROPOSAL = 48
 
 # 命令级正则、按厂商 CLI 语法书写；只用于 send_interactive 匹配确认提示，
 # 不接受任何运行时输入，跟 templates 一样是代码层常量。
@@ -83,6 +93,17 @@ CONFIG_SUCCESS_MARKERS: Mapping[VendorName, str] = {
     "juniper_junos": r"commit complete",
 }
 
+# 进配置模式的命令；没登记的厂商用 Netmiko 驱动的默认命令。Junos 进私有候选配置：
+# 共享候选库里有别人未提交的改动时它会拒绝进入，那时一条配置都没发，可以直接重试。
+CONFIG_MODE_COMMANDS: Mapping[VendorName, str] = {
+    "juniper_junos": "configure private",
+}
+
+# 整批配置发完后追加一次的提交命令：Junos 的配置要 commit 才生效。
+CONFIG_COMMIT_COMMANDS: Mapping[VendorName, tuple[str, ...]] = {
+    "juniper_junos": ("commit",),
+}
+
 # 重启确认提示：同一行里要提到 reboot/reload/reset，并带确认记号；
 # 含 save 的行（保存配置的询问）一律不匹配——那是另一个决定，不能替人回答。
 _REBOOT_CONFIRM_PROMPT = (
@@ -94,6 +115,23 @@ _REBOOT_CONFIRM_PROMPT = (
 def validate_interface_name(value: str) -> bool:
     """接口名严格白名单校验：只允许字母数字/斜杠/点/短横线，拒绝空白与控制字符。"""
     return bool(_INTERFACE_NAME_PATTERN.fullmatch(value))
+
+
+def normalize_interface_names(values: Sequence[str]) -> tuple[str, ...]:
+    """接口列表去重保序并逐个校验：1–48 个，每个都要过接口名白名单。
+
+    不合法时抛 ValueError；原因里不带输入值，可以直接转给模型让它自己改。
+    """
+    unique = tuple(dict.fromkeys(values))
+    if not unique:
+        raise ValueError("interface_names 至少要有一个接口")
+    if len(unique) > MAX_INTERFACES_PER_PROPOSAL:
+        raise ValueError(
+            f"interface_names 一次最多 {MAX_INTERFACES_PER_PROPOSAL} 个接口，请分批操作"
+        )
+    if not all(isinstance(name, str) and validate_interface_name(name) for name in unique):
+        raise ValueError("接口名只能包含字母、数字、/、.、-，且不超过 64 个字符")
+    return unique
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,8 +151,10 @@ class DeviceCommandDefinition:
     description: str
     command_type: CommandType
     templates: Mapping[VendorName, str]
-    requires_argument: RequiresArgument = "none"
-    # 仅 config-mode 命令（如端口开关）使用；send_configs 而非 send_command 执行。
+    # 命令接受的参数；没登记的参数一律拒绝。
+    arguments: tuple[ArgName, ...] = ()
+    # 仅 config-mode 命令（如端口开关）使用，写一个接口的那几行，按接口逐个展开；
+    # 走 send_config_set 而非 send_command。
     config_templates: Mapping[VendorName, tuple[str, ...]] | None = None
     # 仅需要人工确认提示的 exec-mode 命令使用：按顺序登记每一轮提示与应答。
     confirmation: Mapping[VendorName, tuple[CommandConfirmation, ...]] | None = None
@@ -214,32 +254,34 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
     "port_enable": DeviceCommandDefinition(
         name="port_enable",
         version=DEVICE_COMMAND_CATALOG_VERSION,
-        description="启用一个网络接口（no shutdown / undo shutdown 语义）",
+        description=(
+            "启用一组网络接口（no shutdown / undo shutdown 语义）；接口全名放在 interface_names 里"
+        ),
         command_type="state_changing",
         templates={},
-        requires_argument="interface_name",
+        arguments=("interface_names",),
         config_templates={
             "cisco_iosxe": ("interface {interface}", "no shutdown"),
             "cisco_small_business": ("interface {interface}", "no shutdown"),
             "huawei_vrp": ("interface {interface}", "undo shutdown"),
             # H3C Comware 与华为一样：进接口视图后 undo shutdown。Netmiko 会先发 system-view。
             "hp_comware": ("interface {interface}", "undo shutdown"),
-            "juniper_junos": ("delete interfaces {interface} disable", "commit"),
+            "juniper_junos": ("delete interfaces {interface} disable",),
         },
     ),
     "port_disable": DeviceCommandDefinition(
         name="port_disable",
         version=DEVICE_COMMAND_CATALOG_VERSION,
-        description="禁用一个网络接口（shutdown 语义）",
+        description="禁用一组网络接口（shutdown 语义）；接口全名放在 interface_names 里",
         command_type="state_changing",
         templates={},
-        requires_argument="interface_name",
+        arguments=("interface_names",),
         config_templates={
             "cisco_iosxe": ("interface {interface}", "shutdown"),
             "cisco_small_business": ("interface {interface}", "shutdown"),
             "huawei_vrp": ("interface {interface}", "shutdown"),
             "hp_comware": ("interface {interface}", "shutdown"),
-            "juniper_junos": ("set interfaces {interface} disable", "commit"),
+            "juniper_junos": ("set interfaces {interface} disable",),
         },
     ),
 }
@@ -286,19 +328,39 @@ def command_type_of(command_name: str) -> CommandType | None:
     return definition.command_type if definition else None
 
 
-def rendered_command_lines(
-    command_name: str, vendor: str, *, interface_name: str | None
-) -> tuple[str, ...]:
-    """返回这条命令在该厂商上实际下发的命令行：config 模式按接口名填好模板，exec 模式一行。
+def config_command_blocks(
+    command_name: str, vendor: str, interface_names: Sequence[str]
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """config 模式命令按接口展开：每个接口一组填好的命令行，不含整批最后的提交命令。
 
-    执行器和审批证据快照都用它，保证证据里记的就是真正发出去的内容。
+    执行器按这个分组逐口下发，出错在哪一组就是哪个口。
+    """
+    definition = get_device_command(command_name)
+    if definition.config_templates is None or vendor not in definition.config_templates:
+        raise UnsupportedVendorError(
+            f"vendor {vendor!r} has no config template for command {command_name!r}"
+        )
+    templates = definition.config_templates[vendor]  # type: ignore[index]
+    return tuple(
+        (name, tuple(line.format(interface=name) for line in templates))
+        for name in interface_names
+    )
+
+
+def rendered_command_lines(
+    command_name: str, vendor: str, *, interface_names: Sequence[str] | None
+) -> tuple[str, ...]:
+    """返回这条命令在该厂商上实际下发的全部命令行。
+
+    config 模式按接口逐个展开模板，最后追加厂商的提交命令；exec 模式一行。执行器和
+    审批证据快照都从这里取，保证证据里记的就是真正发出去的内容。
     """
     definition = get_device_command(command_name)
     if definition.config_templates is not None and vendor in definition.config_templates:
-        return tuple(
-            line.format(interface=interface_name)
-            for line in definition.config_templates[vendor]  # type: ignore[index]
-        )
+        blocks = config_command_blocks(command_name, vendor, interface_names or ())
+        lines = tuple(line for _, block in blocks for line in block)
+        commit_lines: tuple[str, ...] = CONFIG_COMMIT_COMMANDS.get(vendor, ())  # type: ignore[call-overload]
+        return lines + commit_lines
     return (get_command_template(command_name, vendor),)
 
 

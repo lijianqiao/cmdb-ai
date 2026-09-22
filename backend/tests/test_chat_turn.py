@@ -39,6 +39,16 @@ async def test_root_ops_system_prompt_uses_execution_tool_names() -> None:
     assert "propose_device_control" not in ROOT_OPS_SYSTEM_PROMPT
 
 
+async def test_root_ops_system_prompt_asks_for_every_named_interface_in_one_call() -> None:
+    """现网 bug：让关 15–20 口，模型只关了 15 口就收尾。提示词要求一次调用把接口列全。"""
+    from app.agent.chat_turn import ROOT_OPS_SYSTEM_PROMPT
+
+    assert "interface_names" in ROOT_OPS_SYSTEM_PROMPT
+    assert "同一次 device_control 调用" in ROOT_OPS_SYSTEM_PROMPT
+    assert "show_interfaces" in ROOT_OPS_SYSTEM_PROMPT
+    assert "必须提供 interface_name。" not in ROOT_OPS_SYSTEM_PROMPT
+
+
 async def test_root_ops_system_prompt_states_orchestration_policy() -> None:
     """提示词应说明两个编排工作流何时用，且不再教已收起的 Spawn 原语。
 

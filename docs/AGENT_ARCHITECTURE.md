@@ -325,7 +325,7 @@ classDiagram
 | :------------------------ | :------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------- | :----------------- |
 | `notify`                  | `asset_id, payload, reason`                       | 站内通知：`assist`/`full` 档可自动批准并当场执行，默认 `ask` 档弹卡待审批                                         | 写（HITL 门控）    |
 | `query_device_command`    | `asset_id, command_name, reason`                  | 只读诊断命令：按会话 `approval_mode` 判定——`assist` 且白名单+非动态凭据可当场返回输出；`full` 另可当场执行未分类非动态命令；默认 `ask` 及动态凭据走 `PENDING` | 读（经 HITL 门控） |
-| `device_control`          | `asset_id, command_name, interface_name?, reason` | 变更类命令（`reboot`/`port_enable`/`port_disable`）：`assist` 且白名单+非动态凭据可当场执行；`full` 另可当场执行未分类非动态命令；默认 `ask` 及动态凭据 `PENDING` 待审批 | 写（HITL 门控）    |
+| `device_control`          | `asset_id, command_name, interface_names?, reason` | 变更类命令（`reboot`/`port_enable`/`port_disable`）：`assist` 且白名单+非动态凭据可当场执行；`full` 另可当场执行未分类非动态命令；默认 `ask` 及动态凭据 `PENDING` 待审批。端口启停一次接一组接口（最多 48 个，一条提案一次审批）；超过 8 个接口的批量不论档位都转人工审批 | 写（HITL 门控）    |
 | `list_device_commands`    | `asset_id`                                        | 该资产可用命令名、说明、白/黑名单策略与凭据前提（只读，无审批）；策略文案随当前会话 `approval_mode` 变化，避免模型误判自动执行范围 | 读                 |
 | `get_device_query_result` | `proposal_id`                                     | 按会话回查已提交的设备命令查询提案状态或执行结果（只读，无审批）                                                 | 读                 |
 
@@ -542,7 +542,7 @@ PENDING ──会话归档──> REJECTED（status_reason=withdrawn_on_archive�
 | 层级          | 本项目的具体落地                                                                                                                                                                                                               |
 | :------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | L1 能力最小化 | 除 `notify`、`device_control` 外全部工具只读（`query_device_command` 为只读诊断，经策略门控但不改设备状态）；子 Agent allowlist 不含这三个执行工具；`kb_grep`/`kb_read` 路径必须落在 `knowledge/` 目录内，代码层做 realpath 前缀校验防目录穿越   |
-| L2 动作审查   | `notify.payload` 做 JSON Schema 校验，不接受自由文本命令；`device_control` 的 `command_name` 必须在设备命令目录内且通过参数校验（如 `interface_name` 约束），不接受自由文本 CLI；门控工具在 `HitlGateHook.before` 用与 dispatch 相同的 Pydantic 模型校验 |
+| L2 动作审查   | `notify.payload` 做 JSON Schema 校验，不接受自由文本命令；`device_control` 的 `command_name` 必须在设备命令目录内且通过参数校验（如 `interface_names` 逐个过接口名白名单、去重、最多 48 个），不接受自由文本 CLI；门控工具在 `HitlGateHook.before` 用与 dispatch 相同的 Pydantic 模型校验 |
 | L3 风险分级   | 审批模式在 `AgentSession.approval_mode`（默认 `ask`）；`assist`/`full` 只对持有 `agent:auto_execute` 的账号生效，逐提案现查；黑名单不可绕过；动态凭据始终要人输入本次密码；`full` 仅额外放开未分类非动态命令；`assist`/`full` 对白名单+非动态凭据可当场执行，`ask` 默认白名单亦须人工审批 |
 | L4 执行沙箱   | `device_control` 已接入真实执行通道：当场执行范围跟会话档位走（见 L3）；动态凭据强制人工审批并输入本次密码；生产启用 `state_changing` 白名单前须在测试网段完成手工验证（见第 11 节 A6）                                                            |
 | L5 审计       | `AgentMessage`/`MonitorStatusEvent`/`HitlProposal`/`AuditLog` 全部 append-only                                                                                                                                                 |

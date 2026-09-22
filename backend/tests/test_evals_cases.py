@@ -22,6 +22,52 @@ def _write(tmp_path: Path, body: str, name: str = "case.yaml") -> Path:
     return path
 
 
+def test_loads_max_calls_limits(tmp_path: Path) -> None:
+    """max_calls 声明每个工具最多调几次，用来测「一次能做完的事别拆成多次」。"""
+    path = _write(
+        tmp_path,
+        """
+id: port-batch
+category: capability
+title: 批量关口只调一次
+prompt: 关闭 SW-01 的 15 到 20 口
+expect:
+  invariants:
+    must_call_any: [device_control]
+  efficiency:
+    max_calls: {device_control: 1}
+""",
+    )
+
+    case = load_case(path)
+
+    assert case.expect.max_calls == (("device_control", 1),)
+
+
+@pytest.mark.parametrize(
+    "limits",
+    ["{device_control: 0}", "{device_control: 一次}", "[device_control]"],
+)
+def test_rejects_malformed_max_calls(tmp_path: Path, limits: str) -> None:
+    path = _write(
+        tmp_path,
+        f"""
+id: port-batch
+category: capability
+title: 批量关口只调一次
+prompt: 关闭 SW-01 的 15 到 20 口
+expect:
+  invariants:
+    must_call_any: [device_control]
+  efficiency:
+    max_calls: {limits}
+""",
+    )
+
+    with pytest.raises(InvalidCaseError):
+        load_case(path)
+
+
 def test_loads_a_well_formed_capability_case(tmp_path: Path) -> None:
     """正常用例要能完整解析出来，三层断言一个都不能漏。"""
     path = _write(

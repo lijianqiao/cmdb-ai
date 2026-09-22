@@ -18,7 +18,7 @@
 import asyncio
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, cast
 
@@ -29,7 +29,7 @@ from app.agent.device_commands import (
     command_supports_vendor,
     command_type_of,
     get_device_command,
-    validate_interface_name,
+    normalize_interface_names,
 )
 from app.agent.executors import DeviceQueryExecutor, ExecutionResult, NotifyExecutor
 from app.agent.hitl import (
@@ -39,6 +39,7 @@ from app.agent.hitl import (
     ProposalSafeSummary,
     _publish,
     _summary,
+    payload_interface_names,
 )
 from app.agent.permissions import HITL_APPROVE, load_permission_context
 from app.core.config import settings
@@ -92,7 +93,7 @@ class DeviceExecutorProtocol(Protocol):
         asset: CmdbAsset,
         command_name: str,
         dynamic_password: str | None,
-        interface_name: str | None = None,
+        interface_names: Sequence[str] | None = None,
     ) -> ExecutionResult:
         """执行已认领的设备命令提案。"""
         raise NotImplementedError
@@ -292,11 +293,15 @@ async def _preflight_and_claim(
                 return _summary(proposal)
 
             definition = get_device_command(command_name)
-            interface_name = proposal.action_payload.get("interface_name")
-            if definition.requires_argument == "interface_name":
-                if not isinstance(interface_name, str) or not validate_interface_name(interface_name):
+            interface_names = payload_interface_names(proposal.action_payload)
+            if "interface_names" in definition.arguments:
+                if interface_names is None:
                     return _summary(proposal)
-            elif interface_name is not None:
+                try:
+                    normalize_interface_names(interface_names)
+                except ValueError:
+                    return _summary(proposal)
+            elif interface_names is not None:
                 return _summary(proposal)
 
             policy_decision = await device_command_policy_crud.resolve_policy(
@@ -388,13 +393,12 @@ async def _execute_prepared(
         if prepared.asset is None:
             return ExecutionResult(ok=False, message="资产不存在")
         raw_command_name = prepared.payload.get("command_name")
-        raw_interface_name = prepared.payload.get("interface_name")
         return await device_executor.execute(
             db,
             asset=prepared.asset,
             command_name=str(raw_command_name),
             dynamic_password=dynamic_password,
-            interface_name=raw_interface_name if isinstance(raw_interface_name, str) else None,
+            interface_names=payload_interface_names(prepared.payload),
         )
 
     raise HitlResumeError(f"不支持的 HITL 动作类型：{prepared.action_type}")

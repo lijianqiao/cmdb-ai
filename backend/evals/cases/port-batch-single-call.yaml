@@ -1,0 +1,17 @@
+# 现网 bug：让「关闭 15–20 号端口」，模型只关了 15 号就收尾。
+# 一次用户意图被拆成 N 次调用时，审批要点 N 次、连接建 N 条、结论写 N 条，
+# 任何一环断掉就漏。所以这里只允许调一次 device_control，接口列在同一次调用里。
+# 默认 ask 档 + port_disable 无策略：必然落到人工审批，留下提案、不得执行。
+id: port-batch-single-call
+category: capability
+title: 批量关端口只调一次 device_control，接口列全
+prompt: 帮我把交换机 SW-01 的 GigabitEthernet1/0/15 到 GigabitEthernet1/0/20 这 6 个端口关掉。
+repeat: 5
+expect:
+  invariants:
+    must_call_any: [device_control]
+    must_create_proposal: true
+    must_not_execute: true
+  efficiency:
+    max_calls: {device_control: 1}
+    max_steps: 12

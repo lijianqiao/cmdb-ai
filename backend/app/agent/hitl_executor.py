@@ -36,16 +36,20 @@ from dataclasses import dataclass, field
 from typing import Literal
 from uuid import uuid4
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.device_result_summary import SummaryDelivery, deliver_device_query_summary
-from app.agent.hitl import HitlResumeError
+from app.agent.hitl import HitlResumeError, payload_interface_names
 from app.agent.hitl_execution import execute_approved_proposal
+from app.agent.hitl_gate import pending_result_prefix
+from app.agent.loop import SKIPPED_TOOL_RESULT
 from app.agent.session import append_assistant_message
 from app.agent.ws_hub import WsHitlEventPublisher, hub
 from app.core.config import settings
 from app.crud import hitl_execution_request as execution_request_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
+from app.models.agent_message import AgentMessage
 from app.models.hitl_proposal import HitlProposal
 from app.schemas.agent_ws import AgentWsServerMessage
 
@@ -116,8 +120,9 @@ def _describe_control_target(proposal: HitlProposal) -> str:
     asset = snapshot.get("asset") if isinstance(snapshot.get("asset"), dict) else {}
     command_name = str(payload.get("command_name", ""))
     label = _CONTROL_COMMAND_LABELS.get(command_name, command_name or "设备变更")
-    interface_name = payload.get("interface_name")
-    action = f"{label} {interface_name}" if isinstance(interface_name, str) else label
+    # 一条提案可能带一组接口：逐个列出来，审批人和用户才知道动的是哪几个口。
+    interface_names = payload_interface_names(payload)
+    action = f"{label} {'、'.join(interface_names)}" if interface_names else label
     hostname = asset.get("hostname") if isinstance(asset, dict) else None
     ip_address = asset.get("ip_address") if isinstance(asset, dict) else None
     if hostname and ip_address:
@@ -127,8 +132,25 @@ def _describe_control_target(proposal: HitlProposal) -> str:
     return action
 
 
-def build_device_control_conclusion(proposal: HitlProposal) -> str | None:
-    """按提案终态生成结论文案；提案还没结束时返回 None。"""
+def build_device_control_conclusion(
+    proposal: HitlProposal, *, skipped_calls: int = 0
+) -> str | None:
+    """按提案终态生成结论文案；提案还没结束时返回 None。
+
+    skipped_calls 是同一轮里因为等这条审批而被跳过的工具调用数：人批准之后模型不会
+    自己接着做那几件事，结论里要提醒用户再发一次指令。
+    """
+    content = _conclusion_body(proposal)
+    if content is None or skipped_calls <= 0:
+        return content
+    return (
+        f"{content}\n\n"
+        f"本轮还有 {skipped_calls} 个操作因等待审批被跳过，需要的话请再发一次指令。"
+    )
+
+
+def _conclusion_body(proposal: HitlProposal) -> str | None:
+    """结论正文：做了什么、在哪台设备、结果如何。"""
     payload = proposal.action_payload if isinstance(proposal.action_payload, dict) else {}
     target = _describe_control_target(proposal)
     last_error = payload.get("last_error")
@@ -157,6 +179,64 @@ def build_device_control_conclusion(proposal: HitlProposal) -> str | None:
     return None
 
 
+async def _count_skipped_calls(db: AsyncSession, proposal: HitlProposal) -> int:
+    """数出同一轮里因为等这条审批而被跳过的工具调用。
+
+    loop 遇到 pending_approval 会结束整轮，把排在后面的调用写成固定的「已跳过」结果。
+    这条提案的「等待审批」结果和那几条「已跳过」挂在同一条助手消息的 tool_calls 上，
+    按 tool_call_id 归组就能数出来，不会把上一轮的跳过算进去。
+    """
+    prefix = pending_result_prefix("device_control", proposal.id)
+    pending_row = (
+        await db.execute(
+            select(AgentMessage)
+            .where(
+                AgentMessage.session_id == proposal.session_id,
+                AgentMessage.role == "tool",
+                AgentMessage.content.startswith(prefix, autoescape=True),
+            )
+            .order_by(AgentMessage.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if pending_row is None or pending_row.tool_call_id is None:
+        return 0
+
+    assistant_row = (
+        await db.execute(
+            select(AgentMessage)
+            .where(
+                AgentMessage.session_id == proposal.session_id,
+                AgentMessage.role == "assistant",
+                AgentMessage.id < pending_row.id,
+            )
+            .order_by(AgentMessage.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if assistant_row is None:
+        return 0
+    call_ids = [
+        str(call["id"])
+        for call in (assistant_row.tool_calls or [])
+        if isinstance(call, dict) and isinstance(call.get("id"), str)
+    ]
+    if pending_row.tool_call_id not in call_ids:
+        return 0
+
+    skipped = await db.scalar(
+        select(func.count())
+        .select_from(AgentMessage)
+        .where(
+            AgentMessage.session_id == proposal.session_id,
+            AgentMessage.role == "tool",
+            AgentMessage.tool_call_id.in_(call_ids),
+            AgentMessage.content == SKIPPED_TOOL_RESULT,
+        )
+    )
+    return int(skipped or 0)
+
+
 async def deliver_device_control_conclusion(
     session_factory: async_sessionmaker[AsyncSession], proposal_id: int
 ) -> None:
@@ -168,7 +248,9 @@ async def deliver_device_control_conclusion(
             proposal = await hitl_proposal_crud.get(db, proposal_id)
             if proposal is None or proposal.action_type != "device_control":
                 return
-            content = build_device_control_conclusion(proposal)
+            content = build_device_control_conclusion(
+                proposal, skipped_calls=await _count_skipped_calls(db, proposal)
+            )
             if content is None:
                 return
             session_id = proposal.session_id

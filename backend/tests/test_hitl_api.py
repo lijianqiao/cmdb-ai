@@ -105,7 +105,7 @@ async def _make_pending_device_query_proposal(
     credential_type: str = "dynamic",
     action_type: str = "device_query",
     command_name: str = "show_version",
-    interface_name: str | None = None,
+    interface_names: list[str] | None = None,
 ) -> tuple[int, int]:
     """创建动态凭据资产的 PENDING 设备提案。"""
     session = await agent_session_crud.create(
@@ -126,8 +126,8 @@ async def _make_pending_device_query_proposal(
     )
     await db.flush()
     payload: dict[str, object] = {"command_name": command_name}
-    if interface_name is not None:
-        payload["interface_name"] = interface_name
+    if interface_names is not None:
+        payload["interface_names"] = interface_names
     summary = await propose_action(
         db,
         session_id=session.id,
@@ -790,7 +790,7 @@ async def test_approve_executed_device_control_does_not_deliver_query_summary(
         user_id=test_user.id,
         action_type="device_control",
         command_name="port_disable",
-        interface_name="GigabitEthernet0/1",
+        interface_names=["GigabitEthernet0/1"],
     )
 
     fake_connection = MagicMock()
@@ -915,7 +915,7 @@ async def test_retry_approved_device_control_executes(
         proposed_by_agent_id=None,
         action_type="device_control",
         asset_id=asset.id,
-        payload={"command_name": "port_disable", "interface_name": "GigabitEthernet0/1"},
+        payload={"command_name": "port_disable", "interface_names": ["GigabitEthernet0/1"]},
         reason="故障恢复",
         actor_user_id=test_user.id,
     )

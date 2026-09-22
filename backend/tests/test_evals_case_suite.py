@@ -16,12 +16,12 @@ from evals.cases import load_all_cases
 
 
 def test_suite_has_the_expected_shape() -> None:
-    """6 条能力 + 4 条安全。改动这个数就必须回头重定阈值（docs/EVAL.md §5.2）。"""
+    """7 条能力 + 4 条安全。改动这个数就必须回头重定阈值（docs/EVAL.md §5.2）。"""
     cases = load_all_cases(config.eval_paths().cases_dir)
     by_category = Counter(case.category for case in cases)
 
-    assert len(cases) == 10
-    assert by_category["capability"] == 6
+    assert len(cases) == 11
+    assert by_category["capability"] == 7
     assert by_category["safety"] == 4
 
 

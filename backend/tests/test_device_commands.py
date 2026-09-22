@@ -15,6 +15,8 @@ from app.agent.device_commands import (
     get_device_command,
     list_commands_for_vendor,
     list_device_commands,
+    normalize_interface_names,
+    rendered_command_lines,
     validate_interface_name,
 )
 
@@ -138,11 +140,70 @@ def test_reboot_has_confirmation_for_network_vendors() -> None:
         assert vendor in reboot.confirmation
 
 
-def test_port_commands_require_interface_argument() -> None:
+def test_port_commands_take_interface_names_argument() -> None:
     for name in ("port_enable", "port_disable"):
-        assert get_device_command(name).requires_argument == "interface_name"
+        assert get_device_command(name).arguments == ("interface_names",)
     for name in ("show_version", "reboot"):
-        assert get_device_command(name).requires_argument == "none"
+        assert get_device_command(name).arguments == ()
+
+
+def test_batch_expands_config_template_for_each_interface() -> None:
+    """一条提案一组接口：逐口展开现有模板，不用各厂商的 range 语法。"""
+    lines = rendered_command_lines(
+        "port_disable",
+        "cisco_iosxe",
+        interface_names=("Gi1/0/15", "Gi1/0/16", "Gi1/0/17"),
+    )
+    assert lines == (
+        "interface Gi1/0/15",
+        "shutdown",
+        "interface Gi1/0/16",
+        "shutdown",
+        "interface Gi1/0/17",
+        "shutdown",
+    )
+
+
+def test_junos_batch_commits_once_at_the_end() -> None:
+    """Junos 是 set/delete + commit：一批接口只在最后提交一次。"""
+    lines = rendered_command_lines(
+        "port_disable",
+        "juniper_junos",
+        interface_names=("ge-0/0/1", "ge-0/0/2", "ge-0/0/3"),
+    )
+    assert lines == (
+        "set interfaces ge-0/0/1 disable",
+        "set interfaces ge-0/0/2 disable",
+        "set interfaces ge-0/0/3 disable",
+        "commit",
+    )
+
+
+def test_normalize_interface_names_dedupes_keeping_order() -> None:
+    assert normalize_interface_names(["Gi1/0/16", "Gi1/0/15", "Gi1/0/16"]) == (
+        "Gi1/0/16",
+        "Gi1/0/15",
+    )
+
+
+def test_normalize_interface_names_accepts_48_interfaces() -> None:
+    names = [f"Gi1/0/{index}" for index in range(1, 49)]
+    assert len(normalize_interface_names(names)) == 48
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [],
+        ["eth0; reload"],
+        ["Gi1/0/1", "eth0 reload"],
+        [f"Gi1/0/{index}" for index in range(1, 50)],
+    ],
+)
+def test_normalize_interface_names_rejects_invalid_lists(values: list[str]) -> None:
+    """空列表、任一非法接口名、超过 48 个接口，都整体拒绝。"""
+    with pytest.raises(ValueError):
+        normalize_interface_names(values)
 
 
 def test_port_commands_config_templates_cover_all_network_vendors() -> None:
@@ -179,14 +240,11 @@ def test_list_commands_for_vendor_includes_config_mode_only_commands() -> None:
     assert command_supports_vendor("port_enable", "other") is False
 
 
-def test_junos_port_config_template_includes_explicit_commit() -> None:
-    """Junos 是 set/delete + commit 模式，模板必须显式包含 commit。"""
-    port_disable = get_device_command("port_disable")
-    assert port_disable.config_templates is not None
-    assert "commit" in port_disable.config_templates["juniper_junos"]
-    port_enable = get_device_command("port_enable")
-    assert port_enable.config_templates is not None
-    assert "commit" in port_enable.config_templates["juniper_junos"]
+def test_junos_port_enable_deletes_disable_and_commits() -> None:
+    """Junos 的开端口是删掉 disable 再提交，commit 由厂商级规则追加一次。"""
+    assert rendered_command_lines(
+        "port_enable", "juniper_junos", interface_names=("ge-0/0/1",)
+    ) == ("delete interfaces ge-0/0/1 disable", "commit")
 
 
 def test_command_type_of_returns_risk_level_for_known_commands() -> None:

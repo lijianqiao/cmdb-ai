@@ -15,7 +15,7 @@
 6. 对 Agent 和事件发布器只暴露安全摘要（含全文结果存在标志），不返回原始 payload，避免设备凭据或未知字段泄露。
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Literal, Protocol, cast
 
@@ -24,13 +24,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.device_commands import (
     DEVICE_COMMAND_CATALOG_VERSION,
+    MAX_INTERFACES_PER_PROPOSAL,
     command_supports_vendor,
     command_type_of,
     get_device_command,
     list_command_names,
     list_commands_for_vendor,
+    normalize_interface_names,
     rendered_command_lines,
-    validate_interface_name,
 )
 from app.agent.permissions import HITL_APPROVE, effective_approval_mode
 from app.crud.agent_session import agent_session_crud
@@ -57,7 +58,40 @@ class DeviceCommandPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     command_name: str = Field(min_length=1, max_length=100)
-    interface_name: str | None = Field(default=None, min_length=1, max_length=64)
+    interface_names: list[str] | None = Field(
+        default=None, min_length=1, max_length=MAX_INTERFACES_PER_PROPOSAL
+    )
+
+
+def payload_interface_names(payload: Mapping[str, object]) -> list[str] | None:
+    """提案载荷里的接口列表；没有接口参数或形状不对时返回 None。
+
+    P1 之前的提案只存了单个 interface_name：读的时候折成一项的列表，旧提案照样能
+    执行、重试和写结论。
+    """
+    names = payload.get("interface_names")
+    if names is None:
+        legacy = payload.get("interface_name")
+        return [legacy] if isinstance(legacy, str) else None
+    if isinstance(names, list) and all(isinstance(name, str) for name in names):
+        return list(names)
+    return None
+
+
+# D11：完全访问档下一次自动执行就能关掉多达 48 个口，其中可能有上联口或管理口，关错了
+# 连设备都登不上。接口数超过这个上限的批量不论档位都转人工审批。写成代码常量，要调就
+# 改代码、走 review。
+AUTO_EXECUTE_MAX_INTERFACES = 8
+
+
+def _manual_approval_reason(interface_names: Sequence[str] | None) -> str | None:
+    """不论档位都必须人工审批时返回原因（写进证据快照，也带给模型）；否则返回 None。"""
+    if interface_names is not None and len(interface_names) > AUTO_EXECUTE_MAX_INTERFACES:
+        return (
+            f"共 {len(interface_names)} 个接口，超过自动执行上限 "
+            f"{AUTO_EXECUTE_MAX_INTERFACES} 个，需要人工审批"
+        )
+    return None
 
 
 class HitlEventPublisher(Protocol):
@@ -109,10 +143,14 @@ class ProposalSafeSummary:
     # 仅在执行失败后有值；内容是执行器的分类信息，不含原始异常/设备细节。
     last_error: str | None = None
     has_full_result: bool = False
+    # 不论档位都必须人工审批时的原因（例如批量接口超过自动执行上限），文案由平台生成。
+    manual_approval_reason: str | None = None
 
 
 def _summary(proposal: HitlProposal, *, has_full_result: bool = False) -> ProposalSafeSummary:
     """从持久化对象提取白名单字段，绝不透传完整 payload。"""
+    snapshot = proposal.evidence_snapshot if isinstance(proposal.evidence_snapshot, dict) else {}
+    raw_manual_reason = snapshot.get("manual_approval_reason")
     payload = proposal.action_payload
     raw_asset_id = payload.get("asset_id")
     asset_id = raw_asset_id if isinstance(raw_asset_id, int) and not isinstance(raw_asset_id, bool) else None
@@ -134,6 +172,7 @@ def _summary(proposal: HitlProposal, *, has_full_result: bool = False) -> Propos
         result_excerpt=result_excerpt,
         last_error=last_error,
         has_full_result=has_full_result,
+        manual_approval_reason=raw_manual_reason if isinstance(raw_manual_reason, str) else None,
     )
 
 
@@ -207,6 +246,7 @@ def should_auto_approve(
     action_type: ActionType,
     policy_decision: str | None,
     credential_type: str,
+    manual_approval_reason: str | None = None,
 ) -> bool:
     """按会话审批档位判定提案是否可自动批准并执行。
 
@@ -215,6 +255,7 @@ def should_auto_approve(
         action_type: HITL 动作类型。
         policy_decision: 设备命令策略判定；notify 传入 None。
         credential_type: 资产凭据类型。
+        manual_approval_reason: 不论档位都必须人工审批的原因；有值时一律不自动批准。
 
     Returns:
         True 表示可自动批准并继续执行。
@@ -222,7 +263,8 @@ def should_auto_approve(
     if action_type == "notify":
         return approval_mode in ("assist", "full")
     if action_type in ("device_query", "device_control"):
-        if credential_type == "dynamic":
+        # 动态凭据和批量超过上限一样：不论档位、有没有白名单，都至少过一次人工。
+        if credential_type == "dynamic" or manual_approval_reason is not None:
             return False
         if policy_decision == "whitelist":
             return approval_mode in ("assist", "full")
@@ -290,6 +332,8 @@ async def gate_action(
             "credential_type": asset.credential_type,
         }
     }
+    interface_names: tuple[str, ...] | None = None
+    manual_approval_reason: str | None = None
 
     if action_type in ("device_query", "device_control"):
         command_name = stored_payload["command_name"]
@@ -323,12 +367,23 @@ async def gate_action(
             )
 
         definition = get_device_command(command_name)
-        interface_name = stored_payload.get("interface_name")
-        if definition.requires_argument == "interface_name":
-            if not isinstance(interface_name, str) or not validate_interface_name(interface_name):
-                raise HitlProposalRejectedError("port_enable/port_disable 需要合法的接口名参数")
-        elif interface_name is not None:
-            raise HitlProposalRejectedError(f"命令 {command_name} 不接受 interface_name 参数")
+        raw_interface_names = stored_payload.get("interface_names")
+        if "interface_names" in definition.arguments:
+            if not isinstance(raw_interface_names, list):
+                raise HitlProposalRejectedError(
+                    f"命令 {command_name} 需要合法的接口名列表 interface_names"
+                )
+            try:
+                interface_names = normalize_interface_names(raw_interface_names)
+            except ValueError as exc:
+                raise HitlProposalRejectedError(
+                    f"命令 {command_name} 需要合法的接口名列表 interface_names：{exc}"
+                ) from exc
+            # 一条提案覆盖整组接口：存去重后的完整列表，审批人一次看全、一次批。
+            stored_payload["interface_names"] = list(interface_names)
+            manual_approval_reason = _manual_approval_reason(interface_names)
+        elif raw_interface_names is not None:
+            raise HitlProposalRejectedError(f"命令 {command_name} 不接受 interface_names 参数")
 
         policy_decision = await device_command_policy_crud.resolve_policy(
             db, asset_id=asset.id, asset_type=asset.asset_type, command_name=command_name
@@ -341,13 +396,11 @@ async def gate_action(
             "type": command_type,
             "catalog_version": DEVICE_COMMAND_CATALOG_VERSION,
             "rendered": list(
-                rendered_command_lines(
-                    command_name,
-                    asset.vendor,
-                    interface_name=interface_name if isinstance(interface_name, str) else None,
-                )
+                rendered_command_lines(command_name, asset.vendor, interface_names=interface_names)
             ),
         }
+        if manual_approval_reason is not None:
+            evidence_snapshot["manual_approval_reason"] = manual_approval_reason
     else:
         policy_decision = None
 
@@ -376,6 +429,7 @@ async def gate_action(
         action_type=action_type,
         policy_decision=policy_decision,
         credential_type=asset.credential_type,
+        manual_approval_reason=manual_approval_reason,
     ):
         approved = await decide_proposal(
             db,

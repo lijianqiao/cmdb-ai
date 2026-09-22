@@ -64,7 +64,7 @@ async def test_proposal_records_requester_and_snapshot_at_creation(
         proposed_by_agent_id=None,
         action_type="device_control",
         asset_id=asset_id,
-        payload={"command_name": "port_disable", "interface_name": "GigabitEthernet0/1"},
+        payload={"command_name": "port_disable", "interface_names": ["GigabitEthernet0/1"]},
         reason="端口异常",
         actor_user_id=test_user.id,
     )

@@ -8,6 +8,7 @@
 
 import asyncio
 import re
+from collections.abc import Sequence
 from unittest.mock import MagicMock
 
 import pytest
@@ -53,7 +54,9 @@ async def _approved_device_proposal(
     command_name: str = "show_version",
     vendor: str = "cisco_iosxe",
     interface_name: str | None = None,
+    interface_names: list[str] | None = None,
 ) -> tuple[HitlProposal, int]:
+    """interface_name 单数是 P1 之前的旧载荷形状，用来验证旧提案仍能执行。"""
     session = await agent_session_crud.create(
         db,
         {"user_id": user.id, "title": "execution", "status": "active"},
@@ -81,6 +84,7 @@ async def _approved_device_proposal(
             "command_name": command_name,
             "proposal_reason": "verify policy drift",
             **({"interface_name": interface_name} if interface_name is not None else {}),
+            **({"interface_names": interface_names} if interface_names is not None else {}),
         },
     )
     await hitl_proposal_crud.decide(
@@ -116,7 +120,7 @@ class RecordingDeviceExecutor:
     """记录设备执行器调用参数，供断言策略拦截与认领前失败。"""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[int, str, str | None, str | None]] = []
+        self.calls: list[tuple[int, str, str | None, tuple[str, ...] | None]] = []
 
     async def execute(
         self,
@@ -125,10 +129,15 @@ class RecordingDeviceExecutor:
         asset: CmdbAsset,
         command_name: str,
         dynamic_password: str | None,
-        interface_name: str | None = None,
+        interface_names: Sequence[str] | None = None,
     ) -> ExecutionResult:
         self.calls.append(
-            (asset.id, command_name, dynamic_password, interface_name)
+            (
+                asset.id,
+                command_name,
+                dynamic_password,
+                tuple(interface_names) if interface_names is not None else None,
+            )
         )
         return ExecutionResult(ok=True, message="ok")
 
@@ -146,7 +155,7 @@ class OutputDeviceExecutor:
         asset: CmdbAsset,
         command_name: str,
         dynamic_password: str | None,
-        interface_name: str | None = None,
+        interface_names: Sequence[str] | None = None,
     ) -> ExecutionResult:
         return ExecutionResult(
             ok=True,
@@ -305,6 +314,89 @@ async def test_device_rejected_port_disable_lands_unknown_not_executed(
     assert persisted is not None
     assert persisted.status == "UNKNOWN"
     assert persisted.executed_at is None
+
+
+async def test_every_interface_in_the_payload_reaches_the_executor(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    proposal, asset_id = await _approved_device_proposal(
+        db_session,
+        test_user,
+        action_type="device_control",
+        command_name="port_disable",
+        interface_names=["Gi1/0/15", "Gi1/0/16"],
+    )
+    executor = RecordingDeviceExecutor()
+
+    await execute_approved_proposal(
+        session_factory=async_sessionmaker(db_engine, expire_on_commit=False),
+        proposal_id=proposal.id,
+        actor_user_id=test_user.id,
+        dynamic_password="one-use-password",
+        device_executor=executor,
+    )
+
+    assert executor.calls == [
+        (asset_id, "port_disable", "one-use-password", ("Gi1/0/15", "Gi1/0/16"))
+    ]
+
+
+async def test_old_single_interface_payload_still_executes(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """P1 之前的提案只存了单个 interface_name：读的时候折成一项的列表，照样能执行和重试。"""
+    proposal, asset_id = await _approved_device_proposal(
+        db_session,
+        test_user,
+        action_type="device_control",
+        command_name="port_disable",
+        interface_name="GigabitEthernet0/1",
+    )
+    executor = RecordingDeviceExecutor()
+
+    summary = await execute_approved_proposal(
+        session_factory=async_sessionmaker(db_engine, expire_on_commit=False),
+        proposal_id=proposal.id,
+        actor_user_id=test_user.id,
+        dynamic_password="one-use-password",
+        device_executor=executor,
+    )
+
+    assert summary.status == "EXECUTED"
+    assert executor.calls == [
+        (asset_id, "port_disable", "one-use-password", ("GigabitEthernet0/1",))
+    ]
+
+
+async def test_preflight_refuses_an_invalid_interface_list_without_claiming(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """载荷里的接口列表执行前再校验一次：不合法就不认领、不下发，提案停在 APPROVED。"""
+    proposal, _ = await _approved_device_proposal(
+        db_session,
+        test_user,
+        action_type="device_control",
+        command_name="port_disable",
+        interface_names=["Gi1/0/15", "Gi1/0/16; reload"],
+    )
+    executor = RecordingDeviceExecutor()
+
+    summary = await execute_approved_proposal(
+        session_factory=async_sessionmaker(db_engine, expire_on_commit=False),
+        proposal_id=proposal.id,
+        actor_user_id=test_user.id,
+        dynamic_password="one-use-password",
+        device_executor=executor,
+    )
+
+    assert executor.calls == []
+    assert summary.status == "APPROVED"
 
 
 async def test_build_result_preview_preserves_at_limit_and_marks_long_output() -> None:

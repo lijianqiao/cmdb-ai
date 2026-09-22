@@ -489,7 +489,7 @@ async def test_device_control_writes_a_conclusion_into_the_chat(
         db_session,
         test_user.id,
         action_type="device_control",
-        payload={"command_name": "port_enable", "interface_name": "GigabitEthernet1/0/15"},
+        payload={"command_name": "port_enable", "interface_names": ["GigabitEthernet1/0/15"]},
     )
 
     async def execute(self: DeviceQueryExecutor, db: object, **kwargs: Any) -> ExecutionResult:

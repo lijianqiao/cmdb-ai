@@ -197,6 +197,7 @@ async def test_propose_merges_matching_asset_id_and_returns_safe_summary(
         "result_excerpt",
         "last_error",
         "has_full_result",
+        "manual_approval_reason",
     }
     assert [event[1] for event in publisher.events] == ["hitl_pending"]
     assert set(publisher.events[0][2]) == {
@@ -208,6 +209,7 @@ async def test_propose_merges_matching_asset_id_and_returns_safe_summary(
         "result_excerpt",
         "last_error",
         "has_full_result",
+        "manual_approval_reason",
     }
 
 
@@ -218,8 +220,9 @@ async def test_propose_merges_matching_asset_id_and_returns_safe_summary(
         ("notify", {"message": "告警", "secret": "不得接收"}),
         ("notify", {"message": 123}),
         ("device_control", {"command_name": 123}),
-        ("device_control", {"command_name": "reboot", "interface_name": "eth0"}),  # reboot 不接受参数
-        ("device_control", {"command_name": "port_disable"}),  # port_disable 缺 interface_name
+        ("device_control", {"command_name": "reboot", "interface_names": ["eth0"]}),  # reboot 不接受参数
+        ("device_control", {"command_name": "port_disable"}),  # port_disable 缺 interface_names
+        ("device_control", {"command_name": "port_disable", "interface_name": "eth0"}),  # 旧的单数参数
     ],
 )
 async def test_propose_rejects_invalid_payload_before_insert(
@@ -969,7 +972,7 @@ async def test_whitelisted_device_control_auto_executes_with_static_credential(
             {
                 "asset_id": asset_id,
                 "command_name": "port_disable",
-                "interface_name": "GigabitEthernet0/1",
+                "interface_names": ["GigabitEthernet0/1"],
                 "reason": "故障恢复",
             },
         )
@@ -1126,18 +1129,18 @@ async def test_full_mode_without_permission_never_reaches_executor_through_gate(
 async def test_device_control_reboot_rejects_interface_name_with_credentialed_asset(
     db_session: AsyncSession, test_user: User
 ) -> None:
-    """reboot 带 interface_name 时，凭据/厂商通过后应明确拒绝多余参数。"""
+    """reboot 带接口列表时，凭据/厂商通过后应明确拒绝多余参数。"""
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     asset_id = await _make_query_asset(db_session)
 
-    with pytest.raises(HitlProposalRejectedError, match="不接受 interface_name"):
+    with pytest.raises(HitlProposalRejectedError, match="不接受 interface_names"):
         await propose_action(
             db_session,
             session_id=session_id,
             proposed_by_agent_id=None,
             action_type="device_control",
             asset_id=asset_id,
-            payload={"command_name": "reboot", "interface_name": "GigabitEthernet0/1"},
+            payload={"command_name": "reboot", "interface_names": ["GigabitEthernet0/1"]},
             reason="reboot 不接受接口名",
             actor_user_id=test_user.id,
         )
@@ -1148,7 +1151,7 @@ async def test_device_control_reboot_rejects_interface_name_with_credentialed_as
 async def test_device_control_port_disable_rejects_missing_interface_name(
     db_session: AsyncSession, test_user: User
 ) -> None:
-    """port_disable 缺 interface_name 时，凭据/厂商通过后应要求合法接口名。"""
+    """port_disable 缺接口列表时，凭据/厂商通过后应要求合法接口名。"""
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     asset_id = await _make_query_asset(db_session)
 
@@ -1181,12 +1184,133 @@ async def test_device_control_port_disable_rejects_illegal_interface_name(
             proposed_by_agent_id=None,
             action_type="device_control",
             asset_id=asset_id,
-            payload={"command_name": "port_disable", "interface_name": "eth0; rm -rf /"},
+            payload={
+                "command_name": "port_disable",
+                "interface_names": ["GigabitEthernet0/1", "eth0; rm -rf /"],
+            },
             reason="非法接口名",
             actor_user_id=test_user.id,
         )
 
     assert await _proposal_count(db_session) == 0
+
+
+async def test_device_control_port_batch_is_one_proposal_with_every_line(
+    db_session: AsyncSession, test_user: User
+) -> None:
+    """一组接口只建一条提案：载荷存去重后的完整列表，证据快照写出实际下发的每一行。"""
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    asset_id = await _make_query_asset(db_session)
+
+    summary = await propose_action(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="device_control",
+        asset_id=asset_id,
+        payload={
+            "command_name": "port_disable",
+            "interface_names": ["Gi1/0/15", "Gi1/0/16", "Gi1/0/15", "Gi1/0/17"],
+        },
+        reason="关闭 15–17 口",
+        actor_user_id=test_user.id,
+    )
+
+    assert await _proposal_count(db_session) == 1
+    proposal = await hitl_proposal_crud.get(db_session, summary.proposal_id)
+    assert proposal is not None
+    assert proposal.action_payload["interface_names"] == ["Gi1/0/15", "Gi1/0/16", "Gi1/0/17"]
+    assert proposal.evidence_snapshot["command"]["rendered"] == [
+        "interface Gi1/0/15",
+        "shutdown",
+        "interface Gi1/0/16",
+        "shutdown",
+        "interface Gi1/0/17",
+        "shutdown",
+    ]
+
+
+async def _propose_port_batch_in_full_mode(
+    db_session: AsyncSession, *, user_id: int, interface_count: int
+) -> ProposalSafeSummary:
+    """完全访问档、有自动执行权限：对静态凭据资产提一个未分类的端口批量关闭。"""
+    session_id, _ = await _make_session_and_asset(db_session, user_id)
+    asset_id = await _make_query_asset(db_session)
+    await _set_session_approval_mode(db_session, session_id, "full")
+    return await gate_action(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="device_control",
+        asset_id=asset_id,
+        payload={
+            "command_name": "port_disable",
+            "interface_names": [f"Gi1/0/{index}" for index in range(1, interface_count + 1)],
+        },
+        reason="批量关口",
+        actor_user_id=user_id,
+    )
+
+
+async def test_full_mode_port_batch_within_limit_auto_approves(
+    db_session: AsyncSession, test_user: User, grant_permissions
+) -> None:
+    await grant_permissions(test_user, "agent:auto_execute")
+
+    summary = await _propose_port_batch_in_full_mode(
+        db_session, user_id=test_user.id, interface_count=8
+    )
+
+    assert summary.status == "APPROVED"
+    assert summary.manual_approval_reason is None
+
+
+async def test_full_mode_port_batch_over_limit_needs_manual_approval(
+    db_session: AsyncSession, test_user: User, grant_permissions
+) -> None:
+    """D11：一次自动执行能关掉很多口，其中可能有上联口。超过 8 个接口不论档位都转人工。"""
+    await grant_permissions(test_user, "agent:auto_execute")
+
+    summary = await _propose_port_batch_in_full_mode(
+        db_session, user_id=test_user.id, interface_count=9
+    )
+
+    assert summary.status == "PENDING"
+    assert summary.manual_approval_reason is not None
+    assert "9" in summary.manual_approval_reason
+    assert "8" in summary.manual_approval_reason
+    proposal = await hitl_proposal_crud.get(db_session, summary.proposal_id)
+    assert proposal is not None
+    assert proposal.evidence_snapshot["manual_approval_reason"] == summary.manual_approval_reason
+
+
+async def test_gate_tells_the_model_why_a_big_batch_waits_for_approval(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    grant_permissions,
+) -> None:
+    """模型拿到的「等待审批」结果要带上原因，才能告诉用户这次为什么没有直接执行。"""
+    await grant_permissions(test_user, "agent:auto_execute")
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    asset_id = await _make_query_asset(db_session)
+    await _set_session_approval_mode(db_session, session_id, "full")
+    await db_session.commit()
+    gate = _make_hitl_gate(db_engine, session_id=session_id, actor_user_id=test_user.id)
+
+    decision = await gate.before(
+        "device_control",
+        {
+            "asset_id": asset_id,
+            "command_name": "port_disable",
+            "interface_names": [f"Gi1/0/{index}" for index in range(1, 10)],
+            "reason": "批量关口",
+        },
+    )
+
+    assert decision.result is not None
+    assert decision.result.control == "pending_approval"
+    assert "超过自动执行上限" in decision.result.content
 
 
 async def test_list_for_session_filters_status(

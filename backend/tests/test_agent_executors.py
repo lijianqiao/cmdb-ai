@@ -6,10 +6,12 @@
 @Docs: T10 HITL 执行器单元测试（notify + DeviceQueryExecutor 管控分支）。
 """
 
+import inspect
 import re
 from unittest.mock import MagicMock, patch
 
 import pytest
+from netmiko.base_connection import BaseConnection
 from netmiko.exceptions import ConfigInvalidException
 from pydantic import SecretStr
 from sqlalchemy import select
@@ -74,7 +76,7 @@ async def test_run_device_command_returns_full_output(
         password="one-use-password",
         command_name="show_running_config",
         definition=get_device_command("show_running_config"),
-        interface_name=None,
+        interface_names=None,
         conn_timeout=5,
         read_timeout=30,
     )
@@ -139,7 +141,7 @@ async def test_device_query_executor_connection_drop_during_reboot_is_conservati
 async def test_device_query_executor_port_disable_uses_send_config_set_with_interface(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """port_disable 走 send_config_set，接口名要正确代入模板。"""
+    """port_disable 走 send_config_set，每个接口名都要正确代入模板。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     ciphertext = encrypt_credential_password("whatever")
     asset = await _make_asset(
@@ -156,11 +158,14 @@ async def test_device_query_executor_port_disable_uses_send_config_set_with_inte
             asset=asset,
             command_name="port_disable",
             dynamic_password=None,
-            interface_name="GigabitEthernet0/1",
+            interface_names=["GigabitEthernet0/1", "GigabitEthernet0/2"],
         )
     assert result.ok is True
-    sent_lines = fake_connection.send_config_set.call_args.args[0]
-    assert sent_lines == ["interface GigabitEthernet0/1", "shutdown"]
+    sent_batches = [call.args[0] for call in fake_connection.send_config_set.call_args_list]
+    assert sent_batches == [
+        ["interface GigabitEthernet0/1", "shutdown"],
+        ["interface GigabitEthernet0/2", "shutdown"],
+    ]
 
 
 async def test_device_query_executor_rejects_invalid_interface_name_before_connecting(
@@ -181,9 +186,39 @@ async def test_device_query_executor_rejects_invalid_interface_name_before_conne
             asset=asset,
             command_name="port_disable",
             dynamic_password=None,
-            interface_name="eth0; reload",
+            interface_names=["GigabitEthernet0/1", "eth0; reload"],
         )
     assert result.ok is False
+    mock_connect.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("command_name", "interface_names"),
+    [
+        ("port_disable", None),  # 端口命令缺接口
+        ("reboot", ["GigabitEthernet0/1"]),  # 重启不接受接口
+    ],
+)
+async def test_device_query_executor_checks_interface_argument_before_connecting(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    command_name: str,
+    interface_names: list[str] | None,
+) -> None:
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    ciphertext = encrypt_credential_password("whatever")
+    asset = await _make_asset(db_session, credential_password_encrypted=ciphertext)
+    executor = DeviceQueryExecutor()
+    with patch("app.agent.executors._open_netmiko_connection") as mock_connect:
+        result = await executor.execute(
+            db_session,
+            asset=asset,
+            command_name=command_name,
+            dynamic_password=None,
+            interface_names=interface_names,
+        )
+    assert result.ok is False
+    assert result.dispatched is False
     mock_connect.assert_not_called()
 
 
@@ -322,19 +357,65 @@ async def test_notify_executor_rejects_blank_message(
 
 
 class _FakeConfigConnection:
-    """按 Netmiko 4.x 的行为模拟 send_config_set：传了 error_pattern 且命中就抛异常。"""
+    """按 Netmiko 4.7.0 的行为模拟一次配置会话：先进配置模式，再逐口 send_config_set。
 
-    def __init__(self, output: str) -> None:
-        self.output = output
-        self.error_pattern: str = ""
+    responses 按这一批的第一行取回显，没登记的用 default；传了 error_pattern 且
+    回显命中就抛 ConfigInvalidException，消息格式照抄 Netmiko。drop_at 模拟发到
+    某一批时连接断开。
+    """
+
+    def __init__(
+        self,
+        responses: dict[str, str] | None = None,
+        *,
+        default: str = "",
+        config_mode_error: Exception | None = None,
+        drop_at: str | None = None,
+    ) -> None:
+        self.responses = responses or {}
+        self.default = default
+        self.config_mode_error = config_mode_error
+        self.drop_at = drop_at
+        self.config_mode_commands: list[str] = []
+        self.batches: list[list[str]] = []
+        self.mode_flags: list[tuple[bool, bool]] = []
+        self.error_patterns: list[str] = []
+        self.exited = False
+
+    def config_mode(self, config_command: str = "", **_: object) -> str:
+        self.config_mode_commands.append(config_command)
+        if self.config_mode_error is not None:
+            raise self.config_mode_error
+        return ""
 
     def send_config_set(
-        self, lines: list[str], *, read_timeout: float, error_pattern: str = "", **_: object
+        self,
+        lines: list[str],
+        *,
+        read_timeout: float,
+        error_pattern: str = "",
+        enter_config_mode: bool = True,
+        exit_config_mode: bool = True,
+        **_: object,
     ) -> str:
-        self.error_pattern = error_pattern
-        if error_pattern and re.search(error_pattern, self.output, flags=re.M):
-            raise ConfigInvalidException(f"Invalid input detected at command: {lines[-1]}")
-        return self.output
+        self.batches.append(list(lines))
+        self.mode_flags.append((enter_config_mode, exit_config_mode))
+        self.error_patterns.append(error_pattern)
+        if lines[0] == self.drop_at:
+            raise OSError("Socket is closed")
+        output = self.responses.get(lines[0], self.default)
+        if error_pattern:
+            match = re.search(error_pattern, output, flags=re.M)
+            if match:
+                raise ConfigInvalidException(
+                    f"Invalid input detected at command: {lines[-1]}, "
+                    f"matched error: {match.group(0)}"
+                )
+        return output
+
+    def exit_config_mode(self, **_: object) -> str:
+        self.exited = True
+        return ""
 
     def disconnect(self) -> None:
         return None
@@ -361,7 +442,7 @@ def _run(
     *,
     vendor: str,
     command_name: str,
-    interface_name: str | None = None,
+    interface_names: tuple[str, ...] | None = None,
 ) -> executors.ExecutionResult:
     monkeypatch.setattr(executors, "_open_netmiko_connection", lambda **_: connection)
     return executors._run_device_command(
@@ -371,7 +452,7 @@ def _run(
         password="one-use-password",
         command_name=command_name,
         definition=get_device_command(command_name),
-        interface_name=interface_name,
+        interface_names=interface_names,
         conn_timeout=5,
         read_timeout=30,
     )
@@ -393,31 +474,37 @@ async def test_config_command_rejected_by_device_is_not_success(
 ) -> None:
     """审查报告 R3 的复现之一：port_disable 被设备拒绝，不能得到 ok=True。
     已经连上设备并开始下发，可能部分生效，所以 dispatched 保持 True（交给 UNKNOWN 人工核实）。"""
-    connection = _FakeConfigConnection(output)
+    connection = _FakeConfigConnection(default=output)
 
     result = _run(
         monkeypatch, connection, vendor=vendor, command_name="port_disable",
-        interface_name="GigabitEthernet0/0/1",
+        interface_names=("GigabitEthernet0/0/1",),
     )
 
     assert result.ok is False
     assert result.dispatched is True
     assert "设备拒绝" in result.message
-    assert connection.error_pattern
+    assert all(connection.error_patterns)
 
 
 async def test_config_command_without_device_error_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connection = _FakeConfigConnection("SW(config)#interface Gi0/1\nSW(config-if)#shutdown\n")
+    connection = _FakeConfigConnection(
+        default="SW(config)#interface Gi0/1\nSW(config-if)#shutdown\n"
+    )
 
     result = _run(
         monkeypatch, connection, vendor="cisco_iosxe", command_name="port_disable",
-        interface_name="GigabitEthernet0/1",
+        interface_names=("GigabitEthernet0/1",),
     )
 
     assert result.ok is True
-    assert connection.error_pattern
+    assert all(connection.error_patterns)
+    # 配置模式由执行器自己进、自己退：每一批都不能再让 Netmiko 进出一次。
+    assert connection.config_mode_commands == [""]
+    assert connection.mode_flags == [(False, False)]
+    assert connection.exited is True
 
 
 async def test_junos_config_needs_commit_complete_as_success_evidence(
@@ -426,22 +513,162 @@ async def test_junos_config_needs_commit_complete_as_success_evidence(
     """Junos 的配置只有 commit 成功才生效：没看到 commit complete 就不能算成功。"""
     no_commit = _run(
         monkeypatch,
-        _FakeConfigConnection("set interfaces ge-0/0/1 disable\ncommit\n"),
+        _FakeConfigConnection({"commit": "commit\n"}),
         vendor="juniper_junos",
         command_name="port_disable",
-        interface_name="ge-0/0/1",
+        interface_names=("ge-0/0/1",),
     )
     committed = _run(
         monkeypatch,
-        _FakeConfigConnection("set interfaces ge-0/0/1 disable\ncommit\ncommit complete\n"),
+        _FakeConfigConnection({"commit": "commit\ncommit complete\n"}),
         vendor="juniper_junos",
         command_name="port_disable",
-        interface_name="ge-0/0/1",
+        interface_names=("ge-0/0/1",),
     )
 
     assert no_commit.ok is False
     assert no_commit.dispatched is True
     assert committed.ok is True
+
+
+# ---------------------------------------------------------------------------
+# P1：一条提案一组接口。每个口单独一批 send_config_set（同一条连接、同一次配置
+# 模式）：Cisco/华为/H3C 每个口的第二行都是一样的 shutdown，只看 Netmiko 报出的
+# 出错命令分不清是哪个口；逐口发送时出错在哪一批就是哪个口。
+# ---------------------------------------------------------------------------
+
+
+async def test_junos_uses_private_configuration_and_commits_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Junos 进私有候选配置：中途失败时改动随会话丢弃，不会留在所有人共享的候选库里。"""
+    connection = _FakeConfigConnection({"commit": "commit complete\n"})
+
+    result = _run(
+        monkeypatch,
+        connection,
+        vendor="juniper_junos",
+        command_name="port_disable",
+        interface_names=("ge-0/0/1", "ge-0/0/2", "ge-0/0/3"),
+    )
+
+    assert result.ok is True
+    assert connection.config_mode_commands == ["configure private"]
+    assert connection.batches == [
+        ["set interfaces ge-0/0/1 disable"],
+        ["set interfaces ge-0/0/2 disable"],
+        ["set interfaces ge-0/0/3 disable"],
+        ["commit"],
+    ]
+
+
+async def test_batch_partial_failure_names_each_interface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """第二个口被设备拒绝：第一个口已下发，第三个口一条都没发，结论要逐口说清。"""
+    connection = _FakeConfigConnection(
+        {"interface Gi1/0/16": "SW(config)#interface Gi1/0/16\n% Invalid input detected at '^' marker.\n"}
+    )
+
+    result = _run(
+        monkeypatch,
+        connection,
+        vendor="cisco_iosxe",
+        command_name="port_disable",
+        interface_names=("Gi1/0/15", "Gi1/0/16", "Gi1/0/17"),
+    )
+
+    assert result.ok is False
+    assert result.dispatched is True
+    assert result.detail["applied_interfaces"] == ["Gi1/0/15"]
+    assert result.detail["failed_interface"] == "Gi1/0/16"
+    assert result.detail["not_sent_interfaces"] == ["Gi1/0/17"]
+    assert len(connection.batches) == 2
+    assert "Gi1/0/15" in result.message
+    assert "Gi1/0/16 被设备拒绝" in result.message
+    assert "% Invalid input detected at '^' marker." in result.message
+    assert "Gi1/0/17" in result.message
+
+
+async def test_junos_failure_before_commit_applies_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Junos 要 commit 才生效：提交前就出错，这一批一个口都没改，也不会发 commit。"""
+    connection = _FakeConfigConnection(
+        {"set interfaces ge-0/0/2 disable": "set interfaces ge-0/0/2 disable\nsyntax error.\n"}
+    )
+
+    result = _run(
+        monkeypatch,
+        connection,
+        vendor="juniper_junos",
+        command_name="port_disable",
+        interface_names=("ge-0/0/1", "ge-0/0/2", "ge-0/0/3"),
+    )
+
+    assert result.ok is False
+    assert result.dispatched is True
+    assert result.detail["applied_interfaces"] == []
+    assert result.detail["failed_interface"] == "ge-0/0/2"
+    assert ["commit"] not in connection.batches
+    assert "没有提交" in result.message
+
+
+async def test_entering_configuration_mode_failure_is_not_dispatched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """进不了配置模式（例如 Junos 共享候选库里有别人未提交的改动）时一条配置都没发，可以直接重试。"""
+    connection = _FakeConfigConnection(
+        config_mode_error=ValueError("Failed to enter configuration mode.")
+    )
+
+    result = _run(
+        monkeypatch,
+        connection,
+        vendor="juniper_junos",
+        command_name="port_disable",
+        interface_names=("ge-0/0/1",),
+    )
+
+    assert result.ok is False
+    assert result.dispatched is False
+    assert connection.batches == []
+
+
+async def test_connection_lost_mid_batch_reports_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """发到第二个口时连接断了：第二个口状态不明，第三个口没发，都要写进结论。"""
+    connection = _FakeConfigConnection(drop_at="interface Gi1/0/16")
+
+    result = _run(
+        monkeypatch,
+        connection,
+        vendor="cisco_iosxe",
+        command_name="port_disable",
+        interface_names=("Gi1/0/15", "Gi1/0/16", "Gi1/0/17"),
+    )
+
+    assert result.ok is False
+    assert result.dispatched is True
+    assert result.detail["applied_interfaces"] == ["Gi1/0/15"]
+    assert result.detail["failed_interface"] == "Gi1/0/16"
+    assert result.detail["not_sent_interfaces"] == ["Gi1/0/17"]
+    assert "状态不明" in result.message
+
+
+async def test_netmiko_config_error_message_format_is_pinned() -> None:
+    """设备回的报错行是从 Netmiko 的异常消息里取的：它改了措辞，这里先失败提醒同步。"""
+    source = inspect.getsource(BaseConnection.send_config_set)
+    assert (
+        'f"Invalid input detected at command: {cmd}, matched error: {error_msg}"' in source
+    )
+    error = ConfigInvalidException(
+        "Invalid input detected at command: shutdown, "
+        "matched error: % Invalid input detected at '^' marker."
+    )
+    assert executors._config_error_line(error) == "% Invalid input detected at '^' marker."
+    assert executors._config_error_line(ConfigInvalidException("changed wording")) is None
 
 
 async def test_reboot_rejected_by_device_never_sends_confirmation(

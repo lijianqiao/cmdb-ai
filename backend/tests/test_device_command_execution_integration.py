@@ -8,7 +8,7 @@
 实现流程：
 1. 通过根调度器调用 query_device_command / device_control，串联策略判定、HITL 提案与 Netmiko 执行。
 2. 白名单 + 静态凭据当场执行；黑名单直接拒绝且不建提案；未分类走人工审批 HTTP 链路。
-3. 变更类 port_enable/port_disable 缺 interface_name 时在 propose 阶段拒绝；动态凭据即使白名单也强制 PENDING。
+3. 变更类 port_enable/port_disable 缺 interface_names 时在 propose 阶段拒绝；动态凭据即使白名单也强制 PENDING。
 4. asset_type 范围创建 reboot 策略被 API 拒绝；全程 HTTP 响应体不得出现已知明文密码或密文。
 """
 
@@ -599,7 +599,7 @@ async def test_blacklisted_port_disable_is_rejected_without_creating_proposal(
         {
             "asset_id": asset_id,
             "command_name": "port_disable",
-            "interface_name": "GigabitEthernet0/1",
+            "interface_names": ["GigabitEthernet0/1"],
             "reason": "尝试禁用端口",
         },
     )
@@ -617,7 +617,7 @@ async def test_unclassified_port_enable_creates_pending_and_requires_interface_n
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """未分类 port_enable：缺 interface_name 时在 propose 阶段拒绝；补齐后走 PENDING → 批准 → 执行。"""
+    """未分类 port_enable：缺 interface_names 时在 propose 阶段拒绝；补齐后走 PENDING → 批准 → 执行。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     session_id, asset_id = await _make_session_and_switch_asset(
         db_session,
@@ -644,7 +644,7 @@ async def test_unclassified_port_enable_creates_pending_and_requires_interface_n
         {
             "asset_id": asset_id,
             "command_name": "port_enable",
-            "interface_name": "GigabitEthernet0/1",
+            "interface_names": ["GigabitEthernet0/1"],
             "reason": "启用端口",
         },
     )

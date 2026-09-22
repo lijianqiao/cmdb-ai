@@ -106,6 +106,11 @@ def score(trajectory: Trajectory, expect: Expect, *, loop_reason: str) -> Score:
         failures.append(
             f"max_steps: 走了 {trajectory.steps} 步，上限 {expect.max_steps}"
         )
+    # 一次能做完的事被拆成多次调用：每次都要单独审批、单独连一次设备，也算效率不达标。
+    for tool_name, limit in expect.max_calls:
+        used = trajectory.tool_names.count(tool_name)
+        if used > limit:
+            failures.append(f"max_calls: {tool_name} 调了 {used} 次，上限 {limit} 次")
 
     if not failures:
         return Score(passed=True, failures=(), kind=None, hard_violations=())

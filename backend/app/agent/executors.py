@@ -38,7 +38,7 @@ import asyncio
 import functools
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -48,15 +48,17 @@ from netmiko.exceptions import ConfigInvalidException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.device_commands import (
+    CONFIG_COMMIT_COMMANDS,
+    CONFIG_MODE_COMMANDS,
     CONFIG_SUCCESS_MARKERS,
     DEVICE_ERROR_PATTERNS,
     UnknownDeviceCommandError,
     VendorName,
     command_supports_vendor,
+    config_command_blocks,
     get_command_template,
     get_device_command,
-    rendered_command_lines,
-    validate_interface_name,
+    normalize_interface_names,
 )
 from app.core.cmdb_credential import decrypt_credential_password
 from app.core.config import settings
@@ -237,6 +239,186 @@ def _unconfirmed(message: str) -> ExecutionResult:
     )
 
 
+# Netmiko 4.7.0 的 ConfigInvalidException 消息格式（base_connection.send_config_set）：
+# "Invalid input detected at command: {cmd}, matched error: {error_msg}"。
+# 只用来取设备回的那一行做展示；哪个接口失败靠「逐口一批」确定，不依赖这段文案。
+_MATCHED_ERROR_MARKER = ", matched error: "
+
+
+def _config_error_line(exc: ConfigInvalidException) -> str | None:
+    """取出设备回的报错行；Netmiko 改了措辞就返回 None，只说被拒绝、不猜原因。"""
+    _, marker, tail = str(exc).partition(_MATCHED_ERROR_MARKER)
+    if not marker:
+        return None
+    return tail.strip()[:_MAX_ERROR_LINE_CHARS] or None
+
+
+def _whole_line_error_pattern(vendor: VendorName) -> str:
+    """交给 Netmiko 的报错正则：在目录正则后接 .*$，异常消息里就能带上整行报错。"""
+    return f"(?:{DEVICE_ERROR_PATTERNS[vendor]}).*$"
+
+
+def _batch_failure(
+    message: str,
+    *,
+    error_class: str,
+    applied: Sequence[str],
+    failed: str,
+    not_sent: Sequence[str],
+) -> ExecutionResult:
+    """一批接口中途失败：逐口记清楚谁已下发、谁失败、谁没发，交给上层按 UNKNOWN 处置。"""
+    return ExecutionResult(
+        ok=False,
+        message=message,
+        detail={
+            "error_class": error_class,
+            "applied_interfaces": list(applied),
+            "failed_interface": failed,
+            "not_sent_interfaces": list(not_sent),
+        },
+        dispatched=True,
+    )
+
+
+def _batch_failure_message(
+    *,
+    applied: Sequence[str],
+    failed: str,
+    not_sent: Sequence[str],
+    failed_reason: str,
+    needs_commit: bool,
+) -> str:
+    """把逐口结果拼成一句人话，直接进审批卡片、模型工具结果和对话结论。"""
+    if needs_commit:
+        # Junos 要 commit 才生效：提交之前失败，这一批一个口都没落到设备上。
+        return f"{failed} {failed_reason}；配置没有提交，这一批接口都没有生效"
+    parts: list[str] = []
+    if applied:
+        parts.append(f"已下发：{'、'.join(applied)}")
+    parts.append(f"{failed} {failed_reason}")
+    if not_sent:
+        parts.append(f"未下发：{'、'.join(not_sent)}")
+    return "；".join(parts)
+
+
+def _run_config_batch(
+    connection: Any,
+    *,
+    vendor: VendorName,
+    command_name: str,
+    interface_names: Sequence[str],
+    read_timeout: float,
+) -> ExecutionResult | str:
+    """在已经进入配置模式的连接上逐口下发；成功返回完整回显，失败返回逐口结果。
+
+    每个接口单独一批 send_config_set（同一条连接、同一次配置模式）：Cisco/华为/H3C
+    每个口的第二行都是一样的 shutdown，只看 Netmiko 报出的出错命令分不清是哪个口；
+    逐口发送时出错在哪一批就是哪个口。Junos 的 commit 整批只发一次。
+    """
+    blocks = config_command_blocks(command_name, vendor, interface_names)
+    if any("<" in line or ">" in line for _, lines in blocks for line in lines):
+        return ExecutionResult(ok=False, message="命令模板含未解析占位符", dispatched=True)
+
+    commit_lines = CONFIG_COMMIT_COMMANDS.get(vendor, ())
+    error_pattern = _whole_line_error_pattern(vendor)
+    applied: list[str] = []
+    outputs: list[str] = []
+
+    for index, (interface_name, lines) in enumerate(blocks):
+        not_sent = [name for name, _ in blocks[index + 1 :]]
+        try:
+            outputs.append(
+                str(
+                    connection.send_config_set(
+                        list(lines),
+                        read_timeout=read_timeout,
+                        error_pattern=error_pattern,
+                        enter_config_mode=False,
+                        exit_config_mode=False,
+                    )
+                )
+            )
+        except ConfigInvalidException as exc:
+            logger.warning(
+                "设备拒绝了配置命令 vendor=%s command=%s interface=%s",
+                vendor,
+                command_name,
+                interface_name,
+            )
+            error_line = _config_error_line(exc)
+            reason = f"被设备拒绝（{error_line}）" if error_line else "被设备拒绝"
+            return _batch_failure(
+                _batch_failure_message(
+                    applied=applied,
+                    failed=interface_name,
+                    not_sent=not_sent,
+                    failed_reason=reason,
+                    needs_commit=bool(commit_lines),
+                ),
+                error_class="DeviceRejected",
+                applied=[] if commit_lines else applied,
+                failed=interface_name,
+                not_sent=not_sent,
+            )
+        except Exception as exc:
+            logger.exception(
+                "配置命令执行中断 vendor=%s command=%s interface=%s", vendor, command_name, interface_name
+            )
+            return _batch_failure(
+                _batch_failure_message(
+                    applied=applied,
+                    failed=interface_name,
+                    not_sent=not_sent,
+                    failed_reason="执行中断，状态不明",
+                    needs_commit=bool(commit_lines),
+                ),
+                error_class=type(exc).__name__,
+                applied=[] if commit_lines else applied,
+                failed=interface_name,
+                not_sent=not_sent,
+            )
+        applied.append(interface_name)
+
+    if commit_lines:
+        try:
+            outputs.append(
+                str(
+                    connection.send_config_set(
+                        list(commit_lines),
+                        read_timeout=read_timeout,
+                        error_pattern=error_pattern,
+                        enter_config_mode=False,
+                        exit_config_mode=False,
+                    )
+                )
+            )
+        except ConfigInvalidException as exc:
+            error_line = _config_error_line(exc)
+            reason = f"（{error_line}）" if error_line else ""
+            return _batch_failure(
+                f"提交被设备拒绝{reason}；这一批接口都没有生效",
+                error_class="DeviceRejected",
+                applied=[],
+                failed="commit",
+                not_sent=[],
+            )
+        except Exception as exc:
+            logger.exception("提交配置中断 vendor=%s command=%s", vendor, command_name)
+            return _batch_failure(
+                "提交过程中断，这一批接口是否生效无法确定，请人工核实",
+                error_class=type(exc).__name__,
+                applied=[],
+                failed="commit",
+                not_sent=[],
+            )
+
+    output = "\n".join(outputs)
+    marker = CONFIG_SUCCESS_MARKERS.get(vendor)
+    if marker is not None and not re.search(marker, output):
+        return _unconfirmed("未看到设备确认配置已提交，配置可能未生效或部分生效，请人工核实")
+    return output
+
+
 def _run_confirmation_flow(
     connection: Any,
     *,
@@ -284,14 +466,15 @@ def _run_device_command(
     password: str,
     command_name: str,
     definition: Any,
-    interface_name: str | None,
+    interface_names: Sequence[str] | None,
     conn_timeout: float,
     read_timeout: float,
 ) -> ExecutionResult:
     """在工作线程里跑完整条 Netmiko 会话：连接 → 按类型分派 → 判定结果 → 断开。
 
     全程同步阻塞，由 DeviceQueryExecutor.execute 用 asyncio.to_thread 调用。
-    连接建立后置 dispatched=True，之后任何异常都无法确定命令是否已生效。
+    普通命令在连接建立后就置 dispatched=True；配置命令要等进了配置模式才置位——
+    进不去配置模式时一条配置都没发，可以直接重试。
     """
     connection = None
     dispatched = False
@@ -303,50 +486,49 @@ def _run_device_command(
             password=password,
             conn_timeout=conn_timeout,
         )
-        # 连接已建立：从这里开始，任何异常都无法确定命令是否已经下发到设备。
-        dispatched = True
 
         if definition.config_templates is not None and vendor in definition.config_templates:
-            rendered = list(
-                rendered_command_lines(command_name, vendor, interface_name=interface_name)
-            )
-            if any("<" in line or ">" in line for line in rendered):
-                return ExecutionResult(ok=False, message="命令模板含未解析占位符")
-            try:
-                # error_pattern 让 Netmiko 每发一行就检查回显，命中立即抛异常，
-                # 不会在第一行就失败的情况下继续往下发。
-                output = connection.send_config_set(
-                    rendered,
-                    read_timeout=read_timeout,
-                    error_pattern=DEVICE_ERROR_PATTERNS[vendor],
-                )
-            except ConfigInvalidException:
-                logger.warning(
-                    "设备拒绝了配置命令 host=%s vendor=%s command=%s", host, vendor, command_name
-                )
-                return _rejected("设备拒绝了配置命令，可能已部分生效，请人工核实")
-            marker = CONFIG_SUCCESS_MARKERS.get(vendor)
-            if marker is not None and not re.search(marker, output):
-                return _unconfirmed("未看到设备确认配置已提交，配置可能未生效或部分生效，请人工核实")
-        elif definition.confirmation is not None and vendor in definition.confirmation:
-            flow = _run_confirmation_flow(
+            # 进配置模式之前一条配置都没发：进不去就按未下发处理（例如 Junos 的共享候选库里
+            # 有别人未提交的改动时，configure private 会拒绝进入）。
+            mode_command = CONFIG_MODE_COMMANDS.get(vendor)
+            if mode_command is None:
+                connection.config_mode()
+            else:
+                connection.config_mode(config_command=mode_command)
+            dispatched = True
+            batch = _run_config_batch(
                 connection,
                 vendor=vendor,
-                template=definition.templates[vendor],
-                steps=definition.confirmation[vendor],
+                command_name=command_name,
+                interface_names=interface_names or (),
                 read_timeout=read_timeout,
             )
-            if isinstance(flow, ExecutionResult):
-                return flow
-            output = flow
+            if isinstance(batch, ExecutionResult):
+                return batch
+            output = batch
+            connection.exit_config_mode()
         else:
-            template = get_command_template(command_name, vendor)
-            if "<" in template or ">" in template:
-                return ExecutionResult(ok=False, message="命令模板含未解析占位符")
-            output = connection.send_command(template, read_timeout=read_timeout)
-            error_line = _device_error_line(vendor, output, head_only=True)
-            if error_line is not None:
-                return _rejected(f"设备拒绝了命令：{error_line}")
+            # 连接已建立：从这里开始，任何异常都无法确定命令是否已经下发到设备。
+            dispatched = True
+            if definition.confirmation is not None and vendor in definition.confirmation:
+                flow = _run_confirmation_flow(
+                    connection,
+                    vendor=vendor,
+                    template=definition.templates[vendor],
+                    steps=definition.confirmation[vendor],
+                    read_timeout=read_timeout,
+                )
+                if isinstance(flow, ExecutionResult):
+                    return flow
+                output = flow
+            else:
+                template = get_command_template(command_name, vendor)
+                if "<" in template or ">" in template:
+                    return ExecutionResult(ok=False, message="命令模板含未解析占位符")
+                output = connection.send_command(template, read_timeout=read_timeout)
+                error_line = _device_error_line(vendor, output, head_only=True)
+                if error_line is not None:
+                    return _rejected(f"设备拒绝了命令：{error_line}")
     except Exception as exc:
         # 真实堆栈只进服务端日志：既能定位平台/认证/分页类故障，又不外泄异常文本。
         logger.exception(
@@ -397,7 +579,7 @@ class DeviceQueryExecutor:
         asset: CmdbAsset,
         command_name: str,
         dynamic_password: str | None,
-        interface_name: str | None = None,
+        interface_names: Sequence[str] | None = None,
     ) -> ExecutionResult:
         """执行一次设备命令并返回安全结果。
 
@@ -407,7 +589,7 @@ class DeviceQueryExecutor:
             asset: 目标 CMDB 资产，须已配置 vendor 与凭据。
             command_name: 目录里的命令名，调用方保证已通过白名单/校验。
             dynamic_password: 动态凭据时的一次性明文密码；静态凭据时忽略。
-            interface_name: port_enable/port_disable 等需要接口名的命令参数。
+            interface_names: port_enable/port_disable 要操作的一组接口全名。
 
         Returns:
             ok=True 时 detail 含 output/truncated；ok=False 时 message 只给
@@ -429,10 +611,15 @@ class DeviceQueryExecutor:
         except UnknownDeviceCommandError:
             return ExecutionResult(ok=False, message="未知命令名")
 
-        if definition.requires_argument == "interface_name":
-            if not interface_name or not validate_interface_name(interface_name):
+        normalized_interfaces: tuple[str, ...] | None = None
+        if "interface_names" in definition.arguments:
+            if interface_names is None:
                 return ExecutionResult(ok=False, message="接口名参数无效")
-        elif interface_name is not None:
+            try:
+                normalized_interfaces = normalize_interface_names(interface_names)
+            except ValueError:
+                return ExecutionResult(ok=False, message="接口名参数无效")
+        elif interface_names is not None:
             return ExecutionResult(ok=False, message="该命令不接受接口名参数")
 
         if not command_supports_vendor(command_name, asset.vendor):
@@ -458,7 +645,7 @@ class DeviceQueryExecutor:
                 password=password,
                 command_name=command_name,
                 definition=definition,
-                interface_name=interface_name,
+                interface_names=normalized_interfaces,
                 conn_timeout=settings.DEVICE_COMMAND_CONN_TIMEOUT_SECONDS,
                 read_timeout=settings.DEVICE_COMMAND_READ_TIMEOUT_SECONDS,
             ),

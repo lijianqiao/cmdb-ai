@@ -20,9 +20,20 @@
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
-from app.agent.device_commands import CommandName
+from app.agent.device_commands import (
+    MAX_INTERFACES_PER_PROPOSAL,
+    CommandName,
+    normalize_interface_names,
+)
 from app.agent.loop import ToolResult
 
 
@@ -117,8 +128,23 @@ class DeviceControlArgs(_Args):
 
     asset_id: int = Field(ge=1)
     command_name: CommandName
-    interface_name: str | None = Field(default=None, min_length=1, max_length=64)
+    interface_names: list[str] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_INTERFACES_PER_PROPOSAL,
+        description=(
+            "port_enable/port_disable 要操作的接口全名列表，如 "
+            '["GigabitEthernet1/0/15", "GigabitEthernet1/0/16"]。'
+            "用户点名多个接口时全部放进这一次调用，不要拆成多次；reboot 不传。"
+        ),
+    )
     reason: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("interface_names")
+    @classmethod
+    def _normalize_interface_names(cls, value: list[str] | None) -> list[str] | None:
+        """去重保序、逐个校验；不合法时的 ValueError 会变成 clarification 回给模型。"""
+        return None if value is None else list(normalize_interface_names(value))
 
 
 class QueryDeviceCommandArgs(_Args):

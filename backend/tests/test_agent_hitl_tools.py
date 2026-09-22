@@ -297,7 +297,7 @@ async def test_device_control_thin_tool_fails_closed_without_executor(
         proposed_by_agent_id=None,
         asset_id=asset_id,
         command_name="reboot",
-        interface_name=None,
+        interface_names=None,
         reason="故障恢复",
         gate_hook=None,
     )
@@ -330,6 +330,14 @@ def test_root_schema_has_notify_and_device_control_without_propose() -> None:
         "port_enable",
         "port_disable",
     }
+    # 一组接口放在同一次调用里；旧的单数 interface_name 已经取消。
+    assert "interface_name" not in control_params["properties"]
+    interface_names = control_params["properties"]["interface_names"]
+    array_schema = next(item for item in interface_names["anyOf"] if item.get("type") == "array")
+    assert array_schema["minItems"] == 1
+    assert array_schema["maxItems"] == 48
+    assert "interface_names" in control["description"]
+    assert "reboot/port_enable/port_disable" in control["description"]
 
 
 async def test_root_dispatcher_routes_device_control(
@@ -346,11 +354,40 @@ async def test_root_dispatcher_routes_device_control(
 
     result = await dispatch(
         "device_control",
-        {"asset_id": 9, "command_name": "port_disable", "interface_name": "Gi0/1", "reason": "端口异常"},
+        {
+            "asset_id": 9,
+            "command_name": "port_disable",
+            "interface_names": ["Gi0/2", "Gi0/1", "Gi0/2"],
+            "reason": "端口异常",
+        },
     )
     assert result.control == "pending_approval"
     assert captured["command_name"] == "port_disable"
-    assert captured["interface_name"] == "Gi0/1"
+    # 去重、保持用户点名的顺序
+    assert captured["interface_names"] == ["Gi0/2", "Gi0/1"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"interface_name": "Gi0/1"},  # 旧的单数参数：让模型改用 interface_names
+        {"interface_names": []},
+        {"interface_names": [f"Gi0/{index}" for index in range(1, 50)]},
+        {"interface_names": ["Gi0/1", "Gi0/2; reload"]},
+    ],
+)
+async def test_root_dispatcher_rejects_bad_interface_lists_as_clarification(
+    db_session: AsyncSession, actor_id: int, extra: dict[str, object]
+) -> None:
+    """参数问题回 clarification，模型能自己改好再调，不会建出提案。"""
+    dispatch = build_root_tool_dispatcher(db_session, session_id=21, actor_user_id=actor_id)
+
+    result = await dispatch(
+        "device_control",
+        {"asset_id": 9, "command_name": "port_disable", "reason": "端口异常", **extra},
+    )
+
+    assert result.control == "clarification"
 
 
 async def test_root_dispatcher_binds_context_to_notify(

@@ -25,7 +25,7 @@ _OUTCOME_FIELDS = frozenset({"answer_contains_any", "answer_not_contains"})
 _INVARIANT_FIELDS = frozenset(
     {"must_call_any", "must_not_call", "must_create_proposal", "must_not_execute"}
 )
-_EFFICIENCY_FIELDS = frozenset({"max_steps"})
+_EFFICIENCY_FIELDS = frozenset({"max_steps", "max_calls"})
 
 DEFAULT_REPEAT = 5
 
@@ -45,6 +45,8 @@ class Expect:
     must_create_proposal: bool = False
     must_not_execute: bool = False
     max_steps: int | None = None
+    # (工具名, 最多调几次)：一次能做完的事被拆成多次调用时判 FAIL。
+    max_calls: tuple[tuple[str, int], ...] = ()
 
     def is_empty(self) -> bool:
         """什么都不断言的 expect 会永远 PASS，必须被拦下。"""
@@ -56,6 +58,7 @@ class Expect:
             or self.must_create_proposal
             or self.must_not_execute
             or self.max_steps is not None
+            or self.max_calls
         )
 
 
@@ -86,6 +89,24 @@ def _as_str_tuple(raw: Any, *, path: Path, field: str) -> tuple[str, ...]:
     if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
         raise InvalidCaseError(f"{path}: {field} 必须是字符串列表")
     return tuple(raw)
+
+
+def _as_call_limits(raw: Any, *, path: Path) -> tuple[tuple[str, int], ...]:
+    """{工具名: 最多调几次} → 有序元组；写错形状或次数当场报错。"""
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict):
+        raise InvalidCaseError(f"{path}: max_calls 必须是 {{工具名: 次数}} 映射")
+    limits: list[tuple[str, int]] = []
+    for tool_name, limit in raw.items():
+        if not isinstance(tool_name, str):
+            raise InvalidCaseError(f"{path}: max_calls 的键必须是工具名")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise InvalidCaseError(
+                f"{path}: max_calls[{tool_name}] 必须是 >= 1 的整数，得到 {limit!r}"
+            )
+        limits.append((tool_name, limit))
+    return tuple(limits)
 
 
 def _as_section(raw: Any, *, path: Path, name: str) -> dict[str, Any]:
@@ -149,6 +170,7 @@ def load_case(path: Path) -> Case:
         must_create_proposal=bool(invariants.get("must_create_proposal", False)),
         must_not_execute=bool(invariants.get("must_not_execute", False)),
         max_steps=efficiency.get("max_steps"),
+        max_calls=_as_call_limits(efficiency.get("max_calls"), path=path),
     )
     if expect.is_empty():
         raise InvalidCaseError(

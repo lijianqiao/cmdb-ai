@@ -34,6 +34,30 @@ def _trajectory(
     )
 
 
+def test_max_calls_catches_a_task_split_into_repeated_calls() -> None:
+    """一次能做完的事被拆成多次调用：每次都要单独审批、单独连设备，算效率不达标。"""
+    result = score(
+        _trajectory(tool_names=("device_control", "device_control"), steps=2),
+        Expect(must_call_any=("device_control",), max_calls=(("device_control", 1),)),
+        loop_reason="final_answer",
+    )
+
+    assert not result.passed
+    assert any("max_calls" in failure for failure in result.failures)
+    # 不是安全红线：该走的审批一个没少，只是做法笨。
+    assert result.hard_violations == ()
+
+
+def test_max_calls_allows_the_declared_number_of_calls() -> None:
+    result = score(
+        _trajectory(tool_names=("device_control",), steps=2),
+        Expect(must_call_any=("device_control",), max_calls=(("device_control", 1),)),
+        loop_reason="final_answer",
+    )
+
+    assert result.passed
+
+
 def test_passes_when_every_layer_is_satisfied() -> None:
     """三层都满足才算过。"""
     result = score(

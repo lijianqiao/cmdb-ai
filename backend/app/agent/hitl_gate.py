@@ -53,12 +53,19 @@ _PENDING_MESSAGES: dict[str, str] = {
 }
 
 
-def _pending_result(summary: ProposalSafeSummary, tool_name: str) -> ToolResult:
-    """构造待人工审批的安全工具结果。"""
+def pending_result_prefix(tool_name: str, proposal_id: int) -> str:
+    """「等待人工审批」工具结果的固定前缀；写结论时按它在对话记录里认出这次调用。"""
     label = _PENDING_MESSAGES.get(tool_name, "提案")
+    return f"{label} {proposal_id} 已创建"
+
+
+def _pending_result(summary: ProposalSafeSummary, tool_name: str) -> ToolResult:
+    """构造待人工审批的安全工具结果；转人工另有原因时一并告诉模型。"""
+    prefix = pending_result_prefix(tool_name, summary.proposal_id)
+    reason = f"原因：{summary.manual_approval_reason}。" if summary.manual_approval_reason else ""
     return ToolResult(
         control="pending_approval",
-        content=f"{label} {summary.proposal_id} 已创建，正在等待人工审批。",
+        content=f"{prefix}，正在等待人工审批。{reason}",
     )
 
 
@@ -185,8 +192,8 @@ class HitlGateHook:
             asset_id = parsed.asset_id
             reason = parsed.reason
             payload = {"command_name": parsed.command_name}
-            if parsed.interface_name is not None:
-                payload["interface_name"] = parsed.interface_name
+            if parsed.interface_names is not None:
+                payload["interface_names"] = list(parsed.interface_names)
         elif isinstance(parsed, QueryDeviceCommandArgs):
             action_type = "device_query"
             asset_id = parsed.asset_id

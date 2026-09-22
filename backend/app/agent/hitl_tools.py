@@ -72,7 +72,7 @@ async def device_control(
     proposed_by_agent_id: str | None,
     asset_id: int,
     command_name: str,
-    interface_name: str | None,
+    interface_names: list[str] | None,
     reason: str,
     publisher: HitlEventPublisher | None = None,
     gate_hook: HitlGateHook | None = None,
@@ -86,7 +86,7 @@ async def device_control(
         proposed_by_agent_id: 发起提案的 Agent ID，可为空。
         asset_id: 目标 CMDB 资产 ID。
         command_name: 白名单内的变更类命令名。
-        interface_name: port_enable/port_disable 所需的接口名。
+        interface_names: port_enable/port_disable 要操作的一组接口全名。
         reason: 发起管控的原因。
         publisher: 可选的 HITL 安全事件发布器。
         gate_hook: 门控钩子（薄工具路径不使用）。
