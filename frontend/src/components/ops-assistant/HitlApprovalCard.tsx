@@ -1,7 +1,7 @@
 /** HITL 审批时间线卡片
  *
  * 在时间线中呈现审批状态、执行结果与完整配置抽屉；
- * 支持动态凭据 InputOTP 输入与审批决策/重试/处置操作。
+ * 支持动态凭据口令输入与审批决策/重试/处置操作。
  */
 
 import { useEffect, useRef, useState } from "react"
@@ -23,11 +23,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import {
-  InputOTP,
-  InputOTPGroup,
-  InputOTPSlot,
-} from "@/components/ui/input-otp"
 import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
 import { Cancel01Icon, Shield02Icon, Tick02Icon } from "@/lib/icons"
@@ -47,6 +42,7 @@ import {
 } from "@/lib/agent-api"
 import { cn } from "@/lib/utils"
 import type { DeviceQueryResult } from "@/types/agent"
+import { DynamicPasswordInput } from "@/components/ops-assistant/DynamicPasswordInput"
 import {
   HITL_RECONCILING_MESSAGE,
   canSubmitApproval,
@@ -209,7 +205,6 @@ export function HitlApprovalCard({
    * 也不自动重发，只按提案 ID 查真实状态并如实显示。
    */
   const reconcileOutcome = async (successMessage: string): Promise<void> => {
-    setDynamicPassword("")
     setReconciling(true)
     const { proposal, aborted } = await reconcile(proposalId, (latest) => {
       setDetail(latest)
@@ -223,7 +218,9 @@ export function HitlApprovalCard({
 
   const handleApprove = async (): Promise<void> => {
     if (!approveAllowed) return
-    const passwordToUse = dynamicPassword.trim()
+    // 口令原样提交（不 trim）；一发出就清空，不论结果如何都不在界面上多留
+    const passwordToUse = dynamicPassword
+    setDynamicPassword("")
 
     setDeciding(true)
     try {
@@ -236,7 +233,6 @@ export function HitlApprovalCard({
       const updated = await decideHitlProposal(proposalId, body)
       setDetail(updated)
       setLocalStatus(updated.status)
-      setDynamicPassword("")
       const notice = describeHitlOutcome(updated, "审批完成")
       toast[notice.level](notice.message)
     } catch (error: unknown) {
@@ -269,7 +265,9 @@ export function HitlApprovalCard({
 
   const handleRetry = async (): Promise<void> => {
     if (!retryAllowed) return
-    const passwordToUse = dynamicPassword.trim()
+    // 与批准同一处理：原样提交，一发出就清空
+    const passwordToUse = dynamicPassword
+    setDynamicPassword("")
     setDeciding(true)
     try {
       const body: { dynamic_credential_password?: string } = {}
@@ -279,7 +277,6 @@ export function HitlApprovalCard({
       const updated = await retryHitlProposal(proposalId, body)
       setDetail(updated)
       setLocalStatus(updated.status)
-      setDynamicPassword("")
       const notice = describeHitlOutcome(updated, "重试执行成功")
       toast[notice.level](notice.message)
     } catch (error: unknown) {
@@ -547,25 +544,15 @@ export function HitlApprovalCard({
             {needsDynamicPassword ? (
               <div className="flex min-w-[200px] flex-1 flex-col gap-1.5">
                 <Label htmlFor={`hitl-dynamic-password-${proposalId}`}>
-                  动态凭据密码 (OTP)
+                  动态凭据密码
                 </Label>
-                <InputOTP
+                <DynamicPasswordInput
                   id={`hitl-dynamic-password-${proposalId}`}
-                  maxLength={6}
                   value={dynamicPassword}
-                  onChange={(val) => setDynamicPassword(val)}
+                  onChange={setDynamicPassword}
                   disabled={deciding}
-                  data-testid="hitl-dynamic-password"
-                >
-                  <InputOTPGroup>
-                    <InputOTPSlot index={0} />
-                    <InputOTPSlot index={1} />
-                    <InputOTPSlot index={2} />
-                    <InputOTPSlot index={3} />
-                    <InputOTPSlot index={4} />
-                    <InputOTPSlot index={5} />
-                  </InputOTPGroup>
-                </InputOTP>
+                  testId="hitl-dynamic-password"
+                />
               </div>
             ) : null}
             <div className="flex flex-wrap gap-2">
@@ -602,25 +589,15 @@ export function HitlApprovalCard({
             {needsDynamicPassword ? (
               <div className="flex min-w-[200px] flex-1 flex-col gap-1.5">
                 <Label htmlFor={`hitl-retry-password-${proposalId}`}>
-                  重试动态凭据密码 (OTP)
+                  重试动态凭据密码
                 </Label>
-                <InputOTP
+                <DynamicPasswordInput
                   id={`hitl-retry-password-${proposalId}`}
-                  maxLength={6}
                   value={dynamicPassword}
-                  onChange={(val) => setDynamicPassword(val)}
+                  onChange={setDynamicPassword}
                   disabled={deciding}
-                  data-testid="hitl-retry-password"
-                >
-                  <InputOTPGroup>
-                    <InputOTPSlot index={0} />
-                    <InputOTPSlot index={1} />
-                    <InputOTPSlot index={2} />
-                    <InputOTPSlot index={3} />
-                    <InputOTPSlot index={4} />
-                    <InputOTPSlot index={5} />
-                  </InputOTPGroup>
-                </InputOTP>
+                  testId="hitl-retry-password"
+                />
               </div>
             ) : null}
             <Button

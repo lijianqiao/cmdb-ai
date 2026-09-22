@@ -1,4 +1,4 @@
-/** HitlApprovalDialog 单测：弹窗主动弹出、InputOTP 密码输入与批准/拒绝操作 */
+/** HitlApprovalDialog 单测：弹窗主动弹出、动态凭据口令输入与批准/拒绝操作 */
 
 // @vitest-environment jsdom
 
@@ -95,7 +95,7 @@ function buildProposal(overrides: Partial<HitlProposal> = {}): HitlProposal {
   }
 }
 
-describe("HitlApprovalDialog 模态弹窗与 InputOTP", () => {
+describe("HitlApprovalDialog 模态弹窗与动态凭据口令", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockUsePermission.mockReturnValue({
@@ -106,7 +106,7 @@ describe("HitlApprovalDialog 模态弹窗与 InputOTP", () => {
     })
   })
 
-  it("打开弹窗时渲染载荷与 InputOTP 输入组件", () => {
+  it("打开弹窗时渲染载荷与口令输入框", () => {
     const proposal = buildProposal()
 
     render(
@@ -128,13 +128,13 @@ describe("HitlApprovalDialog 模态弹窗与 InputOTP", () => {
     expect(screen.getByText("排查交换机")).toBeInTheDocument()
     expect(screen.getByText(/show running-config/)).toBeInTheDocument()
 
-    // InputOTP 存在且批准按钮受限
+    // 口令框存在，且没填口令时批准按钮受限
     const otpInput = screen.getByTestId("hitl-dynamic-password")
     expect(otpInput).toBeInTheDocument()
     expect(screen.getByTestId("hitl-approve-button")).toBeDisabled()
   })
 
-  it("输入 OTP 密码后允许批准，并调用 onApprove 提交", async () => {
+  it("输入口令后允许批准，并调用 onApprove 提交", async () => {
     const proposal = buildProposal()
     const onApprove = vi.fn().mockResolvedValue(undefined)
     const onOpenChange = vi.fn()
@@ -166,6 +166,69 @@ describe("HitlApprovalDialog 模态弹窗与 InputOTP", () => {
       expect(onApprove).toHaveBeenCalledWith("123456")
       expect(onOpenChange).toHaveBeenCalledWith(false)
     })
+  })
+})
+
+describe("HitlApprovalDialog 动态凭据口令原样提交", () => {
+  /** 合成的测试口令：8 位以上、字母数字符号混合、带首尾空白（不是真实密码） */
+  const SYNTHETIC_PASSWORD = "  Abc12345!@# "
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockUsePermission.mockReturnValue({
+      permissions: ["agent:hitl_approve"],
+      hasPermission: () => true,
+      hasAnyPermission: () => true,
+      hasAllPermissions: () => true,
+    })
+  })
+
+  function dialogFor(proposalId: number, onApprove = vi.fn()) {
+    return (
+      <HitlApprovalDialog
+        open={true}
+        onOpenChange={vi.fn()}
+        sessionId={10}
+        proposalId={proposalId}
+        actionType="device_query"
+        status="PENDING"
+        reason="排查交换机"
+        assetId={9}
+        detail={buildProposal({ id: proposalId })}
+        onApprove={onApprove}
+      />
+    )
+  }
+
+  it("onApprove 收到的口令与输入完全一致：不截成 6 位，也不去掉首尾空白", () => {
+    const onApprove = vi.fn()
+    render(dialogFor(1, onApprove))
+
+    const input = screen.getByTestId("hitl-dynamic-password")
+    fireEvent.change(input, { target: { value: SYNTHETIC_PASSWORD } })
+    expect(input).toHaveValue(SYNTHETIC_PASSWORD)
+    fireEvent.click(screen.getByTestId("hitl-approve-button"))
+
+    expect(onApprove).toHaveBeenCalledWith(SYNTHETIC_PASSWORD)
+  })
+
+  it("口令框是掩码密码框，长度上限与后端一致（256）", () => {
+    render(dialogFor(1))
+
+    const input = screen.getByTestId("hitl-dynamic-password")
+    expect(input).toHaveAttribute("type", "password")
+    expect(input).toHaveAttribute("maxlength", "256")
+  })
+
+  it("切换到另一个提案时清空已输入的口令", () => {
+    const { rerender } = render(dialogFor(1))
+    fireEvent.change(screen.getByTestId("hitl-dynamic-password"), {
+      target: { value: SYNTHETIC_PASSWORD },
+    })
+
+    rerender(dialogFor(2))
+
+    expect(screen.getByTestId("hitl-dynamic-password")).toHaveValue("")
   })
 })
 

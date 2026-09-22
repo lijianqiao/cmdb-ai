@@ -54,7 +54,7 @@ The Ops Assistant chat experience is engineered for multi-turn AI reasoning, too
    - Expands automatically while generating or awaiting approval; collapses cleanly once the final answer is rendered.
 3. **HITL Global Approval Modal (`HitlApprovalDialog.tsx`)**:
    - Automatically pops up centered on the screen when a `PENDING` proposal is received.
-   - Integrates the official **Shadcn `InputOTP`** 6-digit credential input for dynamic-password protected assets.
+   - Masked credential input for dynamic-password assets: 1–256 characters (a 6-digit OTP or a longer one-time password), submitted exactly as typed, never written to browser storage.
    - Instantly dismisses upon decision submission without blocking background streaming.
 4. **HITL Timeline Card (`HitlApprovalCard.tsx`)**:
    - Embedded record within the timeline history.

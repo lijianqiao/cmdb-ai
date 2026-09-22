@@ -33,7 +33,7 @@ A walkthrough of one full operator session:
   - Three configurable model tiers (cheap / balanced / strong) with wholesale fallback when a tier is unset.
 - **🛡️ Human-In-The-Loop (HITL) Security**:
   - Strict approval gate for state-changing/sensitive actions with `PENDING → APPROVED → EXECUTING → EXECUTED / UNKNOWN` state machine.
-  - Global auto-popup modal with 6-digit `InputOTP` credential input for dynamic-password protected assets.
+  - Global auto-popup approval modal; dynamic-password assets take a masked one-time password (1–256 characters, submitted exactly as typed, never stored).
   - Idempotent AI configuration summarization for large device command outputs.
 - **🗄️ CMDB & Credential Management**:
   - Unified inventory for network switches, routers, and servers with subnet CIDR and topological dependency graphs.

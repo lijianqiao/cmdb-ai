@@ -236,7 +236,7 @@ describe("OpsAssistantPage 完整配置会话隔离", () => {
   })
 })
 
-describe("OpsAssistantPage 审批弹窗：详情没加载成功不能批准", () => {
+describe("OpsAssistantPage 自动弹出的审批窗口", () => {
   const pendingProposal: OpsChatItem = {
     kind: "hitl",
     id: "hitl:901",
@@ -391,5 +391,32 @@ describe("OpsAssistantPage 审批弹窗：详情没加载成功不能批准", ()
     expect(toast.success).not.toHaveBeenCalled()
     expect(toast.error).not.toHaveBeenCalled()
     expect(mockDecideHitlProposal).toHaveBeenCalledTimes(1)
+  })
+
+  it("动态凭据口令原样到达审批接口：长口令、首尾空白都不改写", async () => {
+    // 合成的测试口令，不是真实密码
+    const syntheticPassword = " Zx9-long-one-time-pass "
+    mockGetHitlProposal.mockResolvedValue({
+      ...proposalDetail,
+      asset_credential_type: "dynamic",
+    })
+    mockDecideHitlProposal.mockResolvedValue({
+      ...proposalDetail,
+      status: "EXECUTED",
+      executed_at: "2026-09-21T10:01:00Z",
+    })
+    render(<OpsAssistantPage />)
+
+    const dialog = await screen.findByRole("dialog")
+    const input = await within(dialog).findByTestId("hitl-dynamic-password")
+    fireEvent.change(input, { target: { value: syntheticPassword } })
+    fireEvent.click(within(dialog).getByTestId("hitl-approve-button"))
+
+    await waitFor(() => {
+      expect(mockDecideHitlProposal).toHaveBeenCalledWith(901, {
+        approve: true,
+        dynamic_credential_password: syntheticPassword,
+      })
+    })
   })
 })

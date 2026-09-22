@@ -715,6 +715,101 @@ describe("HitlApprovalCard 详情未就绪时禁止批准/重试", () => {
   })
 })
 
+describe("HitlApprovalCard 动态凭据口令原样提交", () => {
+  /** 合成的测试口令：8 位以上、字母数字符号混合、带首尾空白（不是真实密码） */
+  const SYNTHETIC_PASSWORD = "  Abc12345!@# "
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetHitlProposal.mockReset()
+    mockDecideHitlProposal.mockReset()
+    mockRetryHitlProposal.mockReset()
+    mockUsePermission.mockReturnValue(permissionResult(true))
+  })
+
+  function dynamicCard(status = "PENDING") {
+    return (
+      <HitlApprovalCard
+        sessionId={10}
+        proposalId={1}
+        actionType="device_query"
+        status={status}
+        reason="排查交换机"
+        assetId={9}
+        hasFullResult={false}
+      />
+    )
+  }
+
+  it("批准时口令原样提交：不截成 6 位，也不去掉首尾空白", async () => {
+    mockGetHitlProposal.mockResolvedValue(buildProposal())
+    mockDecideHitlProposal.mockResolvedValue(
+      buildProposal({ status: "EXECUTED", executed_at: "2026-08-12T10:01:00Z" }),
+    )
+    render(dynamicCard())
+
+    const input = await screen.findByTestId("hitl-dynamic-password")
+    fireEvent.change(input, { target: { value: SYNTHETIC_PASSWORD } })
+    expect(input).toHaveValue(SYNTHETIC_PASSWORD)
+    fireEvent.click(screen.getByTestId("hitl-approve-button"))
+
+    await waitFor(() => {
+      expect(mockDecideHitlProposal).toHaveBeenCalledWith(1, {
+        approve: true,
+        dynamic_credential_password: SYNTHETIC_PASSWORD,
+      })
+    })
+  })
+
+  it("重试时口令同样原样提交", async () => {
+    mockGetHitlProposal.mockResolvedValue(buildProposal({ status: "APPROVED" }))
+    mockRetryHitlProposal.mockResolvedValue(
+      buildProposal({ status: "EXECUTED", executed_at: "2026-08-12T10:01:00Z" }),
+    )
+    render(dynamicCard("APPROVED"))
+
+    const input = await screen.findByTestId("hitl-retry-password")
+    fireEvent.change(input, { target: { value: SYNTHETIC_PASSWORD } })
+    fireEvent.click(screen.getByTestId("hitl-retry-button"))
+
+    await waitFor(() => {
+      expect(mockRetryHitlProposal).toHaveBeenCalledWith(1, {
+        dynamic_credential_password: SYNTHETIC_PASSWORD,
+      })
+    })
+  })
+
+  it("口令框是掩码密码框，长度上限与后端一致（256），可切换显示", async () => {
+    mockGetHitlProposal.mockResolvedValue(buildProposal())
+    render(dynamicCard())
+
+    const input = await screen.findByTestId("hitl-dynamic-password")
+    expect(input).toHaveAttribute("type", "password")
+    expect(input).toHaveAttribute("maxlength", "256")
+    fireEvent.click(screen.getByRole("button", { name: "显示密码" }))
+    expect(input).toHaveAttribute("type", "text")
+  })
+
+  it("请求一发出就清空口令：失败后需要重新输入，口令也不写进浏览器存储", async () => {
+    const setItem = vi.spyOn(Storage.prototype, "setItem")
+    mockGetHitlProposal.mockResolvedValue(buildProposal())
+    mockDecideHitlProposal.mockRejectedValue(httpError(409, "提案状态已变化"))
+    render(dynamicCard())
+
+    const input = await screen.findByTestId("hitl-dynamic-password")
+    fireEvent.change(input, { target: { value: SYNTHETIC_PASSWORD } })
+    fireEvent.click(screen.getByTestId("hitl-approve-button"))
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith("提案状态已变化")
+    })
+    expect(screen.getByTestId("hitl-dynamic-password")).toHaveValue("")
+    const stored = setItem.mock.calls.map(([, value]) => String(value))
+    expect(stored.some((value) => value.includes("Abc12345"))).toBe(false)
+    setItem.mockRestore()
+  })
+})
+
 describe("HitlApprovalCard 请求没拿到明确答复时按提案 ID 核对", () => {
   /** 模拟数据库里这条提案的真实状态：接口处理了、但浏览器没等到响应 */
   let serverStatus: string

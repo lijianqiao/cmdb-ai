@@ -1,6 +1,6 @@
 /** HITL 审批模态对话框
  *
- * 弹出展示审批详情、Shadcn InputOTP 密码录入与操作按钮。
+ * 弹出展示审批详情、动态凭据口令输入与操作按钮。
  * 用户点击批准并执行或确认拒绝时，弹窗立即关闭消失，不阻塞界面。
  */
 
@@ -18,11 +18,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import {
-  InputOTP,
-  InputOTPGroup,
-  InputOTPSlot,
-} from "@/components/ui/input-otp"
 import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
 import { usePermission } from "@/hooks/use-permission"
@@ -33,6 +28,7 @@ import {
   type HitlProposal,
 } from "@/lib/hitl-api"
 import { PERMISSIONS } from "@/lib/constants"
+import { DynamicPasswordInput } from "@/components/ops-assistant/DynamicPasswordInput"
 import {
   canSubmitApproval,
   canSubmitRetry,
@@ -176,9 +172,15 @@ export function HitlApprovalDialog({
     }
   }, [open, propDetail, canApprove, proposalId, detailReloadKey])
 
+  // 同一个弹窗会被复用给下一个提案：上一个提案输入的口令绝不能带过去
+  useEffect(() => {
+    setDynamicPassword("")
+  }, [proposalId])
+
   const handleApproveClick = () => {
     if (!approveAllowed) return
-    const pwd = dynamicPassword.trim()
+    // 口令原样提交：不 trim，合法口令可以带首尾空白
+    const pwd = dynamicPassword
 
     // 关键优化：点击批准的第一时间立即关闭弹窗并清空密码，绝不阻塞等待回答输出
     setDynamicPassword("")
@@ -254,7 +256,7 @@ export function HitlApprovalDialog({
 
   const handleRetryClick = () => {
     if (!retryAllowed) return
-    const pwd = dynamicPassword.trim()
+    const pwd = dynamicPassword
     setDynamicPassword("")
     onOpenChange(false)
     if (onRetry) {
@@ -368,32 +370,22 @@ export function HitlApprovalDialog({
               </div>
             ) : null}
 
-            {/* 动态凭据密码（使用 Shadcn InputOTP 组件） */}
+            {/* 动态凭据口令：通用一次性密码，原样提交 */}
             {canApprove && (isPending || retryAvailable) && needsDynamicPassword ? (
-              <div className="flex flex-col items-center gap-2 rounded-lg border border-border/70 bg-card p-3">
+              <div className="flex flex-col gap-2 rounded-lg border border-border/70 bg-card p-3">
                 <Label
                   htmlFor={`hitl-otp-dialog-${proposalId}`}
                   className="text-xs font-medium text-foreground"
                 >
-                  请输入动态凭据密码 (OTP)
+                  请输入动态凭据密码
                 </Label>
-                <InputOTP
+                <DynamicPasswordInput
                   id={`hitl-otp-dialog-${proposalId}`}
-                  maxLength={6}
                   value={dynamicPassword}
-                  onChange={(val) => setDynamicPassword(val)}
+                  onChange={setDynamicPassword}
                   disabled={deciding}
-                  data-testid="hitl-dynamic-password"
-                >
-                  <InputOTPGroup>
-                    <InputOTPSlot index={0} />
-                    <InputOTPSlot index={1} />
-                    <InputOTPSlot index={2} />
-                    <InputOTPSlot index={3} />
-                    <InputOTPSlot index={4} />
-                    <InputOTPSlot index={5} />
-                  </InputOTPGroup>
-                </InputOTP>
+                  testId="hitl-dynamic-password"
+                />
                 <p className="text-[11px] text-muted-foreground">
                   批准时输入本次登录口令，凭据不会落库
                 </p>

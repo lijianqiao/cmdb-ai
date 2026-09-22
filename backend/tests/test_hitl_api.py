@@ -423,6 +423,81 @@ async def test_decide_device_query_requires_password_for_dynamic_credential(
     assert response.status_code == 422, response.text
 
 
+async def test_decide_passes_dynamic_password_to_device_verbatim(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """动态口令原样交给设备：256 个字符（上限）可用，首尾空白不被裁掉。
+
+    动态凭据是通用的一次性登录口令，不只是 6 位 OTP；前端曾把它截成 6 位
+    并 trim，这里钉住后端这一侧的契约。
+    """
+
+    async def fake_chat(
+        model_key: str,
+        messages: list[ChatMessage],
+        **kwargs: Any,
+    ) -> ChatResult:
+        return _chat_result("设备版本正常")
+
+    monkeypatch.setattr(device_result_summary, "chat", fake_chat)
+    monkeypatch.setattr("app.agent.ws_hub.hub.broadcast", AsyncMock())
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    await _grant_hitl_approve(db_session, test_user)
+    _, proposal_id = await _make_pending_device_query_proposal(
+        db_session,
+        user_id=test_user.id,
+    )
+    # 合成的测试口令（不是真实密码）：首尾带空格，总长正好 256
+    password = " Ab1-" + "x" * 249 + "9 "
+    assert len(password) == 256
+
+    fake_connection = MagicMock()
+    fake_connection.send_command = MagicMock(return_value="Cisco IOS XE Software")
+    with patch(
+        "app.agent.executors._open_netmiko_connection",
+        return_value=fake_connection,
+    ) as open_connection:
+        response = await client.post(
+            f"/api/v1/hitl/proposals/{proposal_id}/decide",
+            json={"approve": True, "dynamic_credential_password": password},
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["status"] == "EXECUTED"
+    assert open_connection.call_args.kwargs["password"] == password
+
+
+async def test_decide_rejects_dynamic_password_over_256_chars(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+) -> None:
+    """超过 256 个字符的口令在校验阶段被拒（422），提案保持 PENDING。"""
+    await _grant_hitl_approve(db_session, test_user)
+    _, proposal_id = await _make_pending_device_query_proposal(
+        db_session,
+        user_id=test_user.id,
+    )
+
+    response = await client.post(
+        f"/api/v1/hitl/proposals/{proposal_id}/decide",
+        json={"approve": True, "dynamic_credential_password": "x" * 257},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 422, response.text
+    db_session.expire_all()
+    proposal = await hitl_proposal_crud.get(db_session, proposal_id)
+    assert proposal is not None
+    assert proposal.status == "PENDING"
+
+
 async def test_decide_device_query_with_password_executes(
     client: AsyncClient,
     db_session: AsyncSession,
