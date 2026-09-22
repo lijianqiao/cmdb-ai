@@ -1,7 +1,7 @@
 """Keep HITL approval evidence independent of the chat lifecycle.
 
 Revision ID: e3a7c1f9b246
-Revises: d0f5b8c4e236
+Revises: 0dd79792bbae
 Create Date: 2026-09-22 10:00:00+00:00
 
 R4：聊天可以归档，但审批/执行证据不能跟着会话或用户被级联销毁。
@@ -26,7 +26,7 @@ import sqlalchemy as sa
 from alembic import context, op
 
 revision: str = "e3a7c1f9b246"
-down_revision: str | None = "d0f5b8c4e236"
+down_revision: str | None = "0dd79792bbae"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -75,11 +75,13 @@ def _upgrade_actions() -> list[tuple[Any, ...]]:
 def test_migration_follows_current_head_and_is_the_only_new_head() -> None:
     migration = _load()
     assert migration.revision == "e3a7c1f9b246"
-    assert migration.down_revision == "d0f5b8c4e236"
+    assert migration.down_revision == "0dd79792bbae"
     children_of_previous_head = [
         path.name
         for path in VERSIONS_DIR.glob("*.py")
-        if 'down_revision: str | None = "d0f5b8c4e236"' in path.read_text(encoding="utf-8")
+        if "0dd79792bbae" in path.read_text(encoding="utf-8")
+        and "down_revision" in path.read_text(encoding="utf-8")
+        and path.name != "2026_08_17_1628-0dd79792bbae_schema_alignment.py"
     ]
     assert children_of_previous_head == [MIGRATION_PATH.name]
 
