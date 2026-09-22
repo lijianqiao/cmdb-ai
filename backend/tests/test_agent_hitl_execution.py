@@ -8,7 +8,7 @@
 
 import asyncio
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping
 from unittest.mock import MagicMock
 
 import pytest
@@ -120,7 +120,7 @@ class RecordingDeviceExecutor:
     """记录设备执行器调用参数，供断言策略拦截与认领前失败。"""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[int, str, str | None, tuple[str, ...] | None]] = []
+        self.calls: list[tuple[int, str, str | None, dict[str, object]]] = []
 
     async def execute(
         self,
@@ -129,17 +129,35 @@ class RecordingDeviceExecutor:
         asset: CmdbAsset,
         command_name: str,
         dynamic_password: str | None,
-        interface_names: Sequence[str] | None = None,
+        arguments: Mapping[str, object] | None = None,
     ) -> ExecutionResult:
-        self.calls.append(
-            (
-                asset.id,
-                command_name,
-                dynamic_password,
-                tuple(interface_names) if interface_names is not None else None,
-            )
-        )
+        self.calls.append((asset.id, command_name, dynamic_password, dict(arguments or {})))
         return ExecutionResult(ok=True, message="ok")
+
+
+class DispatchedFailureDeviceExecutor:
+    """连上设备后失败：命令已经发出去，但没有拿到成功证据。"""
+
+    def __init__(self, message: str = "设备拒绝了命令：% Invalid input") -> None:
+        self.message = message
+        self.calls = 0
+
+    async def execute(
+        self,
+        db: AsyncSession,
+        *,
+        asset: CmdbAsset,
+        command_name: str,
+        dynamic_password: str | None,
+        arguments: Mapping[str, object] | None = None,
+    ) -> ExecutionResult:
+        self.calls += 1
+        return ExecutionResult(
+            ok=False,
+            message=self.message,
+            detail={"error_class": "DeviceRejected"},
+            dispatched=True,
+        )
 
 
 class OutputDeviceExecutor:
@@ -155,7 +173,7 @@ class OutputDeviceExecutor:
         asset: CmdbAsset,
         command_name: str,
         dynamic_password: str | None,
-        interface_names: Sequence[str] | None = None,
+        arguments: Mapping[str, object] | None = None,
     ) -> ExecutionResult:
         return ExecutionResult(
             ok=True,
@@ -339,7 +357,45 @@ async def test_every_interface_in_the_payload_reaches_the_executor(
     )
 
     assert executor.calls == [
-        (asset_id, "port_disable", "one-use-password", ("Gi1/0/15", "Gi1/0/16"))
+        (
+            asset_id,
+            "port_disable",
+            "one-use-password",
+            {"interface_names": ["Gi1/0/15", "Gi1/0/16"]},
+        )
+    ]
+
+
+async def test_read_only_command_argument_reaches_the_executor(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    single_interface_read_only_command: str,
+) -> None:
+    """只读命令的参数要一路走到执行器：执行前复检不能把它丢掉，也不能把它当多余参数拒掉。"""
+    proposal, asset_id = await _approved_device_proposal(
+        db_session,
+        test_user,
+        command_name=single_interface_read_only_command,
+        interface_name="Gi1/0/15",
+    )
+    executor = RecordingDeviceExecutor()
+
+    await execute_approved_proposal(
+        session_factory=async_sessionmaker(db_engine, expire_on_commit=False),
+        proposal_id=proposal.id,
+        actor_user_id=test_user.id,
+        dynamic_password="one-use-password",
+        device_executor=executor,
+    )
+
+    assert executor.calls == [
+        (
+            asset_id,
+            single_interface_read_only_command,
+            "one-use-password",
+            {"interface_name": "Gi1/0/15"},
+        )
     ]
 
 
@@ -368,7 +424,12 @@ async def test_old_single_interface_payload_still_executes(
 
     assert summary.status == "EXECUTED"
     assert executor.calls == [
-        (asset_id, "port_disable", "one-use-password", ("GigabitEthernet0/1",))
+        (
+            asset_id,
+            "port_disable",
+            "one-use-password",
+            {"interface_names": ["GigabitEthernet0/1"]},
+        )
     ]
 
 
@@ -397,6 +458,80 @@ async def test_preflight_refuses_an_invalid_interface_list_without_claiming(
 
     assert executor.calls == []
     assert summary.status == "APPROVED"
+
+
+async def test_read_only_failure_after_dispatch_can_be_retried_without_human_check(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """只读命令没有副作用：连上设备后失败也不用人工核实设备状态，回到 APPROVED 直接重试。
+
+    新模板和设备版本对不上时（设备回「Unrecognized command」）会成批出现这种失败，
+    落 UNKNOWN 就会堆一批要人工处置的提案。
+    """
+    proposal, _ = await _approved_device_proposal(db_session, test_user)
+    proposal_id = proposal.id
+    user_id = test_user.id
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    summary = await execute_approved_proposal(
+        session_factory=session_factory,
+        proposal_id=proposal_id,
+        actor_user_id=user_id,
+        dynamic_password="one-use-password",
+        device_executor=DispatchedFailureDeviceExecutor(),
+    )
+
+    assert summary.status == "APPROVED"
+    assert "Invalid input" in (summary.last_error or "")
+    db_session.expire_all()
+    persisted = await hitl_proposal_crud.get(db_session, proposal_id)
+    assert persisted is not None
+    assert persisted.status_reason == "read_only_failed"
+    assert persisted.executed_at is None
+    assert persisted.execution_started_at is None
+
+    # 不需要人工「允许重试」：直接再执行一次就能成功。
+    retried = await execute_approved_proposal(
+        session_factory=session_factory,
+        proposal_id=proposal_id,
+        actor_user_id=user_id,
+        dynamic_password="one-use-password",
+        device_executor=OutputDeviceExecutor("Cisco IOS XE Software"),
+    )
+
+    assert retried.status == "EXECUTED"
+
+
+async def test_state_changing_failure_after_dispatch_still_needs_human_check(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """变更命令不变：连上设备后失败可能已经改了设备，必须落 UNKNOWN 等人工核实。"""
+    proposal, _ = await _approved_device_proposal(
+        db_session,
+        test_user,
+        action_type="device_control",
+        command_name="port_disable",
+        interface_names=["Gi1/0/15"],
+    )
+    proposal_id = proposal.id
+
+    summary = await execute_approved_proposal(
+        session_factory=async_sessionmaker(db_engine, expire_on_commit=False),
+        proposal_id=proposal_id,
+        actor_user_id=test_user.id,
+        dynamic_password="one-use-password",
+        device_executor=DispatchedFailureDeviceExecutor(),
+    )
+
+    assert summary.status == "UNKNOWN"
+    db_session.expire_all()
+    persisted = await hitl_proposal_crud.get(db_session, proposal_id)
+    assert persisted is not None
+    assert persisted.status_reason == "dispatch_outcome_unknown"
 
 
 async def test_build_result_preview_preserves_at_limit_and_marks_long_output() -> None:

@@ -33,7 +33,7 @@
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TypedDict, get_args
 
 type VendorName = Literal[
     "cisco_iosxe",
@@ -53,7 +53,16 @@ type CommandName = Literal[
     "port_disable",
 ]
 type CommandType = Literal["read_only", "state_changing"]
-type ArgName = Literal["interface_names"]
+# 命令可以登记的参数名。interface_name 给需要单个接口的只读命令用（4.2 的
+# show_interface_detail 等），interface_names 只给端口启停用，两者不混用。
+type ArgName = Literal["interface_name", "interface_names"]
+
+
+class CommandArguments(TypedDict, total=False):
+    """一条命令的参数值：键只能是目录登记过的参数名，值已经校验并归一化。"""
+
+    interface_name: str
+    interface_names: list[str]
 
 # t15：H3C Comware 补上端口启停。配置在 system-view 里立即生效，和华为一样不自动保存。
 # t16：只面向网络设备——下线 linux/generic 厂商和只对主机有意义的 shutdown，新增占位厂商 other。
@@ -62,6 +71,11 @@ DEVICE_COMMAND_CATALOG_VERSION = "t17-v1"
 
 # 一条提案最多带的接口数：一台接入交换机的口数，超过要求分两次。
 MAX_INTERFACES_PER_PROPOSAL = 48
+
+# 校验参数时按这个顺序检查，报错信息也按这个顺序给，输出稳定好测。
+_ARG_NAMES: tuple[ArgName, ...] = ("interface_name", "interface_names")
+_ARG_HINTS: Mapping[ArgName, str] = {"interface_name": "", "interface_names": "列表"}
+_INTERFACE_NAME_HINT = "接口名只能包含字母、数字、/、.、-，且不超过 64 个字符"
 
 # 命令级正则、按厂商 CLI 语法书写；只用于 send_interactive 匹配确认提示，
 # 不接受任何运行时输入，跟 templates 一样是代码层常量。
@@ -130,7 +144,7 @@ def normalize_interface_names(values: Sequence[str]) -> tuple[str, ...]:
             f"interface_names 一次最多 {MAX_INTERFACES_PER_PROPOSAL} 个接口，请分批操作"
         )
     if not all(isinstance(name, str) and validate_interface_name(name) for name in unique):
-        raise ValueError("接口名只能包含字母、数字、/、.、-，且不超过 64 个字符")
+        raise ValueError(_INTERFACE_NAME_HINT)
     return unique
 
 
@@ -299,6 +313,11 @@ def list_device_commands() -> tuple[DeviceCommandDefinition, ...]:
     return tuple(_DEVICE_COMMAND_CATALOG.values())
 
 
+def command_vendors(definition: DeviceCommandDefinition) -> tuple[str, ...]:
+    """这条命令支持的厂商：exec 模板和 config 模板登记的都算。"""
+    return tuple(sorted({*definition.templates, *(definition.config_templates or {})}))
+
+
 def command_supports_vendor(command_name: str, vendor: str) -> bool:
     """命令名未知，或者两种登记方式（exec 模板 / config 模板）都没有这个厂商，才算不支持。"""
     definition = _DEVICE_COMMAND_CATALOG.get(command_name)  # type: ignore[call-overload]
@@ -314,6 +333,24 @@ def list_command_names() -> tuple[str, ...]:
     return tuple(_DEVICE_COMMAND_CATALOG)
 
 
+def list_command_names_by_type(command_type: CommandType) -> tuple[str, ...]:
+    """按风险分级返回命令名。
+
+    给模型看的工具描述、策略报错文案都从这里取：目录加减命令时那些文案跟着变，
+    不会出现「目录里有、描述里没有」——模型看不到的命令等于不存在。
+    """
+    return tuple(
+        definition.name
+        for definition in _DEVICE_COMMAND_CATALOG.values()
+        if definition.command_type == command_type
+    )
+
+
+def list_vendor_names() -> tuple[str, ...]:
+    """目录支持的全部厂商值（含占位厂商 other），给前端下拉和校验用。"""
+    return get_args(VendorName.__value__)
+
+
 def list_commands_for_vendor(vendor: str) -> tuple[DeviceCommandDefinition, ...]:
     """返回这个厂商能以任意方式（exec 或 config 模式）执行的全部命令定义。"""
     return tuple(
@@ -326,6 +363,36 @@ def command_type_of(command_name: str) -> CommandType | None:
     """返回命令的风险分级；命令名未知时返回 None（调用方自行决定如何处理）。"""
     definition = _DEVICE_COMMAND_CATALOG.get(command_name)  # type: ignore[call-overload]
     return definition.command_type if definition else None
+
+
+def normalize_command_arguments(
+    command_name: str, payload: Mapping[str, object]
+) -> CommandArguments:
+    """按目录登记的参数校验并归一化载荷里的参数字段。
+
+    命令能接哪些参数只由目录说了算：登记过的必须给且合法，没登记的给了就拒绝。
+    建提案、执行前复检、执行器三处都调它，保证证据快照里的命令行就是真正下发的那一行。
+    不合法时抛 ValueError；原因里不带输入值，可以直接转给模型让它自己改。
+    """
+    definition = get_device_command(command_name)
+    normalized: CommandArguments = {}
+    for name in _ARG_NAMES:
+        value = payload.get(name)
+        if name not in definition.arguments:
+            if value is not None:
+                raise ValueError(f"命令 {command_name} 不接受 {name} 参数")
+            continue
+        if value is None:
+            raise ValueError(f"命令 {command_name} 需要合法的接口名{_ARG_HINTS[name]} {name}")
+        if name == "interface_names":
+            if not isinstance(value, list):
+                raise ValueError("interface_names 必须是接口全名列表")
+            normalized["interface_names"] = list(normalize_interface_names(value))
+        else:
+            if not isinstance(value, str) or not validate_interface_name(value):
+                raise ValueError(_INTERFACE_NAME_HINT)
+            normalized["interface_name"] = value
+    return normalized
 
 
 def config_command_blocks(
@@ -348,20 +415,35 @@ def config_command_blocks(
 
 
 def rendered_command_lines(
-    command_name: str, vendor: str, *, interface_names: Sequence[str] | None
+    command_name: str, vendor: str, *, arguments: CommandArguments | None = None
 ) -> tuple[str, ...]:
     """返回这条命令在该厂商上实际下发的全部命令行。
 
-    config 模式按接口逐个展开模板，最后追加厂商的提交命令；exec 模式一行。执行器和
-    审批证据快照都从这里取，保证证据里记的就是真正发出去的内容。
+    config 模式按接口逐个展开模板，最后追加厂商的提交命令；exec 模式一行，带占位符的
+    模板在这里填好参数——绝不能把 {interface} 原样发到设备上。执行器和审批证据快照都
+    从这里取，保证证据里记的就是真正发出去的内容。
     """
+    args: CommandArguments = arguments or {}
     definition = get_device_command(command_name)
     if definition.config_templates is not None and vendor in definition.config_templates:
-        blocks = config_command_blocks(command_name, vendor, interface_names or ())
+        blocks = config_command_blocks(command_name, vendor, args.get("interface_names", ()))
         lines = tuple(line for _, block in blocks for line in block)
         commit_lines: tuple[str, ...] = CONFIG_COMMIT_COMMANDS.get(vendor, ())  # type: ignore[call-overload]
         return lines + commit_lines
-    return (get_command_template(command_name, vendor),)
+
+    template = get_command_template(command_name, vendor)
+    if "{" not in template:
+        return (template,)
+    return (template.format(**_template_placeholders(args)),)
+
+
+def _template_placeholders(arguments: CommandArguments) -> dict[str, str]:
+    """把参数值映射成模板里的占位符；加新参数时只改这里和模板。"""
+    placeholders: dict[str, str] = {}
+    interface_name = arguments.get("interface_name")
+    if interface_name is not None:
+        placeholders["interface"] = interface_name
+    return placeholders
 
 
 def get_command_template(command_name: str, vendor: str) -> str:

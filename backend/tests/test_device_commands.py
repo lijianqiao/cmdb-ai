@@ -15,6 +15,7 @@ from app.agent.device_commands import (
     get_device_command,
     list_commands_for_vendor,
     list_device_commands,
+    normalize_command_arguments,
     normalize_interface_names,
     rendered_command_lines,
     validate_interface_name,
@@ -152,7 +153,7 @@ def test_batch_expands_config_template_for_each_interface() -> None:
     lines = rendered_command_lines(
         "port_disable",
         "cisco_iosxe",
-        interface_names=("Gi1/0/15", "Gi1/0/16", "Gi1/0/17"),
+        arguments={"interface_names": ["Gi1/0/15", "Gi1/0/16", "Gi1/0/17"]},
     )
     assert lines == (
         "interface Gi1/0/15",
@@ -169,7 +170,7 @@ def test_junos_batch_commits_once_at_the_end() -> None:
     lines = rendered_command_lines(
         "port_disable",
         "juniper_junos",
-        interface_names=("ge-0/0/1", "ge-0/0/2", "ge-0/0/3"),
+        arguments={"interface_names": ["ge-0/0/1", "ge-0/0/2", "ge-0/0/3"]},
     )
     assert lines == (
         "set interfaces ge-0/0/1 disable",
@@ -243,8 +244,46 @@ def test_list_commands_for_vendor_includes_config_mode_only_commands() -> None:
 def test_junos_port_enable_deletes_disable_and_commits() -> None:
     """Junos 的开端口是删掉 disable 再提交，commit 由厂商级规则追加一次。"""
     assert rendered_command_lines(
-        "port_enable", "juniper_junos", interface_names=("ge-0/0/1",)
+        "port_enable", "juniper_junos", arguments={"interface_names": ["ge-0/0/1"]}
     ) == ("delete interfaces ge-0/0/1 disable", "commit")
+
+
+def test_normalize_command_arguments_enforces_what_the_catalog_registered() -> None:
+    """命令能接哪些参数只由目录说了算：没登记的拒绝，登记的必须给且合法。"""
+    with pytest.raises(ValueError, match="不接受 interface_names"):
+        normalize_command_arguments("reboot", {"interface_names": ["Gi1/0/1"]})
+    with pytest.raises(ValueError, match="合法的接口名"):
+        normalize_command_arguments("port_disable", {})
+    assert normalize_command_arguments(
+        "port_disable", {"interface_names": ["Gi1/0/2", "Gi1/0/1", "Gi1/0/2"]}
+    ) == {"interface_names": ["Gi1/0/2", "Gi1/0/1"]}
+
+
+def test_single_interface_argument_is_validated_and_rendered(
+    single_interface_read_only_command: str,
+) -> None:
+    """只读命令的单接口参数走同一条链路：P2b 加这类命令时不用再改代码。"""
+    command = single_interface_read_only_command
+
+    assert normalize_command_arguments(command, {"interface_name": "Gi1/0/15"}) == {
+        "interface_name": "Gi1/0/15"
+    }
+    assert rendered_command_lines(
+        command, "cisco_iosxe", arguments={"interface_name": "Gi1/0/15"}
+    ) == ("show interfaces Gi1/0/15",)
+    with pytest.raises(ValueError, match="接口名"):
+        normalize_command_arguments(command, {"interface_name": "eth0; reload"})
+    # 两种接口参数不混用：登记的是单个接口时，给列表也要拒绝。
+    with pytest.raises(ValueError, match="不接受 interface_names"):
+        normalize_command_arguments(
+            command, {"interface_name": "Gi1/0/15", "interface_names": ["Gi1/0/15"]}
+        )
+
+
+def test_commands_without_arguments_render_the_template_as_is() -> None:
+    assert rendered_command_lines("show_version", "cisco_iosxe", arguments=None) == (
+        "show version",
+    )
 
 
 def test_command_type_of_returns_risk_level_for_known_commands() -> None:

@@ -76,7 +76,7 @@ async def test_run_device_command_returns_full_output(
         password="one-use-password",
         command_name="show_running_config",
         definition=get_device_command("show_running_config"),
-        interface_names=None,
+        arguments=None,
         conn_timeout=5,
         read_timeout=30,
     )
@@ -158,7 +158,7 @@ async def test_device_query_executor_port_disable_uses_send_config_set_with_inte
             asset=asset,
             command_name="port_disable",
             dynamic_password=None,
-            interface_names=["GigabitEthernet0/1", "GigabitEthernet0/2"],
+            arguments={"interface_names": ["GigabitEthernet0/1", "GigabitEthernet0/2"]},
         )
     assert result.ok is True
     sent_batches = [call.args[0] for call in fake_connection.send_config_set.call_args_list]
@@ -186,24 +186,24 @@ async def test_device_query_executor_rejects_invalid_interface_name_before_conne
             asset=asset,
             command_name="port_disable",
             dynamic_password=None,
-            interface_names=["GigabitEthernet0/1", "eth0; reload"],
+            arguments={"interface_names": ["GigabitEthernet0/1", "eth0; reload"]},
         )
     assert result.ok is False
     mock_connect.assert_not_called()
 
 
 @pytest.mark.parametrize(
-    ("command_name", "interface_names"),
+    ("command_name", "arguments"),
     [
         ("port_disable", None),  # 端口命令缺接口
-        ("reboot", ["GigabitEthernet0/1"]),  # 重启不接受接口
+        ("reboot", {"interface_names": ["GigabitEthernet0/1"]}),  # 重启不接受接口
     ],
 )
 async def test_device_query_executor_checks_interface_argument_before_connecting(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
     command_name: str,
-    interface_names: list[str] | None,
+    arguments: dict[str, object] | None,
 ) -> None:
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     ciphertext = encrypt_credential_password("whatever")
@@ -215,7 +215,7 @@ async def test_device_query_executor_checks_interface_argument_before_connecting
             asset=asset,
             command_name=command_name,
             dynamic_password=None,
-            interface_names=interface_names,
+            arguments=arguments,  # type: ignore[arg-type]
         )
     assert result.ok is False
     assert result.dispatched is False
@@ -244,6 +244,32 @@ async def test_device_query_executor_rejects_unsupported_vendor_before_connectin
     assert result.ok is False
     assert result.message == "该设备厂商不支持这个命令"
     mock_connect.assert_not_called()
+
+
+async def test_read_only_command_renders_its_interface_argument(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    single_interface_read_only_command: str,
+) -> None:
+    """exec 路径也要走渲染：带 {interface} 的模板不能原样发到设备上。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    ciphertext = encrypt_credential_password("whatever")
+    asset = await _make_asset(db_session, credential_password_encrypted=ciphertext)
+    connection = MagicMock()
+    connection.send_command.return_value = "GigabitEthernet1/0/15 is up"
+    executor = DeviceQueryExecutor()
+
+    with patch("app.agent.executors._open_netmiko_connection", return_value=connection):
+        result = await executor.execute(
+            db_session,
+            asset=asset,
+            command_name=single_interface_read_only_command,
+            dynamic_password=None,
+            arguments={"interface_name": "GigabitEthernet1/0/15"},
+        )
+
+    assert result.ok is True
+    assert connection.send_command.call_args.args[0] == "show interfaces GigabitEthernet1/0/15"
 
 
 async def test_device_query_executor_refuses_vendor_without_netmiko_platform(
@@ -452,7 +478,7 @@ def _run(
         password="one-use-password",
         command_name=command_name,
         definition=get_device_command(command_name),
-        interface_names=interface_names,
+        arguments={"interface_names": list(interface_names)} if interface_names else None,
         conn_timeout=5,
         read_timeout=30,
     )

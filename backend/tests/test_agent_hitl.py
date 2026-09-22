@@ -835,7 +835,11 @@ async def test_device_control_connection_failure_reverts_to_approved(
 async def test_resume_retry_after_unknown_requires_allow_retry(
     db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """UNKNOWN 直接 retry 被拒绝；人工 allow_retry 后才能再次执行成功。"""
+    """UNKNOWN 直接 retry 被拒绝；人工 allow_retry 后才能再次执行成功。
+
+    用变更命令：只读命令连上设备后失败会直接回到 APPROVED 可重试（不进 UNKNOWN），
+    走不到这条流程。
+    """
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     ciphertext = encrypt_credential_password("whatever")
@@ -848,9 +852,9 @@ async def test_resume_retry_after_unknown_requires_allow_retry(
         db_session,
         session_id=session_id,
         proposed_by_agent_id=None,
-        action_type="device_query",
+        action_type="device_control",
         asset_id=asset_id,
-        payload={"command_name": "show_version"},
+        payload={"command_name": "port_disable", "interface_names": ["GigabitEthernet0/1"]},
         reason="排查",
         actor_user_id=test_user.id,
     )
@@ -867,7 +871,9 @@ async def test_resume_retry_after_unknown_requires_allow_retry(
 
     # 连接已建立、命令下发途中断开：无法确定命令是否已生效，必须走 UNKNOWN 人工核实。
     broken_connection = MagicMock()
-    broken_connection.send_command = MagicMock(side_effect=ConnectionError("dropped mid-command"))
+    broken_connection.send_config_set = MagicMock(
+        side_effect=ConnectionError("dropped mid-command")
+    )
     with patch("app.agent.executors._open_netmiko_connection", return_value=broken_connection):
         failed = await resume_proposal(db_session, proposal_id=proposal_id, actor_user_id=user_id)
     assert failed.status == "UNKNOWN"
@@ -884,16 +890,14 @@ async def test_resume_retry_after_unknown_requires_allow_retry(
     await db_session.commit()
 
     fake_connection = MagicMock()
-    fake_connection.send_command = MagicMock(return_value="Cisco IOS XE Software, Version 17.9.4")
+    fake_connection.send_config_set = MagicMock(return_value="SW(config-if)#shutdown")
     with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         retried = await resume_proposal(db_session, proposal_id=proposal_id, actor_user_id=user_id)
 
     stored = await hitl_proposal_crud.get(db_session, proposal_id)
     assert stored is not None
     assert retried.status == "EXECUTED"
-    assert (
-        stored.action_payload.get("last_result_excerpt") == "Cisco IOS XE Software, Version 17.9.4"
-    )
+    assert stored.action_payload.get("last_result_excerpt") == "SW(config-if)#shutdown"
 
 
 async def test_unclassified_device_control_stays_pending(
@@ -1177,7 +1181,7 @@ async def test_device_control_port_disable_rejects_illegal_interface_name(
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     asset_id = await _make_query_asset(db_session)
 
-    with pytest.raises(HitlProposalRejectedError, match="合法的接口名"):
+    with pytest.raises(HitlProposalRejectedError, match="接口名"):
         await propose_action(
             db_session,
             session_id=session_id,
@@ -1228,6 +1232,59 @@ async def test_device_control_port_batch_is_one_proposal_with_every_line(
         "interface Gi1/0/17",
         "shutdown",
     ]
+
+
+async def test_read_only_command_argument_is_stored_and_rendered(
+    db_session: AsyncSession, test_user: User, single_interface_read_only_command: str
+) -> None:
+    """只读命令的参数一路存进载荷和证据快照：审计看到的就是真正发出去的那一行。"""
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    asset_id = await _make_query_asset(db_session)
+
+    summary = await propose_action(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="device_query",
+        asset_id=asset_id,
+        payload={
+            "command_name": single_interface_read_only_command,
+            "interface_name": "GigabitEthernet1/0/15",
+        },
+        reason="看一下这个口的状态",
+        actor_user_id=test_user.id,
+    )
+
+    proposal = await hitl_proposal_crud.get(db_session, summary.proposal_id)
+    assert proposal is not None
+    assert proposal.action_payload["interface_name"] == "GigabitEthernet1/0/15"
+    assert proposal.evidence_snapshot["command"]["rendered"] == [
+        "show interfaces GigabitEthernet1/0/15"
+    ]
+
+
+async def test_read_only_command_rejects_an_illegal_interface_argument(
+    db_session: AsyncSession, test_user: User, single_interface_read_only_command: str
+) -> None:
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    asset_id = await _make_query_asset(db_session)
+
+    with pytest.raises(HitlProposalRejectedError, match="接口名"):
+        await propose_action(
+            db_session,
+            session_id=session_id,
+            proposed_by_agent_id=None,
+            action_type="device_query",
+            asset_id=asset_id,
+            payload={
+                "command_name": single_interface_read_only_command,
+                "interface_name": "eth0; reload",
+            },
+            reason="非法接口名",
+            actor_user_id=test_user.id,
+        )
+
+    assert await _proposal_count(db_session) == 0
 
 
 async def _propose_port_batch_in_full_mode(

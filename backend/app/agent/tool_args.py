@@ -150,6 +150,15 @@ class DeviceControlArgs(_Args):
 class QueryDeviceCommandArgs(_Args):
     asset_id: int = Field(ge=1)
     command_name: CommandName
+    interface_name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description=(
+            "只查某一个接口的命令要传接口全名，如 GigabitEthernet1/0/15；"
+            "查整机的命令不传。接口全名从 show_interfaces 的输出取，不要猜前缀。"
+        ),
+    )
     reason: str = Field(min_length=1, max_length=2000)
 
 

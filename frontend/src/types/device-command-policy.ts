@@ -36,24 +36,5 @@ export interface DeviceCommandPolicyUpdate {
   note?: string
 }
 
-/** 前端展示用命令目录条目（跟后端 app/agent/device_commands.py 手动保持一致） */
-export const DEVICE_COMMAND_NAMES = [
-  "show_version",
-  "show_running_config",
-  "show_interfaces",
-  "ping",
-  "reboot",
-  "port_enable",
-  "port_disable",
-] as const
-
-/** 跟后端 app/agent/device_commands.py::command_type 手动保持一致，用于表单风险提示 */
-export const STATE_CHANGING_COMMAND_NAMES = new Set([
-  "reboot",
-  "port_enable",
-  "port_disable",
-])
-
-export function isStateChangingCommand(commandName: string): boolean {
-  return STATE_CHANGING_COMMAND_NAMES.has(commandName)
-}
+// 命令清单和风险分级不再在前端写一份：改从后端命令目录接口取，
+// 见 lib/device-command-catalog.ts 与 hooks/use-device-command-catalog.ts。

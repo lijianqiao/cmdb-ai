@@ -11,7 +11,11 @@ from typing import Literal, Self
 
 from pydantic import ConfigDict, Field, model_validator
 
-from app.agent.device_commands import command_type_of, list_device_commands
+from app.agent.device_commands import (
+    command_type_of,
+    list_command_names_by_type,
+    list_device_commands,
+)
 from app.schemas.cmdb import AssetTypeName
 from app.schemas.common import ApiModel
 
@@ -50,8 +54,10 @@ class DeviceCommandPolicyCreate(ApiModel):
             if self.asset_id is not None:
                 raise ValueError("scope 为 asset_type 时不能填写 asset_id")
             if command_type_of(self.command_name) == "state_changing":
+                # 清单从目录生成：目录加减命令时这句话跟着变。
+                names = "/".join(list_command_names_by_type("state_changing"))
                 raise ValueError(
-                    "变更类命令（reboot/port_enable/port_disable）只能按单台设备（scope=asset）"
+                    f"变更类命令（{names}）只能按单台设备（scope=asset）"
                     "配置白/黑名单，不允许按设备类型一次性放行"
                 )
         else:

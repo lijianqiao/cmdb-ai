@@ -2,14 +2,8 @@
 
 export type CredentialType = "none" | "static" | "dynamic"
 
-/** 厂商标识，须与后端 app/agent/device_commands.py::VendorName 手动保持一致 */
-export type VendorName =
-  | "cisco_iosxe"
-  | "cisco_small_business"
-  | "huawei_vrp"
-  | "hp_comware"
-  | "juniper_junos"
-  | "other"
+/** 厂商标识。有哪些值由后端命令目录接口给出（/device-commands/catalog），前端不再抄一份 */
+export type VendorName = string
 
 /** CMDB 资产（列表/详情响应） */
 export interface CmdbAsset {

@@ -25,12 +25,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agent.device_commands import (
     DEVICE_COMMAND_CATALOG_VERSION,
     MAX_INTERFACES_PER_PROPOSAL,
+    CommandArguments,
     command_supports_vendor,
     command_type_of,
     get_device_command,
     list_command_names,
     list_commands_for_vendor,
-    normalize_interface_names,
+    normalize_command_arguments,
     rendered_command_lines,
 )
 from app.agent.permissions import HITL_APPROVE, effective_approval_mode
@@ -58,6 +59,9 @@ class DeviceCommandPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     command_name: str = Field(min_length=1, max_length=100)
+    # 需要单个接口的只读命令用 interface_name，端口启停用 interface_names，两者不混用；
+    # 命令到底接哪个由目录登记（见 device_commands.normalize_command_arguments）。
+    interface_name: str | None = Field(default=None, min_length=1, max_length=64)
     interface_names: list[str] | None = Field(
         default=None, min_length=1, max_length=MAX_INTERFACES_PER_PROPOSAL
     )
@@ -66,8 +70,8 @@ class DeviceCommandPayload(BaseModel):
 def payload_interface_names(payload: Mapping[str, object]) -> list[str] | None:
     """提案载荷里的接口列表；没有接口参数或形状不对时返回 None。
 
-    P1 之前的提案只存了单个 interface_name：读的时候折成一项的列表，旧提案照样能
-    执行、重试和写结论。
+    只用于展示（结论文案）：不查目录，所以对已经下线的历史命令也不会抛错。
+    P1 之前的提案只存了单个 interface_name，这里折成一项的列表。
     """
     names = payload.get("interface_names")
     if names is None:
@@ -76,6 +80,28 @@ def payload_interface_names(payload: Mapping[str, object]) -> list[str] | None:
     if isinstance(names, list) and all(isinstance(name, str) for name in names):
         return list(names)
     return None
+
+
+def payload_command_arguments(command_name: str, payload: Mapping[str, object]) -> CommandArguments:
+    """从提案载荷取出这条命令的参数并校验，供执行前复检和执行器使用。
+
+    P1 之前的端口提案只存了单个 interface_name：命令登记的是 interface_names 时，
+    把它折成一项的列表，旧提案照样能执行和重试。
+
+    Raises:
+        ValueError: 参数缺失、多余或不合法（原因可直接转给模型）。
+    """
+    definition = get_device_command(command_name)
+    candidate = dict(payload)
+    legacy = candidate.get("interface_name")
+    if (
+        "interface_names" in definition.arguments
+        and candidate.get("interface_names") is None
+        and isinstance(legacy, str)
+    ):
+        candidate["interface_names"] = [legacy]
+        candidate["interface_name"] = None
+    return normalize_command_arguments(command_name, candidate)
 
 
 # D11：完全访问档下一次自动执行就能关掉多达 48 个口，其中可能有上联口或管理口，关错了
@@ -332,7 +358,6 @@ async def gate_action(
             "credential_type": asset.credential_type,
         }
     }
-    interface_names: tuple[str, ...] | None = None
     manual_approval_reason: str | None = None
 
     if action_type in ("device_query", "device_control"):
@@ -366,24 +391,14 @@ async def gate_action(
                 f"该设备厂商不支持这个命令（厂商 {asset.vendor}，命令 {command_name}）；{supported_hint}"
             )
 
-        definition = get_device_command(command_name)
-        raw_interface_names = stored_payload.get("interface_names")
-        if "interface_names" in definition.arguments:
-            if not isinstance(raw_interface_names, list):
-                raise HitlProposalRejectedError(
-                    f"命令 {command_name} 需要合法的接口名列表 interface_names"
-                )
-            try:
-                interface_names = normalize_interface_names(raw_interface_names)
-            except ValueError as exc:
-                raise HitlProposalRejectedError(
-                    f"命令 {command_name} 需要合法的接口名列表 interface_names：{exc}"
-                ) from exc
-            # 一条提案覆盖整组接口：存去重后的完整列表，审批人一次看全、一次批。
-            stored_payload["interface_names"] = list(interface_names)
-            manual_approval_reason = _manual_approval_reason(interface_names)
-        elif raw_interface_names is not None:
-            raise HitlProposalRejectedError(f"命令 {command_name} 不接受 interface_names 参数")
+        try:
+            command_arguments = normalize_command_arguments(command_name, stored_payload)
+        except ValueError as exc:
+            raise HitlProposalRejectedError(str(exc)) from exc
+        # 归一化后的参数写回载荷：一条提案覆盖整组接口时存去重后的完整列表，
+        # 审批人一次看全、一次批，执行时用的也是同一份值。
+        stored_payload.update(command_arguments)
+        manual_approval_reason = _manual_approval_reason(command_arguments.get("interface_names"))
 
         policy_decision = await device_command_policy_crud.resolve_policy(
             db, asset_id=asset.id, asset_type=asset.asset_type, command_name=command_name
@@ -396,7 +411,7 @@ async def gate_action(
             "type": command_type,
             "catalog_version": DEVICE_COMMAND_CATALOG_VERSION,
             "rendered": list(
-                rendered_command_lines(command_name, asset.vendor, interface_names=interface_names)
+                rendered_command_lines(command_name, asset.vendor, arguments=command_arguments)
             ),
         }
         if manual_approval_reason is not None:

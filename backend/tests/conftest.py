@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, event, select
@@ -71,6 +72,34 @@ async def _cancel_leftover_hitl_executions() -> AsyncIterator[None]:
     """审批后的执行在后台任务里跑；测试没等它结束时在这里收掉，免得串到下一个测试的库。"""
     yield
     await hitl_execution_queue.shutdown()
+
+
+@pytest.fixture
+def single_interface_read_only_command(monkeypatch: pytest.MonkeyPatch) -> str:
+    """临时往命令目录里加一条「需要单个接口的只读命令」，返回命令名。
+
+    这类命令要到 P2b 才真正登记。P2a 先把参数链路打通，用它端到端验证这条链：
+    工具参数 → 建提案写进载荷与证据 → 执行前复检 → 渲染成真正下发的命令行。
+    """
+    from app.agent import device_commands
+
+    definition = device_commands.DeviceCommandDefinition(
+        name="show_interface_detail",  # type: ignore[arg-type]
+        version=device_commands.DEVICE_COMMAND_CATALOG_VERSION,
+        description="查看单个接口的详细状态",
+        command_type="read_only",
+        templates={
+            "cisco_iosxe": "show interfaces {interface}",
+            "hp_comware": "display interface {interface}",
+        },
+        arguments=("interface_name",),
+    )
+    monkeypatch.setitem(
+        device_commands._DEVICE_COMMAND_CATALOG,
+        definition.name,
+        definition,
+    )
+    return definition.name
 
 
 @pytest_asyncio.fixture

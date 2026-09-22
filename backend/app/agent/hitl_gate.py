@@ -199,6 +199,8 @@ class HitlGateHook:
             asset_id = parsed.asset_id
             reason = parsed.reason
             payload = {"command_name": parsed.command_name}
+            if parsed.interface_name is not None:
+                payload["interface_name"] = parsed.interface_name
         else:
             return BeforeToolDecision(
                 block=True,

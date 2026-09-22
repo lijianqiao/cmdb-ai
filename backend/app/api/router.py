@@ -12,6 +12,7 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.cmdb import router as cmdb_router
 from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.device_command_policies import router as device_command_policies_router
+from app.api.v1.device_commands import router as device_commands_router
 from app.api.v1.hitl import router as hitl_router
 from app.api.v1.knowledge import router as knowledge_router
 from app.api.v1.me import router as me_router
@@ -37,6 +38,11 @@ api_router.include_router(
     device_command_policies_router,
     prefix="/device-command-policies",
     tags=["设备命令策略"],
+)
+api_router.include_router(
+    device_commands_router,
+    prefix="/device-commands",
+    tags=["设备命令目录"],
 )
 api_router.include_router(knowledge_router, prefix="/knowledge", tags=["知识库"])
 api_router.include_router(hitl_router, prefix="/hitl", tags=["HITL 审批"])

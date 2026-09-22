@@ -23,7 +23,7 @@ from app.models.hitl_proposal import HitlProposal
 _DECISION_LOCKS: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
 _UNKNOWN_REASON_CODES = frozenset({"dispatch_outcome_unknown"})
-_UNEXECUTED_REASON_CODES = frozenset({"dispatch_failed_before_send"})
+_UNEXECUTED_REASON_CODES = frozenset({"dispatch_failed_before_send", "read_only_failed"})
 
 
 def _decision_lock(proposal_id: int) -> asyncio.Lock:
@@ -166,11 +166,14 @@ class CRUDHitlProposal:
         *,
         reason: str,
     ) -> HitlProposal:
-        """确定命令未下发时把 EXECUTING 回退成 APPROVED，原因仅允许固定安全代码。
+        """不需要人工核实设备状态时把 EXECUTING 回退成 APPROVED，原因仅允许固定安全代码。
 
-        只有执行器明确报告"没碰到设备"（连接都没建起来）才允许走这条边：此时
-        设备状态没被改动，回到 APPROVED 让管理员修好前置条件后直接重试即可，
-        不必像 UNKNOWN 那样先人工核实设备实际状态。
+        两种情况允许走这条边，都不必像 UNKNOWN 那样先人工核实设备实际状态：
+        - dispatch_failed_before_send：执行器明确报告"没碰到设备"（连接都没建起来），
+          设备状态没被改动，管理员修好前置条件后直接重试即可。
+        - read_only_failed：只读命令连上设备后失败（设备回"Unrecognized command"、
+          读超时）。只读命令没有副作用，重跑一次是安全的；新模板和设备版本对不上时
+          这种失败会成批出现，落 UNKNOWN 只会堆一批要人工处置的提案。
         """
         if reason not in _UNEXECUTED_REASON_CODES:
             raise ValueError(f"unsupported HITL unexecuted reason code: {reason!r}")

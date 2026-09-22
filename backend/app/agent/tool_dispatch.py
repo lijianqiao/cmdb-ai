@@ -24,7 +24,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.device_commands import list_device_commands
+from app.agent.device_commands import CommandType, list_command_names_by_type
 from app.agent.hitl import HitlEventPublisher
 from app.agent.hitl_gate import HitlGateHook
 from app.agent.hitl_tools import (
@@ -249,11 +249,9 @@ _ROOT_ONLY_TOOLS: frozenset[str] = frozenset(
     }
 )
 
-def _state_changing_command_names() -> str:
-    """变更类命令清单从目录生成：目录加减命令时模型看到的描述跟着变，不会对不上。"""
-    return "/".join(
-        item.name for item in list_device_commands() if item.command_type == "state_changing"
-    )
+def _command_names(command_type: CommandType) -> str:
+    """某一类命令的清单，从目录生成：目录加减命令时模型看到的描述跟着变，不会对不上。"""
+    return "/".join(list_command_names_by_type(command_type))
 
 
 def _inline_command_name_enum(parameters: dict[str, Any]) -> dict[str, Any]:
@@ -320,10 +318,10 @@ def root_tool_schemas() -> list[dict[str, Any]]:
                 "description": (
                     f"[{ROOT_TOOL_SCHEMA_VERSION}] 对已配置凭据的资产发起只读诊断命令查询"
                     "（是否当场执行取决于当前会话审批档位，以 list_device_commands 策略句"
-                    "与工具返回为准）。command_name 必须是 show_version"
-                    "（版本信息）/show_running_config（当前配置）/show_interfaces（接口状态）"
-                    "/ping（连通性测试）之一——这是命令目录里的语义 key，不是某个厂商的原始 "
-                    "CLI 语法，真实命令字符串由平台按资产厂商自动转换。"
+                    f"与工具返回为准）。command_name 必须是 {_command_names('read_only')} "
+                    "之一——这是命令目录里的语义 key，不是某个厂商的原始 CLI 语法，"
+                    "真实命令字符串由平台按资产厂商自动转换。"
+                    "不确定这台设备支持哪些命令、命令需不需要审批时先调用 list_device_commands。"
                 ),
                 "parameters": query_parameters,
             },
@@ -334,7 +332,7 @@ def root_tool_schemas() -> list[dict[str, Any]]:
                 "name": "device_control",
                 "description": (
                     f"[{ROOT_TOOL_SCHEMA_VERSION}] 对已配置凭据的资产发起会改变设备状态的命令"
-                    f"（{_state_changing_command_names()}）。是否当场执行取决于当前会话"
+                    f"（{_command_names('state_changing')}）。是否当场执行取决于当前会话"
                     "审批档位，以 list_device_commands 策略句与工具返回为准。"
                     "port_enable/port_disable 用 interface_names 传接口全名列表，"
                     "用户点名多个接口时全部列在同一次调用里。"
@@ -427,6 +425,7 @@ def build_root_tool_dispatcher(
                     session,
                     asset_id=args.asset_id,
                     command_name=args.command_name,
+                    interface_name=args.interface_name,
                     reason=args.reason,
                     session_id=session_id,
                     actor_user_id=actor_user_id,

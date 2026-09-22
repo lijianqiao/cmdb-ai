@@ -52,13 +52,14 @@ from app.agent.device_commands import (
     CONFIG_MODE_COMMANDS,
     CONFIG_SUCCESS_MARKERS,
     DEVICE_ERROR_PATTERNS,
+    CommandArguments,
     UnknownDeviceCommandError,
     VendorName,
     command_supports_vendor,
     config_command_blocks,
-    get_command_template,
     get_device_command,
-    normalize_interface_names,
+    normalize_command_arguments,
+    rendered_command_lines,
 )
 from app.core.cmdb_credential import decrypt_credential_password
 from app.core.config import settings
@@ -466,7 +467,7 @@ def _run_device_command(
     password: str,
     command_name: str,
     definition: Any,
-    interface_names: Sequence[str] | None,
+    arguments: CommandArguments | None,
     conn_timeout: float,
     read_timeout: float,
 ) -> ExecutionResult:
@@ -500,7 +501,7 @@ def _run_device_command(
                 connection,
                 vendor=vendor,
                 command_name=command_name,
-                interface_names=interface_names or (),
+                interface_names=(arguments or {}).get("interface_names", ()),
                 read_timeout=read_timeout,
             )
             if isinstance(batch, ExecutionResult):
@@ -522,7 +523,8 @@ def _run_device_command(
                     return flow
                 output = flow
             else:
-                template = get_command_template(command_name, vendor)
+                # exec 路径也走渲染：带 {interface} 这类占位符的模板不能原样发到设备上。
+                (template,) = rendered_command_lines(command_name, vendor, arguments=arguments)
                 if "<" in template or ">" in template:
                     return ExecutionResult(ok=False, message="命令模板含未解析占位符")
                 output = connection.send_command(template, read_timeout=read_timeout)
@@ -579,7 +581,7 @@ class DeviceQueryExecutor:
         asset: CmdbAsset,
         command_name: str,
         dynamic_password: str | None,
-        interface_names: Sequence[str] | None = None,
+        arguments: CommandArguments | None = None,
     ) -> ExecutionResult:
         """执行一次设备命令并返回安全结果。
 
@@ -589,7 +591,7 @@ class DeviceQueryExecutor:
             asset: 目标 CMDB 资产，须已配置 vendor 与凭据。
             command_name: 目录里的命令名，调用方保证已通过白名单/校验。
             dynamic_password: 动态凭据时的一次性明文密码；静态凭据时忽略。
-            interface_names: port_enable/port_disable 要操作的一组接口全名。
+            arguments: 目录登记的命令参数（如端口启停的 interface_names）。
 
         Returns:
             ok=True 时 detail 含 output/truncated；ok=False 时 message 只给
@@ -611,16 +613,11 @@ class DeviceQueryExecutor:
         except UnknownDeviceCommandError:
             return ExecutionResult(ok=False, message="未知命令名")
 
-        normalized_interfaces: tuple[str, ...] | None = None
-        if "interface_names" in definition.arguments:
-            if interface_names is None:
-                return ExecutionResult(ok=False, message="接口名参数无效")
-            try:
-                normalized_interfaces = normalize_interface_names(interface_names)
-            except ValueError:
-                return ExecutionResult(ok=False, message="接口名参数无效")
-        elif interface_names is not None:
-            return ExecutionResult(ok=False, message="该命令不接受接口名参数")
+        try:
+            # 执行前最后一道校验：参数只认目录登记过的，值必须合法。
+            normalized_arguments = normalize_command_arguments(command_name, arguments or {})
+        except ValueError:
+            return ExecutionResult(ok=False, message="命令参数无效")
 
         if not command_supports_vendor(command_name, asset.vendor):
             return ExecutionResult(ok=False, message="该设备厂商不支持这个命令")
@@ -645,7 +642,7 @@ class DeviceQueryExecutor:
                 password=password,
                 command_name=command_name,
                 definition=definition,
-                interface_names=normalized_interfaces,
+                arguments=normalized_arguments,
                 conn_timeout=settings.DEVICE_COMMAND_CONN_TIMEOUT_SECONDS,
                 read_timeout=settings.DEVICE_COMMAND_READ_TIMEOUT_SECONDS,
             ),

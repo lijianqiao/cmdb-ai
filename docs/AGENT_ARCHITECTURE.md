@@ -324,7 +324,7 @@ classDiagram
 | 工具                      | 参数                                              | 返回                                                                                                             | 副作用分级         |
 | :------------------------ | :------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------- | :----------------- |
 | `notify`                  | `asset_id, payload, reason`                       | 站内通知：`assist`/`full` 档可自动批准并当场执行，默认 `ask` 档弹卡待审批                                         | 写（HITL 门控）    |
-| `query_device_command`    | `asset_id, command_name, reason`                  | 只读诊断命令：按会话 `approval_mode` 判定——`assist` 且白名单+非动态凭据可当场返回输出；`full` 另可当场执行未分类非动态命令；默认 `ask` 及动态凭据走 `PENDING` | 读（经 HITL 门控） |
+| `query_device_command`    | `asset_id, command_name, interface_name?, reason`  | 只读诊断命令（只查单个接口的命令带 `interface_name`）：按会话 `approval_mode` 判定——`assist` 且白名单+非动态凭据可当场返回输出；`full` 另可当场执行未分类非动态命令；默认 `ask` 及动态凭据走 `PENDING` | 读（经 HITL 门控） |
 | `device_control`          | `asset_id, command_name, interface_names?, reason` | 变更类命令（`reboot`/`port_enable`/`port_disable`）：`assist` 且白名单+非动态凭据可当场执行；`full` 另可当场执行未分类非动态命令；默认 `ask` 及动态凭据 `PENDING` 待审批。端口启停一次接一组接口（最多 48 个，一条提案一次审批）；超过 8 个接口的批量不论档位都转人工审批 | 写（HITL 门控）    |
 | `list_device_commands`    | `asset_id`                                        | 该资产可用命令名、说明、白/黑名单策略与凭据前提（只读，无审批）；策略文案随当前会话 `approval_mode` 变化，避免模型误判自动执行范围 | 读                 |
 | `get_device_query_result` | `proposal_id`                                     | 按会话回查已提交的设备命令查询提案状态或执行结果（只读，无审批）                                                 | 读                 |
@@ -444,6 +444,7 @@ PENDING ──approve──> APPROVED ──claim──> EXECUTING ──success
    └────reject───> REJECTED                      └─failure/crash──> UNKNOWN
 APPROVED ──preflight: policy_blacklisted──> REJECTED
 EXECUTING ──dispatch_failed_before_send──> APPROVED（确定未下发，可直接重试）
+EXECUTING ──read_only_failed──────────────> APPROVED（只读命令失败，没有副作用，可直接重试）
 UNKNOWN ──confirm_executed──> EXECUTED（人工确认）
 UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 PENDING ──会话归档──> REJECTED（status_reason=withdrawn_on_archive，申请人撤回）
@@ -455,7 +456,7 @@ PENDING ──会话归档──> REJECTED（status_reason=withdrawn_on_archive�
 - **策略在每次认领执行前复检**：`execute_approved_proposal` 经 `_preflight_and_claim` 在同一短事务内复检命令策略与凭据，通过后才认领 `EXECUTING`；命令不存在或动态凭据缺失时不认领，提案保持 `APPROVED`；当前策略已黑名单时原子转 `REJECTED` 并写 `status_reason=policy_blacklisted`
 - **`EXECUTING` 先提交**：认领 `EXECUTING` 的事务提交后，外部执行器（Netmiko / notify）才启动；执行器内可观测已提交的 `EXECUTING` 状态
 - **`UNKNOWN` 不自动重试**：执行失败、进程崩溃或启动恢复（`reconcile_executing_proposals` 将遗留 `EXECUTING` 批量转 `UNKNOWN`）后，系统不会自动再次执行；须管理员人工处置（见 [guide.md §5.3.2](./guide.md#532-管理员处置-unknown-提案本项目)）
-- **`UNKNOWN` 只留给真正不确定的失败**：执行器用 `ExecutionResult.dispatched` 区分两类失败——连接尚未建立就失败（平台/驱动不支持、认证失败、主机不可达）说明命令确定没下发、设备状态未被改动，原子转回 `APPROVED` 并写 `status_reason=dispatch_failed_before_send`，管理员修好前置条件即可直接重试；连接建立之后的任何失败都无法确定命令是否已生效，仍走 `UNKNOWN` 人工核实
+- **`UNKNOWN` 只留给真正不确定的失败**：执行器用 `ExecutionResult.dispatched` 区分两类失败——连接尚未建立就失败（平台/驱动不支持、认证失败、主机不可达）说明命令确定没下发、设备状态未被改动，原子转回 `APPROVED` 并写 `status_reason=dispatch_failed_before_send`，管理员修好前置条件即可直接重试；连接建立之后的任何失败都无法确定命令是否已生效，变更命令仍走 `UNKNOWN` 人工核实。只读命令是例外：它没有副作用，重跑一次是安全的，所以连上设备后失败（设备回 `Unrecognized command`、读超时）也转回 `APPROVED` 并写 `status_reason=read_only_failed` 直接可重试——新命令模板和设备版本对不上时这种失败会成批出现，落 `UNKNOWN` 只会堆一批要人工处置的提案
 - **设备回了文本不等于成功**：只有明确的成功证据才落 `EXECUTED`，判定规则登记在命令目录（`device_commands.py`）里——配置命令把按厂商登记的报错句式交给 Netmiko `error_pattern` 逐行检查，命中即失败（可能部分生效，走 `UNKNOWN`）；Junos 必须看到 `commit complete`；普通命令只检查输出开头几行的厂商报错句式（不用宽泛的 `error` 正则扫整段输出，避免把配置正文里的 logging errors 误判）；确认流程按目录逐轮匹配，设备问了没登记的问题（例如「要不要保存配置」）就停下、不替人回答；重启发出后连接会断、拿不到成功证据，一律落 `UNKNOWN` 并提示在设备恢复后人工核实（管理员在卡片上「确认已执行」即转 `EXECUTED`）。设备报错不改变 `dispatched=True`：连上设备之后的失败都按「可能已触及设备」处理
 - **失败原因可追**：分类原因（含异常类名）写入 `action_payload.last_error`，经安全摘要透出到审批卡片与 Agent 上下文；完整异常堆栈只进服务端日志，不外泄。审计日志 `detail` 刻意不含异常文本
 - 待审批期间，`action_payload` 中的敏感字段不通过 WebSocket 回传给发起对话的 Agent 上下文，Agent 只收到"提案已创建，等待审批"的摘要

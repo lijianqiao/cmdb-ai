@@ -10,8 +10,12 @@ import {
   waitFor,
 } from "@testing-library/react"
 import "@testing-library/jest-dom/vitest"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+vi.mock("@/lib/api", () => ({ default: { get: vi.fn() } }))
+
+import api from "@/lib/api"
+import { resetDeviceCommandCatalogCache } from "@/hooks/use-device-command-catalog"
 import type { CmdbAsset } from "@/types/cmdb"
 
 import {
@@ -19,7 +23,17 @@ import {
   createFormSchema,
 } from "./cmdbAssetFormSchema"
 import { CmdbAssetFormDialog } from "./CmdbAssetFormDialog"
-import { isVendorName, VENDOR_ITEMS } from "./cmdbVendors"
+import { vendorItems, vendorLabel } from "./cmdbVendors"
+
+// 厂商列表由后端命令目录接口给出：测试里把它 mock 掉，顺带证明前端不再自己写一份。
+const CATALOG_VENDORS = [
+  "cisco_iosxe",
+  "cisco_small_business",
+  "huawei_vrp",
+  "hp_comware",
+  "juniper_junos",
+  "other",
+]
 
 const baseAssetFields = {
   asset_type: "switch",
@@ -35,6 +49,20 @@ const baseAssetFields = {
 // 没开 vitest 全局模式，Testing Library 不会自动卸载：上一条用例的对话框留在页面上时，
 // 两个对话框的输入框 id 相同，按标签找到的会是旧对话框里的输入框。
 afterEach(cleanup)
+
+beforeEach(() => {
+  resetDeviceCommandCatalogCache()
+  vi.mocked(api.get).mockReset()
+  vi.mocked(api.get).mockResolvedValue({
+    data: {
+      data: {
+        catalog_version: "t17-v1",
+        commands: [],
+        vendors: CATALOG_VENDORS,
+      },
+    },
+  })
+})
 
 describe("CmdbAssetFormDialog 凭据校验规则", () => {
   it("编辑 Small Business 静态凭据资产时保留厂商且不提交空密码", async () => {
@@ -74,31 +102,45 @@ describe("CmdbAssetFormDialog 凭据校验规则", () => {
     expect(payload).not.toHaveProperty("credential_password")
   })
 
-  it("仅将已登记的厂商值识别为 VendorName", () => {
-    expect(isVendorName("cisco_small_business")).toBe(true)
-    expect(isVendorName("unknown_vendor")).toBe(false)
-  })
-
-  it("厂商只剩网络设备厂商，外加「其他 / 未指定」", () => {
-    expect(VENDOR_ITEMS.map((item) => item.value)).toEqual([
-      "cisco_iosxe",
-      "cisco_small_business",
-      "huawei_vrp",
-      "hp_comware",
-      "juniper_junos",
-      "other",
-    ])
-    expect(VENDOR_ITEMS).toContainEqual({
+  it("厂商下拉项来自目录返回的厂商值，标签只在前端补", () => {
+    expect(vendorItems(CATALOG_VENDORS)).toContainEqual({
       label: "H3C / HP Comware",
       value: "hp_comware",
     })
-    expect(VENDOR_ITEMS).toContainEqual({
+    expect(vendorItems(CATALOG_VENDORS)).toContainEqual({
       label: "其他 / 未指定",
       value: "other",
     })
-    expect(isVendorName("linux")).toBe(false)
-    expect(isVendorName("generic")).toBe(false)
-    expect(isVendorName("other")).toBe(true)
+    // 后端新接一个厂商、前端还没补标签时，原样显示厂商值，不会少一个选项。
+    expect(vendorLabel("ruijie_os")).toBe("ruijie_os")
+  })
+
+  it("表单只接受目录返回的厂商；目录还没加载回来时不拦合法提交", () => {
+    const withCatalog = createFormSchema(null, CATALOG_VENDORS)
+    expect(
+      withCatalog.safeParse({
+        ...baseAssetFields,
+        vendor: "linux",
+        credential_type: "none",
+        ...clearedCredentialFields(),
+      }).success
+    ).toBe(false)
+    expect(
+      withCatalog.safeParse({
+        ...baseAssetFields,
+        credential_type: "none",
+        ...clearedCredentialFields(),
+      }).success
+    ).toBe(true)
+    // 目录为空（还没加载回来）时只要求非空：取值由后端再校验一次。
+    expect(
+      createFormSchema(null, []).safeParse({
+        ...baseAssetFields,
+        vendor: "linux",
+        credential_type: "none",
+        ...clearedCredentialFields(),
+      }).success
+    ).toBe(true)
   })
 
   it("表单拒绝服务器等非网络资产类型", () => {
@@ -138,7 +180,7 @@ describe("CmdbAssetFormDialog 凭据校验规则", () => {
   })
 
   it("显示 SG350X 对应的 Cisco Small Business 厂商选项", () => {
-    expect(VENDOR_ITEMS).toContainEqual({
+    expect(vendorItems(CATALOG_VENDORS)).toContainEqual({
       label: "思科 Small Business（SG350X 等）",
       value: "cisco_small_business",
     })

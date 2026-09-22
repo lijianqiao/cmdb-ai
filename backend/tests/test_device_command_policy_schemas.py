@@ -3,17 +3,24 @@
 import pytest
 from pydantic import ValidationError
 
+from app.agent.device_commands import list_device_commands
 from app.schemas.device_command_policy import DeviceCommandPolicyCreate
 
 
 def test_state_changing_command_rejects_asset_type_scope() -> None:
-    with pytest.raises(ValidationError, match=r"变更类命令.*scope.*asset"):
+    with pytest.raises(ValidationError, match=r"变更类命令.*scope.*asset") as exc_info:
         DeviceCommandPolicyCreate(
             scope="asset_type",
             asset_type="switch",
             command_name="reboot",
             decision="whitelist",
         )
+
+    # 报错文案里的命令清单从目录生成：目录加减命令时不用回来改这句话。
+    message = str(exc_info.value)
+    for item in list_device_commands():
+        if item.command_type == "state_changing":
+            assert item.name in message, item.name
 
 
 def test_state_changing_command_accepts_asset_scope() -> None:

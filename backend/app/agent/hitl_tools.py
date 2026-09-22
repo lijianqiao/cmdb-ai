@@ -13,7 +13,7 @@
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.device_commands import command_supports_vendor
+from app.agent.device_commands import command_supports_vendor, list_command_names_by_type
 from app.agent.device_commands import list_device_commands as list_catalog_commands
 from app.agent.hitl import HitlEventPublisher
 from app.agent.hitl_gate import HitlGateHook
@@ -105,6 +105,7 @@ async def query_device_command(
     proposed_by_agent_id: str | None,
     asset_id: int,
     command_name: str,
+    interface_name: str | None,
     reason: str,
     publisher: HitlEventPublisher | None = None,
     gate_hook: HitlGateHook | None = None,
@@ -118,6 +119,7 @@ async def query_device_command(
         proposed_by_agent_id: 发起提案的 Agent ID，可为空。
         asset_id: 目标 CMDB 资产 ID。
         command_name: 白名单内的只读诊断命令名。
+        interface_name: 只查单个接口的命令所需的接口全名。
         reason: 发起查询的原因。
         publisher: 可选的 HITL 安全事件发布器。
         gate_hook: 门控钩子（薄工具路径不使用）。
@@ -276,9 +278,10 @@ async def list_device_commands_for_asset(
         lines.append("注意：该资产未配置登录凭据，执行任何命令前需先在 CMDB 中配置凭据。")
     elif asset.credential_type == "dynamic":
         lines.append("注意：该资产使用动态凭据，所有命令都需要人工审批并当场输入密码。")
+    # 清单从目录生成：加减命令时这句话跟着变，不用回来改文案。
     lines.append(
-        "变更类命令（reboot/port_enable/port_disable）请用 device_control；"
-        "只读诊断请用 query_device_command。"
+        f"变更类命令（{'/'.join(list_command_names_by_type('state_changing'))}）"
+        "请用 device_control；只读诊断请用 query_device_command。"
     )
 
     return ToolResult(control="ok", content="\n".join(lines))

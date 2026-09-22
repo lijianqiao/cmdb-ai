@@ -13,6 +13,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.agent import hitl_tools, tool_dispatch
+from app.agent.device_commands import list_device_commands as list_catalog_commands
 from app.agent.hitl import HitlProposalRejectedError, ProposalSafeSummary
 from app.agent.hitl_gate import HitlGateHook
 from app.agent.loop import ToolResult
@@ -340,6 +341,20 @@ def test_root_schema_has_notify_and_device_control_without_propose() -> None:
     assert "reboot/port_enable/port_disable" in control["description"]
 
 
+async def test_tool_descriptions_are_generated_from_the_catalog(
+    single_interface_read_only_command: str,
+) -> None:
+    """目录加减命令时，模型看到的工具描述要跟着变——否则它看不到新命令。"""
+    functions = {item["function"]["name"]: item["function"] for item in root_tool_schemas()}
+
+    for item in list_catalog_commands():
+        target = "query_device_command" if item.command_type == "read_only" else "device_control"
+        assert item.name in functions[target]["description"], item.name
+    # 临时注册的只读命令也在里面：说明清单是从目录生成的，不是另一份手写清单。
+    assert single_interface_read_only_command in functions["query_device_command"]["description"]
+    assert single_interface_read_only_command not in functions["device_control"]["description"]
+
+
 async def test_root_dispatcher_routes_device_control(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, actor_id: int
 ) -> None:
@@ -569,6 +584,7 @@ async def test_query_device_command_thin_tool_fails_closed_without_executor(
         proposed_by_agent_id=None,
         asset_id=asset_id,
         command_name="show_version",
+        interface_name=None,
         reason="排查交换机",
         gate_hook=None,
     )
@@ -648,6 +664,7 @@ async def test_query_device_command_thin_tool_never_calls_executor_on_failure_pa
         proposed_by_agent_id=None,
         asset_id=asset_id,
         command_name="show_version",
+        interface_name=None,
         reason="排查交换机",
         gate_hook=None,
     )
@@ -742,6 +759,11 @@ async def test_list_device_commands_reports_policy_and_credential_state(
     assert assist_result.control == "ok"
     assert "白名单（可自动执行）" in assist_result.content
     assert "device_control" in assist_result.content
+    # 尾句里的变更类命令清单也从目录生成，加减命令时不用回来改文案。
+    state_changing = "/".join(
+        item.name for item in list_catalog_commands() if item.command_type == "state_changing"
+    )
+    assert state_changing in assist_result.content
 
 
 async def test_list_device_commands_follows_effective_mode_without_auto_execute(

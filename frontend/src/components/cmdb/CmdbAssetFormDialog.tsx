@@ -47,13 +47,13 @@ import { Textarea } from "@/components/ui/textarea"
 import { fetchCmdbAssetCredential } from "@/lib/cmdb-credential-api"
 import { PERMISSIONS } from "@/lib/constants"
 import { ViewIcon, ViewOffSlashIcon } from "@/lib/icons"
+import { useDeviceCommandCatalog } from "@/hooks/use-device-command-catalog"
 import { usePermission } from "@/hooks/use-permission"
 import type {
   CmdbAsset,
   CmdbAssetCreate,
   CmdbAssetUpdate,
   CredentialType,
-  VendorName,
 } from "@/types/cmdb"
 
 import {
@@ -62,7 +62,7 @@ import {
   type CmdbAssetFormValues,
 } from "./cmdbAssetFormSchema"
 import { ASSET_TYPE_ITEMS } from "./cmdbAssetTypes"
-import { isVendorName, VENDOR_ITEMS } from "./cmdbVendors"
+import { vendorItems, vendorLabel } from "./cmdbVendors"
 
 const CREDENTIAL_TYPE_ITEMS: { label: string; value: CredentialType }[] = [
   { label: "无", value: "none" },
@@ -149,14 +149,11 @@ interface CmdbAssetFormDialogProps {
   onSubmit: (data: CmdbAssetCreate | CmdbAssetUpdate) => Promise<boolean>
 }
 
-function resolveVendor(value: string | undefined): VendorName {
-  return isVendorName(value) ? value : "other"
-}
-
 function defaultValues(asset?: CmdbAsset | null): CmdbAssetFormValues {
   return {
     asset_type: asset?.asset_type || "switch",
-    vendor: resolveVendor(asset?.vendor),
+    // 厂商原样带出来：目录里没有的旧值（如已下线的 linux）也要让人看见并自己改掉。
+    vendor: asset?.vendor || "other",
     hostname: asset?.hostname ?? "",
     ip_address: asset?.ip_address ?? "",
     location: asset?.location ?? "",
@@ -180,13 +177,13 @@ export function CmdbAssetFormDialog({
   const [credentialDialogOpen, setCredentialDialogOpen] = useState(false)
   const [revealedPassword, setRevealedPassword] = useState("")
   const [credentialLoading, setCredentialLoading] = useState(false)
+  // 厂商有哪些由后端命令目录说了算，前端不再抄一份。
+  const { catalog } = useDeviceCommandCatalog()
   const form = useForm<CmdbAssetFormValues>({
     resolver: (data, context, options) =>
-      zodResolver(createFormSchema(asset?.credential_type ?? null))(
-        data,
-        context,
-        options
-      ),
+      zodResolver(
+        createFormSchema(asset?.credential_type ?? null, catalog.vendors)
+      )(data, context, options),
     defaultValues: defaultValues(asset),
   })
 
@@ -236,13 +233,15 @@ export function CmdbAssetFormDialog({
     return [...ASSET_TYPE_ITEMS, { label: current, value: current }]
   }, [asset?.asset_type])
 
-  const vendorItems = useMemo(() => {
+  const vendorOptions = useMemo(() => {
+    const items = vendorItems(catalog.vendors)
     const current = asset?.vendor
-    if (!current || VENDOR_ITEMS.some((item) => item.value === current)) {
-      return VENDOR_ITEMS
+    if (!current || items.some((item) => item.value === current)) {
+      return items
     }
-    return [...VENDOR_ITEMS, { label: current, value: current }]
-  }, [asset?.vendor])
+    // 目录里没有的旧厂商值（如已下线的 linux）也列出来，让人看见并改掉。
+    return [...items, { label: vendorLabel(current), value: current }]
+  }, [catalog.vendors, asset?.vendor])
 
   const handleSubmit = async (data: CmdbAssetFormValues) => {
     const passwordChanged =
@@ -324,7 +323,7 @@ export function CmdbAssetFormDialog({
                   <Field data-invalid={fieldState.invalid}>
                     <FieldLabel htmlFor="asset-vendor">厂商</FieldLabel>
                     <Select
-                      items={vendorItems}
+                      items={vendorOptions}
                       value={field.value}
                       onValueChange={(value) =>
                         field.onChange(value ?? "other")
@@ -335,7 +334,7 @@ export function CmdbAssetFormDialog({
                       </SelectTrigger>
                       <SelectContent>
                         <SelectGroup>
-                          {vendorItems.map((item) => (
+                          {vendorOptions.map((item) => (
                             <SelectItem key={item.value} value={item.value}>
                               {item.label}
                             </SelectItem>

@@ -18,7 +18,7 @@
 import asyncio
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
 
@@ -26,10 +26,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import make_transient
 
 from app.agent.device_commands import (
+    CommandArguments,
     command_supports_vendor,
     command_type_of,
-    get_device_command,
-    normalize_interface_names,
 )
 from app.agent.executors import DeviceQueryExecutor, ExecutionResult, NotifyExecutor
 from app.agent.hitl import (
@@ -39,7 +38,7 @@ from app.agent.hitl import (
     ProposalSafeSummary,
     _publish,
     _summary,
-    payload_interface_names,
+    payload_command_arguments,
 )
 from app.agent.permissions import HITL_APPROVE, load_permission_context
 from app.core.config import settings
@@ -93,7 +92,7 @@ class DeviceExecutorProtocol(Protocol):
         asset: CmdbAsset,
         command_name: str,
         dynamic_password: str | None,
-        interface_names: Sequence[str] | None = None,
+        arguments: CommandArguments | None = None,
     ) -> ExecutionResult:
         """执行已认领的设备命令提案。"""
         raise NotImplementedError
@@ -292,16 +291,10 @@ async def _preflight_and_claim(
             if not command_supports_vendor(command_name, asset.vendor):
                 return _summary(proposal)
 
-            definition = get_device_command(command_name)
-            interface_names = payload_interface_names(proposal.action_payload)
-            if "interface_names" in definition.arguments:
-                if interface_names is None:
-                    return _summary(proposal)
-                try:
-                    normalize_interface_names(interface_names)
-                except ValueError:
-                    return _summary(proposal)
-            elif interface_names is not None:
+            try:
+                payload_command_arguments(command_name, proposal.action_payload)
+            except ValueError:
+                # 参数缺失或不合法：不认领、不下发，提案留在 APPROVED 等人处理。
                 return _summary(proposal)
 
             policy_decision = await device_command_policy_crud.resolve_policy(
@@ -392,13 +385,13 @@ async def _execute_prepared(
     if prepared.action_type in ("device_query", "device_control"):
         if prepared.asset is None:
             return ExecutionResult(ok=False, message="资产不存在")
-        raw_command_name = prepared.payload.get("command_name")
+        command_name = str(prepared.payload.get("command_name"))
         return await device_executor.execute(
             db,
             asset=prepared.asset,
-            command_name=str(raw_command_name),
+            command_name=command_name,
             dynamic_password=dynamic_password,
-            interface_names=payload_interface_names(prepared.payload),
+            arguments=payload_command_arguments(command_name, prepared.payload),
         )
 
     raise HitlResumeError(f"不支持的 HITL 动作类型：{prepared.action_type}")
@@ -478,11 +471,12 @@ async def _mark_execution_unexecuted(
     actor_user_id: int | None = None,
     last_error: str | None = None,
     actor_ip: str = "",
+    reason: str = "dispatch_failed_before_send",
 ) -> ProposalSafeSummary:
-    """确定命令未下发：把 EXECUTING 回退成 APPROVED 并发布安全事件。
+    """不需要人工核实设备状态的失败：把 EXECUTING 回退成 APPROVED 并发布安全事件。
 
-    与 _mark_execution_unknown 的区别是执行器已确认没碰到设备（连接都没建起来），
-    设备状态未被改动，所以不进 UNKNOWN 人工核实流程，直接回到可重试的 APPROVED。
+    与 _mark_execution_unknown 的区别是不必先人工核实设备实际状态：要么执行器确认
+    没碰到设备（连接都没建起来），要么失败的是没有副作用的只读命令，重跑一次是安全的。
 
     Args:
         session_factory: 独立短会话工厂。
@@ -490,6 +484,7 @@ async def _mark_execution_unexecuted(
         publisher: 可选安全事件发布器。
         actor_user_id: 触发执行的用户 ID，用于审计。
         last_error: 失败分类信息，写入 action_payload 供审批卡片展示。
+        reason: 状态机允许的回退原因码（见 crud.hitl_proposal.revert_unexecuted）。
 
     Returns:
         回退到 APPROVED 后的安全摘要。
@@ -498,7 +493,7 @@ async def _mark_execution_unexecuted(
         reverted = await hitl_proposal_crud.revert_unexecuted(
             db,
             proposal_id,
-            reason="dispatch_failed_before_send",
+            reason=reason,
         )
         _store_last_error(reverted, last_error)
         await db.flush()
@@ -507,8 +502,8 @@ async def _mark_execution_unexecuted(
             actor_user_id,
             "hitl_execution_not_dispatched",
             target=f"hitl_proposal:{reverted.id}",
-            # 与 UNKNOWN 路径一致：审计 detail 不带异常文本。
-            detail=f"动作类型：{reverted.action_type}",
+            # 与 UNKNOWN 路径一致：审计 detail 不带异常文本，只带动作类型和原因码。
+            detail=f"动作类型：{reverted.action_type}；原因：{reason}",
             ip=actor_ip,
         )
         await db.commit()
@@ -616,15 +611,23 @@ async def execute_approved_proposal(
 
     if result is None or not result.ok:
         last_error = _describe_failure(result)
+        retryable_reason: str | None = None
         if result is not None and not result.dispatched:
             # 执行器确认命令没发出去：设备没被碰过，回退到 APPROVED 可直接重试。
+            retryable_reason = "dispatch_failed_before_send"
+        elif prepared.action_type == "device_query":
+            # 只读命令没有副作用：连上设备后失败（设备回「Unrecognized command」、读超时）
+            # 也不必人工核实设备状态，回到 APPROVED 记下原因就能直接重试。
+            retryable_reason = "read_only_failed"
+        if retryable_reason is not None:
             return await _mark_execution_unexecuted(
                 session_factory,
                 proposal_id,
                 publisher,
                 actor_user_id=actor_user_id,
                 last_error=last_error,
-            actor_ip=actor_ip,
+                actor_ip=actor_ip,
+                reason=retryable_reason,
             )
         return await _mark_execution_unknown(
             session_factory,

@@ -1,11 +1,11 @@
 /** 设备命令策略新增/编辑表单对话框
  *
  * 创建时选择作用域、目标与目录命令名；编辑时仅可修改 decision/note，
- * 与后端 DeviceCommandPolicyUpdate 收窄一致。命令名只能从 DEVICE_COMMAND_NAMES
- * 下拉选择，不接受自由输入的原始命令字符串。
+ * 与后端 DeviceCommandPolicyUpdate 收窄一致。命令名只能从后端命令目录接口
+ * 返回的清单里选，不接受自由输入的原始命令字符串。
  */
 
-import { useEffect } from "react"
+import { useEffect, useMemo } from "react"
 import { Controller, useForm, useWatch } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
@@ -42,16 +42,20 @@ import {
 } from "@/components/ui/select"
 import { Spinner } from "@/components/ui/spinner"
 import { Textarea } from "@/components/ui/textarea"
-import {
-  DEVICE_COMMAND_NAMES,
-  isStateChangingCommand,
-  STATE_CHANGING_COMMAND_NAMES,
-  type DeviceCommandPolicy,
-  type DeviceCommandPolicyCreate,
-  type DeviceCommandPolicyUpdate,
-  type PolicyDecision,
-  type PolicyScope,
+import { useDeviceCommandCatalog } from "@/hooks/use-device-command-catalog"
+import { stateChangingCommandNames } from "@/lib/device-command-catalog"
+import type {
+  DeviceCommandPolicy,
+  DeviceCommandPolicyCreate,
+  DeviceCommandPolicyUpdate,
+  PolicyDecision,
+  PolicyScope,
 } from "@/types/device-command-policy"
+
+import {
+  createPolicySchema,
+  type CreateFormData,
+} from "./deviceCommandPolicyFormSchema"
 
 const SCOPE_ITEMS: { label: string; value: PolicyScope }[] = [
   { label: "设备类型级别", value: "asset_type" },
@@ -63,54 +67,11 @@ const DECISION_ITEMS: { label: string; value: PolicyDecision }[] = [
   { label: "黑名单", value: "blacklist" },
 ]
 
-const COMMAND_ITEMS = DEVICE_COMMAND_NAMES.map((name) => ({
-  label: name,
-  value: name,
-}))
-
-const createSchema = z
-  .object({
-    scope: z.enum(["asset_type", "asset"]),
-    asset_type: z.string().optional(),
-    asset_id: z.string().optional(),
-    command_name: z.string().min(1, "请选择命令"),
-    decision: z.enum(["whitelist", "blacklist"]),
-    note: z.string().max(500).optional().default(""),
-  })
-  .superRefine((data, ctx) => {
-    if (data.scope === "asset_type") {
-      if (!data.asset_type) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "请选择设备类型",
-          path: ["asset_type"],
-        })
-      }
-    } else if (!data.asset_id || !/^\d+$/.test(data.asset_id)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "请选择 CMDB 资产",
-        path: ["asset_id"],
-      })
-    }
-    if (
-      STATE_CHANGING_COMMAND_NAMES.has(data.command_name) &&
-      data.scope !== "asset"
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["scope"],
-        message: "变更类命令只能按单台设备配置",
-      })
-    }
-  })
-
 const editSchema = z.object({
   decision: z.enum(["whitelist", "blacklist"]),
   note: z.string().max(500).optional().default(""),
 })
 
-type CreateFormData = z.infer<typeof createSchema>
 type EditFormData = z.infer<typeof editSchema>
 
 interface DeviceCommandPolicyFormDialogProps {
@@ -139,14 +100,26 @@ export function DeviceCommandPolicyFormDialog({
   onSubmit,
 }: DeviceCommandPolicyFormDialogProps) {
   const isEdit = !!policy
+  // 命令清单与风险分级都从后端命令目录取，前端不再抄一份。
+  const { catalog } = useDeviceCommandCatalog()
+  const commandItems = useMemo(
+    () => catalog.commands.map((item) => ({ label: item.name, value: item.name })),
+    [catalog.commands]
+  )
+  const stateChangingCommands = useMemo(
+    () => stateChangingCommandNames(catalog),
+    [catalog]
+  )
+  const defaultCommandName = catalog.commands[0]?.name ?? ""
 
   const createForm = useForm<CreateFormData>({
-    resolver: zodResolver(createSchema),
+    resolver: (data, context, options) =>
+      zodResolver(createPolicySchema(stateChangingCommands))(data, context, options),
     defaultValues: {
       scope: "asset_type",
       asset_type: "switch",
       asset_id: "",
-      command_name: DEVICE_COMMAND_NAMES[0],
+      command_name: defaultCommandName,
       decision: "whitelist",
       note: "",
     },
@@ -165,13 +138,13 @@ export function DeviceCommandPolicyFormDialog({
     control: createForm.control,
     name: "command_name",
   })
-  const scopeLockedByCommand = isStateChangingCommand(commandName)
+  const scopeLockedByCommand = stateChangingCommands.has(commandName)
 
   useEffect(() => {
-    if (isStateChangingCommand(commandName)) {
+    if (stateChangingCommands.has(commandName)) {
       createForm.setValue("scope", "asset", { shouldValidate: true })
     }
-  }, [commandName, createForm])
+  }, [commandName, createForm, stateChangingCommands])
 
   useEffect(() => {
     if (!open) return
@@ -185,12 +158,13 @@ export function DeviceCommandPolicyFormDialog({
         scope: "asset_type",
         asset_type: "switch",
         asset_id: "",
-        command_name: DEVICE_COMMAND_NAMES[0],
+        command_name: defaultCommandName,
         decision: "whitelist",
         note: "",
       })
     }
-  }, [open, policy, createForm, editForm])
+    // 目录是异步加载的：回来之后把默认命令补上。
+  }, [open, policy, createForm, editForm, defaultCommandName])
 
   const handleCreateSubmit = async (data: CreateFormData) => {
     const payload: DeviceCommandPolicyCreate = {
@@ -431,7 +405,7 @@ export function DeviceCommandPolicyFormDialog({
                   <Field data-invalid={fieldState.invalid}>
                     <FieldLabel htmlFor="policy-command">命令名</FieldLabel>
                     <Select
-                      items={COMMAND_ITEMS}
+                      items={commandItems}
                       value={field.value}
                       onValueChange={field.onChange}
                     >
@@ -444,11 +418,11 @@ export function DeviceCommandPolicyFormDialog({
                       </SelectTrigger>
                       <SelectContent>
                         <SelectGroup>
-                          {COMMAND_ITEMS.map((item) => (
+                          {commandItems.map((item) => (
                             <SelectItem key={item.value} value={item.value}>
                               <span className="flex items-center gap-2">
                                 {item.label}
-                                {isStateChangingCommand(item.value) && (
+                                {stateChangingCommands.has(item.value) && (
                                   <Badge variant="destructive">
                                     变更类，需精确到设备
                                   </Badge>

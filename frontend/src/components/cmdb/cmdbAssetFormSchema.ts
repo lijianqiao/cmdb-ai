@@ -5,7 +5,6 @@ import { z } from "zod"
 import type { CredentialType } from "@/types/cmdb"
 
 import { isAssetTypeName } from "./cmdbAssetTypes"
-import { VENDOR_VALUES } from "./cmdbVendors"
 
 /** 切换凭据类型时返回应写入 RHF 的空凭据字段，避免隐藏字段残留导致 zod 失败 */
 export function clearedCredentialFields(): {
@@ -23,14 +22,24 @@ export function clearedCredentialFields(): {
  *     只有「本来就是 static」时才允许密码留空（后端会保留原密文）——
  *     新建，或者从 none/dynamic 切换成 static，都必须填新密码，否则
  *     不存在可保留的旧密文，留空会被后端 422 拒绝，这里提前拦截。
+ *   vendorValues: 后端命令目录给出的厂商值。目录还没加载回来时传空数组：
+ *     只要求非空，不校验取值——否则表单会因为「目录还没到」而拦下合法的提交，
+ *     取值本身后端还会再校验一次。
  */
-export function createFormSchema(existingCredentialType: CredentialType | null) {
+export function createFormSchema(
+  existingCredentialType: CredentialType | null,
+  vendorValues: readonly string[] = []
+) {
+  const vendor =
+    vendorValues.length > 0
+      ? z.string().refine((value) => vendorValues.includes(value), "请选择厂商")
+      : z.string().min(1, "请选择厂商")
   return z
     .object({
       // 字段值保持 string：编辑清理前的旧资产（如 server）时要把旧值原样显示出来，
       // 提交时才拦下，让人自己改成网络设备类型，而不是悄悄换掉。
       asset_type: z.string().refine(isAssetTypeName, "请选择资产类型"),
-      vendor: z.enum(VENDOR_VALUES, { message: "请选择厂商" }),
+      vendor,
       hostname: z.string().min(1, "请输入主机名").max(255),
       ip_address: z.string().min(1, "请输入 IP 地址").max(45),
       location: z.string().max(200).optional().default(""),
