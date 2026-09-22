@@ -94,7 +94,12 @@ async def broadcast_summary_delivery(delivery: SummaryDelivery | None) -> None:
             delivery.session_id,
             AgentWsServerMessage(
                 type="assistant_delta",
-                payload={"text": delivery.content, "done": True},
+                payload={
+                    "text": delivery.content,
+                    "done": True,
+                    "source": "device_query_summary",
+                    "proposal_id": delivery.proposal_id,
+                },
             ),
         )
     except Exception as exc:

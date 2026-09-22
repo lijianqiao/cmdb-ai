@@ -724,6 +724,7 @@ async def test_snapshot_returns_safe_recoverable_state(
         "created_at",
         "execution_started_at",
         "resolved_at",
+        "executed_at",
         "result_excerpt",
         "has_full_result",
         "execution_state",

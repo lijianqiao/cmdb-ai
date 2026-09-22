@@ -97,6 +97,7 @@ class HitlProposalSafeResponse(ApiModel):
     created_at: datetime
     execution_started_at: datetime | None
     resolved_at: datetime | None
+    executed_at: datetime | None = None
     result_excerpt: str | None = None
     has_full_result: bool = False
     # 后台执行状态：刷新后卡片据此知道还在排队/执行，或要重新输入动态密码

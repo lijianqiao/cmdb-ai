@@ -94,4 +94,72 @@ describe("groupMessagesIntoTurns", () => {
     expect(turns[1].processItems.map((i) => i.id)).toEqual(["tc:2"])
     expect(turns[1].assistantMessage?.id).toBe("a:3")
   })
+
+  it("批准后设备还在读配置时，这一轮标成正在读取", () => {
+    const turns = groupMessagesIntoTurns([
+      { kind: "user", id: "u:1", content: "查配置" },
+      { kind: "assistant", id: "a:1", content: "已提交审批", streaming: false },
+      {
+        kind: "hitl",
+        id: "hitl:1",
+        proposalId: 1,
+        actionType: "device_query",
+        status: "APPROVED",
+        reason: "查看运行配置",
+        assetId: 9,
+        resultExcerpt: null,
+        hasFullResult: false,
+        executionState: "running",
+      },
+    ])
+    expect(turns[0].deviceQueryWait).toBe("reading")
+  })
+
+  it("配置已取回但摘要还没回到对话时，标成正在生成摘要", () => {
+    const turns = groupMessagesIntoTurns([
+      { kind: "user", id: "u:1", content: "查配置" },
+      { kind: "assistant", id: "a:1", content: "已提交审批", streaming: false, createdAt: "2026-09-22T01:00:00Z" },
+      {
+        kind: "hitl",
+        id: "hitl:1",
+        proposalId: 1,
+        actionType: "device_query",
+        status: "EXECUTED",
+        reason: "查看运行配置",
+        assetId: 9,
+        resultExcerpt: null,
+        hasFullResult: true,
+        executedAt: "2026-09-22T01:02:00Z",
+      },
+    ])
+    expect(turns[0].deviceQueryWait).toBe("summarizing")
+  })
+
+  it("摘要已经写进聊天记录后，不再显示等待", () => {
+    const turns = groupMessagesIntoTurns([
+      { kind: "user", id: "u:1", content: "查配置" },
+      { kind: "assistant", id: "a:1", content: "已提交审批", streaming: false, createdAt: "2026-09-22T01:00:00Z" },
+      {
+        kind: "hitl",
+        id: "hitl:1",
+        proposalId: 1,
+        actionType: "device_query",
+        status: "EXECUTED",
+        reason: "查看运行配置",
+        assetId: 9,
+        resultExcerpt: null,
+        hasFullResult: true,
+        executedAt: "2026-09-22T01:02:00Z",
+      },
+      {
+        kind: "assistant",
+        id: "a:2",
+        content: "这台交换机的 VLAN 如下",
+        streaming: false,
+        createdAt: "2026-09-22T01:03:00Z",
+      },
+    ])
+    expect(turns[0].deviceQueryWait).toBeNull()
+    expect(turns[0].assistantMessage?.id).toBe("a:2")
+  })
 })

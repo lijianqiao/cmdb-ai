@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from "react"
 
 import {
+  deviceQueryWaitLabel,
   groupMessagesIntoTurns,
   type ChatTurnGroup,
 } from "@/components/ops-assistant/chatMessageUtils"
@@ -118,7 +119,8 @@ function TurnRow({
   isSending?: boolean
 }) {
   const isGenerating = Boolean(
-    turn.assistantMessage?.streaming ||
+    turn.deviceQueryWait ||
+      turn.assistantMessage?.streaming ||
       (isLastTurn && isSending) ||
       (!turn.assistantMessage && isLastTurn && turn.processItems.length > 0),
   )
@@ -187,6 +189,15 @@ function TurnRow({
           <div className="flex items-center gap-2 rounded-2xl border bg-card px-4 py-3 text-xs text-muted-foreground shadow-xs">
             <Spinner className="size-3.5 text-primary" />
             <span>生成中...</span>
+          </div>
+        </div>
+      ) : null}
+
+      {turn.deviceQueryWait ? (
+        <div className="flex justify-start">
+          <div className="flex items-center gap-2 rounded-2xl border bg-card px-4 py-3 text-sm text-muted-foreground shadow-xs">
+            <Spinner className="size-3.5 text-primary" />
+            <span>{deviceQueryWaitLabel(turn.deviceQueryWait)}</span>
           </div>
         </div>
       ) : null}

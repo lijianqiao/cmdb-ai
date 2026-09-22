@@ -61,6 +61,9 @@ export type OpsChatItem =
       createdAt?: string
       /** 整轮用量，只有每轮最后一条回复带；流式过程中拿不到，刷新后由快照补上 */
       usage?: TurnUsage
+      /** 设备查询摘要。用来结束「正在生成摘要」的等待，避免和审批前那句回复混在一起 */
+      source?: "device_query_summary"
+      proposalId?: number
     }
   | {
       kind: "tool_call"
@@ -83,6 +86,8 @@ export type OpsChatItem =
       hasFullResult: boolean
       /** 快照里的后台执行状态。详情加载前先用它，避免把正在执行显示成可重试 */
       executionState?: "queued" | "running" | "awaiting_credential" | null
+      /** 设备命令执行完成时间，刷新后用来判断摘要是不是已经写进聊天记录 */
+      executedAt?: string | null
       createdAt?: string
     }
   | {
@@ -222,6 +227,7 @@ function mapProposalToItem(
     resultExcerpt: proposal.result_excerpt,
     hasFullResult: proposal.has_full_result,
     executionState: proposal.execution_state ?? null,
+    executedAt: proposal.executed_at ?? null,
     createdAt: proposal.created_at,
   }
 }
@@ -436,9 +442,15 @@ function applyWsMessage(
     case "assistant_delta": {
       const text = readString(message.payload, "text")
       const done = Boolean(message.payload.done)
+      const source =
+        readString(message.payload, "source") === "device_query_summary"
+          ? ("device_query_summary" as const)
+          : undefined
+      const summaryProposalId = readProposalId(message.payload)
       const items = [...state.items]
       const last = items[items.length - 1]
-      if (last?.kind === "assistant" && last.streaming) {
+      // 设备查询摘要是整段一次送到的，不能拼进还在流式输出的上一句
+      if (last?.kind === "assistant" && last.streaming && source == null) {
         items[items.length - 1] = {
           ...last,
           content: last.content + text,
@@ -450,6 +462,8 @@ function applyWsMessage(
           id: nextEphemeralId("stream"),
           content: text,
           streaming: !done,
+          source,
+          proposalId: summaryProposalId ?? undefined,
         })
       }
       return { items }

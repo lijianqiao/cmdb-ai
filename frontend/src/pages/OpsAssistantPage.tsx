@@ -49,7 +49,7 @@ import {
   listAgentSessions,
   patchAgentSession,
 } from "@/lib/agent-api"
-import { decideHitlProposal } from "@/lib/hitl-api"
+import { decideHitlProposal, type HitlProposal } from "@/lib/hitl-api"
 import {
   HITL_RECONCILING_MESSAGE,
   describeHitlOutcome,
@@ -239,8 +239,24 @@ export function OpsAssistantPage() {
 
   const handleApproveHitl = async (dynamicPassword?: string): Promise<void> => {
     if (activeHitl == null) return
-    const executedMessage = "执行完成，正在生成回答…"
     setIsExecutingHitl(true)
+    // 设备查询执行完后，对话区自己会显示「正在生成摘要」和最终回答。
+    // 这里再弹「执行完成，正在生成回答…」会晚于答案出现，容易让人以为还没答完。
+    const showFollowUp = (
+      proposal: HitlProposal | null,
+      toastId?: string | number,
+    ) => {
+      if (proposal?.status.trim().toUpperCase() === "EXECUTED") {
+        if (toastId != null) toast.dismiss(toastId)
+        return
+      }
+      const notice = describeHitlOutcome(proposal, "")
+      if (toastId == null) {
+        toast[notice.level](notice.message)
+        return
+      }
+      toast[notice.level](notice.message, { id: toastId })
+    }
     try {
       const body: { approve: true; dynamic_credential_password?: string } = {
         approve: true,
@@ -249,13 +265,15 @@ export function OpsAssistantPage() {
         body.dynamic_credential_password = dynamicPassword
       }
       const updated = await decideHitlProposal(activeHitl.proposalId, body)
-      const notice = describeHitlOutcome(updated, executedMessage)
-      const toastId = toast[notice.level](notice.message)
+      let toastId: string | number | undefined
+      if (updated.status.trim().toUpperCase() !== "EXECUTED") {
+        const notice = describeHitlOutcome(updated, "")
+        toastId = toast[notice.level](notice.message)
+      }
       if (isExecutionInProgress(updated.execution_state)) {
         void reconcileHitl(activeHitl.proposalId).then(({ proposal, aborted }) => {
           if (aborted) return
-          const finalNotice = describeHitlOutcome(proposal, executedMessage)
-          toast[finalNotice.level](finalNotice.message, { id: toastId })
+          showFollowUp(proposal, toastId)
         })
       }
     } catch (error: unknown) {
@@ -271,8 +289,7 @@ export function OpsAssistantPage() {
         toast.dismiss(toastId)
         return
       }
-      const notice = describeHitlOutcome(proposal, executedMessage)
-      toast[notice.level](notice.message, { id: toastId })
+      showFollowUp(proposal, toastId)
     } finally {
       setIsExecutingHitl(false)
       await reloadSnapshot()

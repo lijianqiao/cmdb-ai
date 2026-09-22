@@ -150,6 +150,7 @@ def _safe_proposal_response(
         created_at=proposal.created_at,
         execution_started_at=proposal.execution_started_at,
         resolved_at=proposal.resolved_at,
+        executed_at=proposal.executed_at,
         result_excerpt=result_excerpt,
         has_full_result=proposal.id in full_result_proposal_ids,
         execution_state=visible_state,

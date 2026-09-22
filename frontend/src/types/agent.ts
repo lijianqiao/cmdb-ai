@@ -108,6 +108,8 @@ export interface HitlProposalSafeSummary {
   created_at: string
   execution_started_at: string | null
   resolved_at: string | null
+  /** 设备命令执行完成的时间。用来区分「审批时的那句回复」和后来的配置摘要 */
+  executed_at?: string | null
 }
 
 /** 已执行设备查询的按需完整结果（不进入聊天快照或 reducer） */
