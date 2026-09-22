@@ -3,6 +3,9 @@
 这三件事之前都是缺口，且都不会被功能测试发现——审批照常工作、执行照常
 执行，只是事后查不到「谁从哪批的」「有没有人反复重试过」，以及部分成功时
 前端会卡在死循环里。所以单独立一个文件把它们钉死。
+
+批准 / 重试现在只提交审批并排进后台执行、立即返回 202（R8 第二阶段），
+断言执行结果之前先 drain 后台执行队列。
 """
 
 from collections.abc import Awaitable, Callable
@@ -12,6 +15,8 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.hitl import HitlResumeError
+from app.agent.hitl_executor import hitl_execution_queue
 from app.crud.hitl_proposal import hitl_proposal_crud
 from app.models.audit_log import AuditLog
 from app.models.permission import Permission
@@ -91,7 +96,8 @@ async def test_manual_approval_records_source_ip(
         json={"approve": True},
         headers=auth_headers,
     )
-    assert response.status_code == 200, response.text
+    assert response.status_code == 202, response.text
+    await hitl_execution_queue.drain()
 
     approved = await _audit_rows(db_session, "hitl_approved")
     assert len(approved) == 1
@@ -190,8 +196,9 @@ async def test_retry_writes_audit_even_when_it_fails(
         json={},
         headers=auth_headers,
     )
-    # 预检失败不认领，提案保持 APPROVED；HTTP 语义如何不是本例关注点
-    assert response.status_code in (200, 409), response.text
+    # 重试排进后台执行；预检在后台失败、不认领，提案保持 APPROVED
+    assert response.status_code == 202, response.text
+    await hitl_execution_queue.drain()
 
     retries = await _audit_rows(db_session, "hitl_retry_requested")
     assert len(retries) == 1, "重试无论成败都必须留下审计"
@@ -235,43 +242,40 @@ async def test_unknown_resolution_records_source_ip(
     assert rows[0].ip != ""
 
 
-async def test_decide_returns_200_with_execution_error_when_execution_fails(
+async def test_approval_stands_when_background_execution_cannot_start(
     client: AsyncClient,
     db_session: AsyncSession,
     test_user: User,
     auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """审批成功但执行未启动时返回 200 + execution_error，不是 409。
+    """审批成功但执行没能启动：批准照样返回 202，后台失败后提案停在 APPROVED、
+    执行状态回到空，界面显示「已批准，可重试」。
 
-    返回 409 会让前端显示「批准失败」，而提案其实已 APPROVED；用户再点批准
-    只会因状态已变再拿一个 409——死循环。正确的表达是「已批准，执行失败，可重试」。
+    不能把这种情况报成「批准失败」：提案其实已 APPROVED，用户再点批准只会因状态
+    已变再拿一个 409——死循环；也不能让它一直显示「执行中」。
     """
-    from app.agent import hitl as hitl_module
-
     await _grant_hitl_permission(db_session, test_user)
     session_id = await _make_session(db_session, test_user.id)
     proposal_id = await _make_notify_proposal(db_session, session_id)
 
-    async def failing_resume(*args: object, **kwargs: object) -> object:
-        raise hitl_module.HitlResumeError("执行器暂时不可用")
+    async def failing_execution(**kwargs: object) -> object:
+        raise HitlResumeError("执行器暂时不可用")
 
-    import app.api.v1.hitl as hitl_api
+    monkeypatch.setattr("app.agent.hitl_executor.execute_approved_proposal", failing_execution)
 
-    original = hitl_api.resume_proposal
-    hitl_api.resume_proposal = failing_resume  # type: ignore[assignment]
-    try:
-        response = await client.post(
-            f"/api/v1/hitl/proposals/{proposal_id}/decide",
-            json={"approve": True},
-            headers=auth_headers,
-        )
-    finally:
-        hitl_api.resume_proposal = original  # type: ignore[assignment]
+    response = await client.post(
+        f"/api/v1/hitl/proposals/{proposal_id}/decide",
+        json={"approve": True},
+        headers=auth_headers,
+    )
+    await hitl_execution_queue.drain()
 
-    assert response.status_code == 200, response.text
-    payload = response.json()["data"]
+    assert response.status_code == 202, response.text
+    after = await client.get(f"/api/v1/hitl/proposals/{proposal_id}", headers=auth_headers)
+    payload = after.json()["data"]
     assert payload["status"] == "APPROVED", "审批确实成功了，状态必须如实反映"
-    assert payload["execution_error"] == "执行器暂时不可用"
+    assert payload["execution_state"] is None
 
     # 审批的审计照常写入——执行失败不该抹掉「有人批准过」这个事实
     approved = await _audit_rows(db_session, "hitl_approved")

@@ -41,9 +41,15 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
-/** PENDING、EXECUTING 之外的状态都算落定（空状态按 PENDING 处理） */
-function isSettled(status: string): boolean {
-  const normalized = status.trim().toUpperCase()
+/** PENDING、EXECUTING，以及仍在排队/执行的请求都不算落定 */
+function isSettled(proposal: HitlProposal): boolean {
+  if (
+    proposal.execution_state === "queued" ||
+    proposal.execution_state === "running"
+  ) {
+    return false
+  }
+  const normalized = proposal.status.trim().toUpperCase()
   return normalized !== "" && normalized !== "PENDING" && normalized !== "EXECUTING"
 }
 
@@ -83,7 +89,7 @@ export async function pollHitlProposalUntilSettled(
     if (signal.aborted) return latest
     latest = fetched
     onUpdate?.(fetched)
-    if (isSettled(fetched.status)) return fetched
+    if (isSettled(fetched)) return fetched
   }
 }
 

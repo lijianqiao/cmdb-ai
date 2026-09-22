@@ -23,6 +23,7 @@ from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.hitl_executor import hitl_execution_queue
 from app.agent.hitl_gate import HitlGateHook, dispatch_through_hitl_gate
 from app.agent.loop import ToolResult
 from app.agent.tool_dispatch import build_root_tool_dispatcher, build_tool_dispatcher
@@ -312,9 +313,11 @@ async def test_unclassified_command_creates_pending_proposal_visible_via_hitl_ap
             json={"approve": True},
             headers=auth_headers,
         )
-    assert decide_response.status_code == 200, decide_response.text
-    assert decide_response.json()["data"]["status"] == "EXECUTED"
-    assert "approved device output" in decide_response.text or "EXECUTED" in decide_response.text
+        await hitl_execution_queue.drain()
+    assert decide_response.status_code == 202, decide_response.text
+    after = await client.get(f"/api/v1/hitl/proposals/{proposal_id}", headers=auth_headers)
+    assert after.json()["data"]["status"] == "EXECUTED"
+    assert "approved device output" in after.text
 
 
 async def test_dynamic_credential_requires_password_even_when_whitelisted(
@@ -370,8 +373,10 @@ async def test_dynamic_credential_requires_password_even_when_whitelisted(
             json={"approve": True, "dynamic_credential_password": "one-time-pass"},
             headers=auth_headers,
         )
-    assert with_password.status_code == 200, with_password.text
-    assert with_password.json()["data"]["status"] == "EXECUTED"
+        await hitl_execution_queue.drain()
+    assert with_password.status_code == 202, with_password.text
+    after = await client.get(f"/api/v1/hitl/proposals/{proposal_id}", headers=auth_headers)
+    assert after.json()["data"]["status"] == "EXECUTED"
 
 
 async def test_response_bodies_never_contain_plaintext_or_ciphertext_password(
@@ -454,7 +459,12 @@ async def test_response_bodies_never_contain_plaintext_or_ciphertext_password(
             json={"approve": True},
             headers=auth_headers,
         )
+        await hitl_execution_queue.drain()
     http_bodies.append(decide_static.text)
+    executed_static = await client.get(
+        f"/api/v1/hitl/proposals/{unclassified_id}", headers=auth_headers
+    )
+    http_bodies.append(executed_static.text)
 
     dynamic_result = await _dispatch_gated(db_session, session_id, test_user.id,
         "query_device_command",
@@ -474,7 +484,12 @@ async def test_response_bodies_never_contain_plaintext_or_ciphertext_password(
             json={"approve": True, "dynamic_credential_password": known_password},
             headers=auth_headers,
         )
+        await hitl_execution_queue.drain()
     http_bodies.append(decide_dynamic.text)
+    executed_dynamic = await client.get(
+        f"/api/v1/hitl/proposals/{dynamic_id}", headers=auth_headers
+    )
+    http_bodies.append(executed_dynamic.text)
 
     for body in http_bodies:
         assert known_password not in body
@@ -645,11 +660,14 @@ async def test_unclassified_port_enable_creates_pending_and_requires_interface_n
             json={"approve": True},
             headers=auth_headers,
         )
-    assert decide_response.status_code == 200, decide_response.text
-    assert decide_response.json()["data"]["status"] == "EXECUTED"
-    assert "port enabled" in decide_response.text or "EXECUTED" in decide_response.text
+        await hitl_execution_queue.drain()
+    assert decide_response.status_code == 202, decide_response.text
+    after = await client.get(f"/api/v1/hitl/proposals/{proposal_id}", headers=auth_headers)
+    assert after.json()["data"]["status"] == "EXECUTED"
+    assert "port enabled" in after.text
     fake_connection.send_config_set.assert_called_once()
     assert "static-pass" not in decide_response.text
+    assert "static-pass" not in after.text
 
 
 async def test_create_asset_type_scope_policy_for_reboot_is_rejected_via_api(
@@ -727,7 +745,10 @@ async def test_dynamic_credential_reboot_still_forces_manual_approval_even_when_
             json={"approve": True, "dynamic_credential_password": "one-time-pass"},
             headers=auth_headers,
         )
-    assert with_password.status_code == 200, with_password.text
-    assert with_password.json()["data"]["status"] == "UNKNOWN"
+        await hitl_execution_queue.drain()
+    assert with_password.status_code == 202, with_password.text
+    after = await client.get(f"/api/v1/hitl/proposals/{proposal_id}", headers=auth_headers)
+    assert after.json()["data"]["status"] == "UNKNOWN"
     assert fake_connection.send_command_timing.call_count == 2
     assert "one-time-pass" not in with_password.text
+    assert "one-time-pass" not in after.text

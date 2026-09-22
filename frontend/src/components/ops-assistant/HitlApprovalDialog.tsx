@@ -32,6 +32,7 @@ import { DynamicPasswordInput } from "@/components/ops-assistant/DynamicPassword
 import {
   canSubmitApproval,
   canSubmitRetry,
+  describeHitlOutcome,
   isRetryAvailable,
   isUnknownResolutionAvailable,
   needsDynamicCredentialPassword,
@@ -121,7 +122,12 @@ export function HitlApprovalDialog({
   )
 
   const lastError = propLastError ?? readLastError(detail?.action_payload)
-  const retryAvailable = isRetryAvailable(canApprove, effectiveStatus)
+  const executionState = detail?.execution_state ?? null
+  const retryAvailable = isRetryAvailable(
+    canApprove,
+    effectiveStatus,
+    executionState,
+  )
   const unknownResolutionAvailable = isUnknownResolutionAvailable(
     canApprove,
     effectiveStatus,
@@ -202,18 +208,8 @@ export function HitlApprovalDialog({
         }
         const updated = await decideHitlProposal(proposalId, body)
         setInnerDetail(updated)
-        if (updated.execution_error) {
-          // 审批本身成功了，失败的是执行——说清楚是哪一步，并提示可重试，
-          // 否则用户会以为要重新批准一次（而那只会拿到状态冲突）。
-          toast.warning(`已批准，但执行未启动：${updated.execution_error}。可重试执行`)
-        } else if (
-          updated.status.trim().toUpperCase() === "APPROVED" &&
-          !updated.executed_at
-        ) {
-          toast.success("已批准但未执行")
-        } else {
-          toast.success("审批完成，正在执行...")
-        }
+        const notice = describeHitlOutcome(updated, "审批完成")
+        toast[notice.level](notice.message)
       } catch (error: unknown) {
         toast.error(readErrorMessage(error, "批准失败"))
         // 真正的失败也要把最新状态拉回来：审批可能已经落库（部分成功），
@@ -282,7 +278,7 @@ export function HitlApprovalDialog({
           <DialogHeader>
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant={isPending ? "default" : "secondary"}>
-                {statusLabel(status)}
+                {statusLabel(effectiveStatus, executionState)}
               </Badge>
               {displayActionType ? (
                 <Badge variant="outline">{displayActionType}</Badge>

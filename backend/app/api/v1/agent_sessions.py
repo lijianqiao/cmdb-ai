@@ -45,6 +45,7 @@ from app.agent.device_result_summary import (
     SummaryInProgressError,
     deliver_device_query_summary,
 )
+from app.agent.hitl_executor import hitl_execution_queue
 from app.agent.loop import LoopOutcome
 from app.agent.permissions import AUTO_EXECUTE, CMDB_READ
 from app.agent.session import append_user_message
@@ -53,6 +54,7 @@ from app.agent.turn_registry import turn_registry
 from app.agent.ws_hub import BufferedWsHitlEventPublisher, hub
 from app.core.database import get_db
 from app.core.deps import require_permission
+from app.crud import hitl_execution_request as execution_request_crud
 from app.crud.agent_message import agent_message_crud
 from app.crud.agent_registry import agent_registry_crud
 from app.crud.agent_session import agent_session_crud
@@ -121,6 +123,7 @@ async def _owned_session_or_404(
 def _safe_proposal_response(
     proposal: HitlProposal,
     full_result_proposal_ids: set[int],
+    execution_state: str | None,
 ) -> HitlProposalSafeResponse:
     """从白名单字段组装 HITL 安全摘要，避免泄露 action_payload。"""
     payload = proposal.action_payload if isinstance(proposal.action_payload, dict) else {}
@@ -132,6 +135,11 @@ def _safe_proposal_response(
     reason = raw_reason if isinstance(raw_reason, str) else ""
     raw_result_excerpt = payload.get("last_result_excerpt")
     result_excerpt = raw_result_excerpt if isinstance(raw_result_excerpt, str) else None
+    ticket = hitl_execution_queue.active(proposal.id)
+    visible_state = cast(
+        Literal["queued", "running", "awaiting_credential"] | None,
+        ticket.state if ticket is not None else execution_state,
+    )
     return HitlProposalSafeResponse(
         proposal_id=proposal.id,
         action_type=proposal.action_type,
@@ -144,6 +152,7 @@ def _safe_proposal_response(
         resolved_at=proposal.resolved_at,
         result_excerpt=result_excerpt,
         has_full_result=proposal.id in full_result_proposal_ids,
+        execution_state=visible_state,
     )
 
 
@@ -167,12 +176,16 @@ def _snapshot_response(
     has_more: bool,
     next_before: int | None,
     full_result_proposal_ids: set[int],
+    execution_states: dict[int, str],
 ) -> AgentSessionSnapshotResponse:
     """组装会话快照响应。"""
     return AgentSessionSnapshotResponse(
         messages=[AgentMessageResponse.model_validate(item) for item in messages],
         proposals=[
-            _safe_proposal_response(item, full_result_proposal_ids) for item in proposals
+            _safe_proposal_response(
+                item, full_result_proposal_ids, execution_states.get(item.id)
+            )
+            for item in proposals
         ],
         children=[_safe_child_response(item) for item in children],
         has_more_messages=has_more,
@@ -552,6 +565,10 @@ async def get_session_snapshot(
         db, [proposal.id for proposal in proposals]
     )
     children = await agent_registry_crud.list_snapshot_for_session(db, session_id)
+    open_requests = await execution_request_crud.open_requests_for(
+        db, [proposal.id for proposal in proposals]
+    )
+    execution_states = {proposal_id: row.status for proposal_id, row in open_requests.items()}
     next_before = messages[0].id if has_more and messages else None
     return success_response(
         _snapshot_response(
@@ -561,6 +578,7 @@ async def get_session_snapshot(
             has_more,
             next_before,
             full_result_proposal_ids,
+            execution_states,
         )
     )
 

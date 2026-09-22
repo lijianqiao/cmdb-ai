@@ -6,7 +6,18 @@ import type { HitlProposal } from "@/lib/hitl-api"
 /**
  * 转换 HITL 审批状态显示文案
  */
-export function statusLabel(status: string): string {
+export function statusLabel(
+  status: string,
+  executionState?: string | null,
+): string {
+  if (executionState === "queued") return "已批准，排队执行"
+  if (executionState === "running") return "正在后台执行"
+  if (
+    executionState === "awaiting_credential" &&
+    status.trim().toUpperCase() === "APPROVED"
+  ) {
+    return "等待重新输入密码"
+  }
   switch (status.trim().toUpperCase()) {
     case "PENDING":
       return "等待审批"
@@ -107,6 +118,18 @@ export function describeHitlOutcome(
         message: "执行结果不确定：命令可能已在设备上生效，请人工核实后处置",
       }
     case "APPROVED": {
+      if (
+        proposal.execution_state === "queued" ||
+        proposal.execution_state === "running"
+      ) {
+        return { level: "info", message: "已批准，正在后台执行" }
+      }
+      if (proposal.execution_state === "awaiting_credential") {
+        return {
+          level: "warning",
+          message: "已批准，需要重新输入动态密码后才能执行",
+        }
+      }
       const reason =
         proposal.execution_error || readLastError(proposal.action_payload)
       return {
@@ -213,8 +236,11 @@ export function canSubmitApproval(state: HitlSubmitState): boolean {
  */
 export function canSubmitRetry(state: HitlSubmitState): boolean {
   return (
-    isRetryAvailable(state.canApprove, state.status) &&
-    passesSubmitPreconditions(state)
+    isRetryAvailable(
+      state.canApprove,
+      state.status,
+      state.detail?.execution_state,
+    ) && passesSubmitPreconditions(state)
   )
 }
 
@@ -228,10 +254,23 @@ export function readLastError(
   return typeof value === "string" && value.trim() ? value : null
 }
 
+export function isExecutionInProgress(
+  executionState?: string | null,
+): boolean {
+  return executionState === "queued" || executionState === "running"
+}
+
 /**
- * 是否展示「重试执行」操作（仅 APPROVED 且有审批权限）
+ * 是否展示「重试执行」操作（仅 APPROVED、有审批权限，且当前没有在排队或执行）
+ *
+ * awaiting_credential 也允许重试：那是进程重启后动态密码丢了，必须由人重新输入。
  */
-export function isRetryAvailable(canApprove: boolean, status: string): boolean {
+export function isRetryAvailable(
+  canApprove: boolean,
+  status: string,
+  executionState?: string | null,
+): boolean {
+  if (isExecutionInProgress(executionState)) return false
   return canApprove && status.trim().toUpperCase() === "APPROVED"
 }
 

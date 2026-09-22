@@ -48,6 +48,7 @@ import {
   canSubmitApproval,
   canSubmitRetry,
   describeHitlOutcome,
+  isExecutionInProgress,
   isOutcomeUnknownError,
   isRetryAvailable,
   isUnknownResolutionAvailable,
@@ -71,6 +72,8 @@ export interface HitlApprovalCardProps {
   /** WS 安全摘要可能携带的执行结果片段（无审批权限时展示用） */
   resultExcerpt?: string | null
   hasFullResult: boolean
+  /** 快照带来的执行状态；详情返回后以详情为准 */
+  executionState?: "queued" | "running" | "awaiting_credential" | null
   className?: string
 }
 
@@ -83,6 +86,7 @@ export function HitlApprovalCard({
   assetId,
   resultExcerpt,
   hasFullResult,
+  executionState: executionStateProp = null,
   className,
 }: HitlApprovalCardProps) {
   const { hasPermission } = usePermission()
@@ -126,7 +130,12 @@ export function HitlApprovalCard({
   )
 
   const lastError = readLastError(detail?.action_payload)
-  const retryAvailable = isRetryAvailable(canApprove, displayStatus)
+  const executionState = detail?.execution_state ?? executionStateProp
+  const retryAvailable = isRetryAvailable(
+    canApprove,
+    displayStatus,
+    executionState,
+  )
   const unknownResolutionAvailable = isUnknownResolutionAvailable(
     canApprove,
     displayStatus,
@@ -235,6 +244,9 @@ export function HitlApprovalCard({
       setLocalStatus(updated.status)
       const notice = describeHitlOutcome(updated, "审批完成")
       toast[notice.level](notice.message)
+      if (isExecutionInProgress(updated.execution_state)) {
+        void reconcileOutcome("审批完成")
+      }
     } catch (error: unknown) {
       if (isOutcomeUnknownError(error)) {
         await reconcileOutcome("审批完成")
@@ -279,6 +291,9 @@ export function HitlApprovalCard({
       setLocalStatus(updated.status)
       const notice = describeHitlOutcome(updated, "重试执行成功")
       toast[notice.level](notice.message)
+      if (isExecutionInProgress(updated.execution_state)) {
+        void reconcileOutcome("重试执行成功")
+      }
     } catch (error: unknown) {
       if (isOutcomeUnknownError(error)) {
         await reconcileOutcome("重试执行成功")
@@ -384,7 +399,7 @@ export function HitlApprovalCard({
               <Shield02Icon className="size-4 text-primary" />
               <CardTitle className="text-base font-semibold">人工审批</CardTitle>
               <Badge variant={isPending ? "default" : "secondary"}>
-                {statusLabel(displayStatus)}
+                {statusLabel(displayStatus, executionState)}
               </Badge>
               {displayActionType ? (
                 <Badge variant="outline">{displayActionType}</Badge>

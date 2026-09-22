@@ -40,6 +40,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from app.agent.hitl_executor import hitl_execution_queue  # noqa: E402
 from app.core.database import get_db  # noqa: E402
 from app.core.security import hash_password  # noqa: E402
 from app.main import app  # noqa: E402
@@ -63,6 +64,13 @@ async def reset_rate_limiters() -> AsyncIterator[None]:
     yield
     await login_rate_limiter.reset()
     await registration_rate_limiter.reset()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _cancel_leftover_hitl_executions() -> AsyncIterator[None]:
+    """审批后的执行在后台任务里跑；测试没等它结束时在这里收掉，免得串到下一个测试的库。"""
+    yield
+    await hitl_execution_queue.shutdown()
 
 
 @pytest_asyncio.fixture

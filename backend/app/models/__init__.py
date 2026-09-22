@@ -12,6 +12,7 @@ from app.models.base import Base
 from app.models.cmdb_asset import CmdbAsset
 from app.models.cmdb_asset_dependency import CmdbAssetDependency
 from app.models.device_command_policy import DeviceCommandPolicy
+from app.models.hitl_execution_request import HitlExecutionRequest
 from app.models.hitl_execution_result import HitlExecutionResult
 from app.models.hitl_proposal import HitlProposal
 from app.models.knowledge_category import KnowledgeCategory
@@ -36,6 +37,7 @@ __all__ = [
     "CmdbAsset",
     "CmdbAssetDependency",
     "DeviceCommandPolicy",
+    "HitlExecutionRequest",
     "HitlExecutionResult",
     "HitlProposal",
     "KnowledgeCategory",

@@ -99,6 +99,8 @@ class HitlProposalSafeResponse(ApiModel):
     resolved_at: datetime | None
     result_excerpt: str | None = None
     has_full_result: bool = False
+    # 后台执行状态：刷新后卡片据此知道还在排队/执行，或要重新输入动态密码
+    execution_state: Literal["queued", "running", "awaiting_credential"] | None = None
 
 
 class DeviceQueryResultResponse(ApiModel):

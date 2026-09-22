@@ -6,7 +6,8 @@
    只往一个共享 `events` 列表里追加事件的假实现，这样测试完全不碰真实数据库
    或网络连接，只验证 `lifespan()` 本身的编排顺序。
 2. 进入并退出 `lifespan(app)`，断言：
-   - 启动对账（reconcile）发生在 `yield`（也就是应用真正对外服务）之前；
+   - 启动对账（遗留 EXECUTING 先标成 UNKNOWN，再恢复还没开始的执行请求）发生在
+     `yield`（也就是应用真正对外服务）之前；
    - 三个后台循环的取消发生在 `spawn_manager.shutdown()` 之前；
    - `spawn_manager.shutdown()` 发生在 `engine.dispose()` 之前。
 3. 用一个包装过的 `asyncio.create_task` 记录 `lifespan` 内部实际创建的每个
@@ -65,6 +66,9 @@ async def test_lifespan_orders_reconcile_background_tasks_and_shutdown(
 
     async def fake_hitl_reconcile(_session_factory: object) -> None:
         events.append("hitl-reconcile")
+
+    async def fake_recover_execution_requests(_session_factory: object) -> None:
+        events.append("hitl-execution-recover")
 
     async def fake_recover_turns(_db: object) -> None:
         events.append("recover-turns")
@@ -129,6 +133,9 @@ async def test_lifespan_orders_reconcile_background_tasks_and_shutdown(
     monkeypatch.setattr(main_module, "run_session_cleanup_loop", fake_cleanup_loop)
     monkeypatch.setattr(main_module, "validate_single_worker_environment", fake_validate_workers)
     monkeypatch.setattr(main_module, "reconcile_executing_proposals", fake_hitl_reconcile)
+    monkeypatch.setattr(
+        main_module, "recover_persisted_execution_requests", fake_recover_execution_requests
+    )
     monkeypatch.setattr(main_module, "AsyncSessionLocal", _FakeSessionContext)
     monkeypatch.setattr(main_module.agent_session_crud, "recover_active_turns", fake_recover_turns)
     monkeypatch.setattr(main_module.spawn_manager, "reconcile_startup", fake_reconcile)
@@ -150,7 +157,8 @@ async def test_lifespan_orders_reconcile_background_tasks_and_shutdown(
             )
 
     assert events.index("validate-workers") < events.index("hitl-reconcile")
-    assert events.index("hitl-reconcile") < events.index("recover-turns")
+    assert events.index("hitl-reconcile") < events.index("hitl-execution-recover")
+    assert events.index("hitl-execution-recover") < events.index("recover-turns")
     assert events.index("recover-turns") < events.index("reconcile")
     assert events.index("reconcile") < events.index("yielded")
     assert events.index("gc-cancelled") < events.index("spawn-shutdown")

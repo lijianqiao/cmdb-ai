@@ -261,6 +261,9 @@ describe("HitlApprovalCard 重试与失败文案（纯函数）", () => {
     expect(isRetryAvailable(false, "APPROVED")).toBe(false)
     expect(isRetryAvailable(true, "PENDING")).toBe(false)
     expect(isRetryAvailable(true, "EXECUTED")).toBe(false)
+    expect(isRetryAvailable(true, "APPROVED", "queued")).toBe(false)
+    expect(isRetryAvailable(true, "APPROVED", "running")).toBe(false)
+    expect(isRetryAvailable(true, "APPROVED", "awaiting_credential")).toBe(true)
   })
 
   it("EXECUTING 有中文状态名", () => {
@@ -284,7 +287,24 @@ describe("HitlApprovalCard 重试与失败文案（纯函数）", () => {
       message: done,
     })
     expect(describeHitlOutcome(buildProposal({ status: "UNKNOWN" }), done).level).toBe("warning")
-    expect(describeHitlOutcome(buildProposal({ status: "APPROVED" }), done).level).toBe("warning")
+    expect(describeHitlOutcome(buildProposal({ status: "APPROVED" }), done).level).toBe(
+      "warning",
+    )
+    expect(
+      describeHitlOutcome(
+        buildProposal({ status: "APPROVED", execution_state: "queued" }),
+        done,
+      ).message,
+    ).toBe("已批准，正在后台执行")
+    expect(
+      describeHitlOutcome(
+        buildProposal({
+          status: "APPROVED",
+          execution_state: "awaiting_credential",
+        }),
+        done,
+      ).message,
+    ).toContain("重新输入动态密码")
     expect(describeHitlOutcome(buildProposal({ status: "EXECUTING" }), done).level).toBe("info")
     expect(describeHitlOutcome(buildProposal({ status: "REJECTED" }), done).level).toBe("info")
     expect(describeHitlOutcome(buildProposal({ status: "PENDING" }), done).level).toBe("warning")

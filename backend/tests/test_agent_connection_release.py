@@ -42,12 +42,12 @@ from app.agent.compaction import ensure_root_compaction
 from app.agent.device_result_summary import deliver_device_query_summary
 from app.agent.executors import ExecutionResult
 from app.agent.hitl_execution import execute_approved_proposal
+from app.agent.hitl_executor import deliver_executed_query_summary
 from app.agent.loop import ToolResult, run_loop
 from app.agent.session import append_user_message
 from app.agent.spawn import SpawnManager
 from app.agent.tool_dispatch import build_tool_dispatcher
 from app.agent.ws_hub import AgentWsHub
-from app.api.v1 import hitl as hitl_api
 from app.core import llm as llm_module
 from app.core.database import get_db
 from app.core.llm import ChatMessage, ChatResult, EmbeddingResult, ToolCall
@@ -525,10 +525,10 @@ async def test_device_result_summary_holds_no_connection_while_model_runs(
     assert pooled_db.checked_out() == 0
 
 
-async def test_approval_summary_delivery_releases_request_connection(
+async def test_approval_summary_delivery_holds_no_connection_while_model_runs(
     pooled_db: PooledDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """人工批准后同步生成总结：审批请求自己的会话也不能在等总结模型时占着连接。"""
+    """人工批准后由后台任务交付总结：查提案、生成总结都不能在等总结模型时占着连接。"""
     proposal_id = await _executed_device_query(pooled_db, status="EXECUTED")
     at_model: list[int] = []
 
@@ -540,10 +540,7 @@ async def test_approval_summary_delivery_releases_request_connection(
         return _final("设备型号 C9300，版本 17.9。可在审批卡片查看原文。")
 
     monkeypatch.setattr(device_result_summary_module, "chat", fake_summary_chat)
-    async with pooled_db.session_factory() as request_db:
-        delivery = await hitl_api._deliver_executed_query_summary(
-            request_db, proposal_id=proposal_id
-        )
+    delivery = await deliver_executed_query_summary(pooled_db.session_factory, proposal_id)
 
     assert delivery is not None and delivery.created_message
     assert at_model == [0]

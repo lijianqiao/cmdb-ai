@@ -81,6 +81,8 @@ export type OpsChatItem =
       resultExcerpt: string | null
       /** 服务端是否保存了可按需读取的完整结果 */
       hasFullResult: boolean
+      /** 快照里的后台执行状态。详情加载前先用它，避免把正在执行显示成可重试 */
+      executionState?: "queued" | "running" | "awaiting_credential" | null
       createdAt?: string
     }
   | {
@@ -219,6 +221,7 @@ function mapProposalToItem(
     assetId: proposal.asset_id,
     resultExcerpt: proposal.result_excerpt,
     hasFullResult: proposal.has_full_result,
+    executionState: proposal.execution_state ?? null,
     createdAt: proposal.created_at,
   }
 }

@@ -146,6 +146,10 @@ class Settings(BaseSettings):
     # 同一会话连发，挡不住一个人开很多会话、很多人同时提问。
     AGENT_MAX_CONCURRENT_TURNS: int = Field(default=10, ge=1)
     AGENT_MAX_CONCURRENT_TURNS_PER_USER: int = Field(default=3, ge=1)
+    # 人工批准 / 重试后的后台执行队列（进程内）：同时执行数与排队数上限。
+    # 排不进队时在提交审批之前就拒绝，审批不会生效。
+    HITL_EXECUTION_MAX_RUNNING: int = Field(default=4, ge=1)
+    HITL_EXECUTION_MAX_QUEUED: int = Field(default=16, ge=0)
     # refresh 会话历史清理的轮询间隔（后台循环，见 services/session_cleanup.py）
     SESSION_CLEANUP_INTERVAL_SECONDS: float = Field(default=3600.0, ge=60, le=86_400)
     AGENT_TERMINAL_RECEIPT_TTL_SECONDS: float = Field(

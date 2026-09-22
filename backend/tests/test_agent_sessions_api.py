@@ -726,6 +726,7 @@ async def test_snapshot_returns_safe_recoverable_state(
         "resolved_at",
         "result_excerpt",
         "has_full_result",
+        "execution_state",
     }
     assert data["proposals"][0]["reason"] == "需要巡检"
     assert data["proposals"][0]["asset_id"] == 42

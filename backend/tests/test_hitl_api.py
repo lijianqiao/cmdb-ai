@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.agent import device_result_summary
 from app.agent.hitl import propose_action
+from app.agent.hitl_executor import hitl_execution_queue
 from app.agent.hitl_gate import HitlGateHook, dispatch_through_hitl_gate
 from app.agent.tool_dispatch import build_root_tool_dispatcher
 from app.core.cmdb_credential import encrypt_credential_password
@@ -178,6 +179,20 @@ async def _root_assistant_messages(
     return list(rows.all())
 
 
+async def _proposal_after_execution(
+    client: AsyncClient, proposal_id: int, headers: Headers
+) -> dict[str, Any]:
+    """读执行结束后的提案：批准/重试只返回 202，执行在后台任务里，先 drain 再读。
+
+    用 patch 模拟设备的测试要在 patch 生效期间自己 drain，这里的 drain 就是空操作。
+    """
+    await hitl_execution_queue.drain()
+    response = await client.get(f"/api/v1/hitl/proposals/{proposal_id}", headers=headers)
+    assert response.status_code == 200, response.text
+    data: dict[str, Any] = response.json()["data"]
+    return data
+
+
 def _hitl_gate(
     db_engine: AsyncEngine,
     *,
@@ -269,15 +284,11 @@ async def test_approve_notify_executes_and_writes_audit(
         json={"approve": True},
         headers=auth_headers,
     )
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["status"] == "EXECUTED"
+    assert response.status_code == 202, response.text
+    assert response.json()["data"]["status"] == "APPROVED"
 
-    get_response = await client.get(
-        f"/api/v1/hitl/proposals/{proposal_id}",
-        headers=auth_headers,
-    )
-    assert get_response.status_code == 200, get_response.text
-    assert get_response.json()["data"]["status"] == "EXECUTED"
+    executed = await _proposal_after_execution(client, proposal_id, auth_headers)
+    assert executed["status"] == "EXECUTED"
 
     db_session.expire_all()
     actions = {
@@ -349,10 +360,13 @@ async def test_approve_device_control_stays_approved_second_decide_conflicts(
             json={"approve": True},
             headers=auth_headers,
         )
-    assert first.status_code == 200, first.text
+        await hitl_execution_queue.drain()
+    assert first.status_code == 202, first.text
+    after = await _proposal_after_execution(client, proposal_id, auth_headers)
     # 连接没建起来 = 命令确定未下发：回退到可重试的 APPROVED，而不是 UNKNOWN。
-    assert first.json()["data"]["status"] == "APPROVED"
-    assert first.json()["data"]["status_reason"] == "dispatch_failed_before_send"
+    assert after["status"] == "APPROVED"
+    assert after["status_reason"] == "dispatch_failed_before_send"
+    assert after["execution_state"] is None
 
     second = await client.post(
         f"/api/v1/hitl/proposals/{proposal_id}/decide",
@@ -370,7 +384,7 @@ async def test_reject_does_not_resume(
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """拒绝提案只更新状态，不应调用 resume。"""
+    """拒绝提案只更新状态，不排进后台执行。"""
     await _grant_hitl_approve(db_session, test_user)
     _, proposal_id = await _make_pending_proposal(
         db_session,
@@ -380,15 +394,6 @@ async def test_reject_does_not_resume(
         reason="误报",
     )
 
-    resume_mock = AsyncMock()
-    summary_delivery = AsyncMock()
-    monkeypatch.setattr("app.api.v1.hitl.resume_proposal", resume_mock)
-    monkeypatch.setattr(
-        "app.api.v1.hitl.deliver_device_query_summary",
-        summary_delivery,
-        raising=False,
-    )
-
     response = await client.post(
         f"/api/v1/hitl/proposals/{proposal_id}/decide",
         json={"approve": False},
@@ -396,13 +401,13 @@ async def test_reject_does_not_resume(
     )
     assert response.status_code == 200, response.text
     assert response.json()["data"]["status"] == "REJECTED"
-    resume_mock.assert_not_awaited()
+    assert response.json()["data"]["execution_state"] is None
+    assert hitl_execution_queue.active(proposal_id) is None
 
     db_session.expire_all()
     proposal = await hitl_proposal_crud.get(db_session, proposal_id)
     assert proposal is not None
     assert proposal.status == "REJECTED"
-    summary_delivery.assert_not_awaited()
 
 
 async def test_decide_device_query_requires_password_for_dynamic_credential(
@@ -470,9 +475,10 @@ async def test_decide_passes_dynamic_password_to_device_verbatim(
             json={"approve": True, "dynamic_credential_password": password},
             headers=auth_headers,
         )
+        await hitl_execution_queue.drain()
 
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["status"] == "EXECUTED"
+    assert response.status_code == 202, response.text
+    assert (await _proposal_after_execution(client, proposal_id, auth_headers))["status"] == "EXECUTED"
     assert open_connection.call_args.kwargs["password"] == password
 
 
@@ -552,9 +558,10 @@ async def test_decide_device_query_with_password_executes(
             json={"approve": True, "dynamic_credential_password": one_time_password},
             headers=auth_headers,
         )
+        await hitl_execution_queue.drain()
 
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["status"] == "EXECUTED"
+    assert response.status_code == 202, response.text
+    assert (await _proposal_after_execution(client, proposal_id, auth_headers))["status"] == "EXECUTED"
     db_session.expire_all()
     result_row = await hitl_execution_result_crud.get_by_proposal(db_session, proposal_id)
     assert result_row is not None
@@ -604,7 +611,7 @@ async def test_assistant_broadcast_failure_keeps_executed_query_and_summary(
     monkeypatch.setattr(device_result_summary, "chat", fake_chat)
     monkeypatch.setattr("app.agent.ws_hub.hub.broadcast", fail_assistant_broadcast)
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
-    caplog.set_level(logging.WARNING, logger="app.api.v1.hitl")
+    caplog.set_level(logging.WARNING, logger="app.agent.hitl_executor")
     await _grant_hitl_approve(db_session, test_user)
     session_id, proposal_id = await _make_pending_device_query_proposal(
         db_session,
@@ -619,9 +626,10 @@ async def test_assistant_broadcast_failure_keeps_executed_query_and_summary(
             json={"approve": True, "dynamic_credential_password": "temporary-secret"},
             headers=auth_headers,
         )
+        await hitl_execution_queue.drain()
 
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["status"] == "EXECUTED"
+    assert response.status_code == 202, response.text
+    assert (await _proposal_after_execution(client, proposal_id, auth_headers))["status"] == "EXECUTED"
     assert event_order == ["hitl_resolved", "assistant_delta"]
     db_session.expire_all()
     result_row = await hitl_execution_result_crud.get_by_proposal(db_session, proposal_id)
@@ -630,7 +638,9 @@ async def test_assistant_broadcast_failure_keeps_executed_query_and_summary(
     messages = await _root_assistant_messages(db_session, session_id=session_id)
     assert [message.content for message in messages] == [fixed_summary]
     route_warnings = [
-        record.getMessage() for record in caplog.records if record.name == "app.api.v1.hitl"
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "app.agent.hitl_executor"
     ]
     assert route_warnings == [
         f"设备查询总结广播失败 proposal_id={proposal_id} exc_type=RuntimeError"
@@ -661,12 +671,11 @@ async def test_summary_delivery_failure_keeps_executed_query_successful(
 
     monkeypatch.setattr(device_result_summary, "chat", fake_chat)
     monkeypatch.setattr(
-        "app.api.v1.hitl.deliver_device_query_summary",
+        "app.agent.hitl_executor.deliver_device_query_summary",
         fail_delivery,
-        raising=False,
     )
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
-    caplog.set_level(logging.WARNING, logger="app.api.v1.hitl")
+    caplog.set_level(logging.WARNING, logger="app.agent.hitl_executor")
     await _grant_hitl_approve(db_session, test_user)
     _, proposal_id = await _make_pending_device_query_proposal(
         db_session,
@@ -681,16 +690,19 @@ async def test_summary_delivery_failure_keeps_executed_query_successful(
             json={"approve": True, "dynamic_credential_password": "ephemeral-password"},
             headers=auth_headers,
         )
+        await hitl_execution_queue.drain()
 
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["status"] == "EXECUTED"
+    assert response.status_code == 202, response.text
+    assert (await _proposal_after_execution(client, proposal_id, auth_headers))["status"] == "EXECUTED"
     assert calls == [proposal_id]
     db_session.expire_all()
     result_row = await hitl_execution_result_crud.get_by_proposal(db_session, proposal_id)
     assert result_row is not None
     assert result_row.content == "persist before summary"
     route_warnings = [
-        record.getMessage() for record in caplog.records if record.name == "app.api.v1.hitl"
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "app.agent.hitl_executor"
     ]
     assert route_warnings == [
         f"设备查询总结交付失败 proposal_id={proposal_id} exc_type=RuntimeError"
@@ -718,7 +730,7 @@ async def test_failed_device_query_does_not_deliver_or_broadcast_summary(
         ws_envelopes.append(message)
 
     monkeypatch.setattr(
-        "app.api.v1.hitl.deliver_device_query_summary",
+        "app.agent.hitl_executor.deliver_device_query_summary",
         summary_delivery,
     )
     monkeypatch.setattr("app.agent.ws_hub.hub.broadcast", record_broadcast)
@@ -738,10 +750,12 @@ async def test_failed_device_query_does_not_deliver_or_broadcast_summary(
             json={"approve": True},
             headers=auth_headers,
         )
+        await hitl_execution_queue.drain()
 
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["status"] == "APPROVED"
-    assert response.json()["data"]["status_reason"] == "dispatch_failed_before_send"
+    assert response.status_code == 202, response.text
+    after = await _proposal_after_execution(client, proposal_id, auth_headers)
+    assert after["status"] == "APPROVED"
+    assert after["status_reason"] == "dispatch_failed_before_send"
     summary_delivery.assert_not_awaited()
     db_session.expire_all()
     messages = await _root_assistant_messages(db_session, session_id=session_id)
@@ -759,9 +773,8 @@ async def test_approve_executed_device_control_does_not_deliver_query_summary(
     """人工批准成功的 device_control 也不得进入 device_query 总结服务。"""
     summary_delivery = AsyncMock()
     monkeypatch.setattr(
-        "app.api.v1.hitl.deliver_device_query_summary",
+        "app.agent.hitl_executor.deliver_device_query_summary",
         summary_delivery,
-        raising=False,
     )
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     await _grant_hitl_approve(db_session, test_user)
@@ -783,9 +796,10 @@ async def test_approve_executed_device_control_does_not_deliver_query_summary(
             json={"approve": True, "dynamic_credential_password": "temporary-control-password"},
             headers=auth_headers,
         )
+        await hitl_execution_queue.drain()
 
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["status"] == "EXECUTED"
+    assert response.status_code == 202, response.text
+    assert (await _proposal_after_execution(client, proposal_id, auth_headers))["status"] == "EXECUTED"
     summary_delivery.assert_not_awaited()
 
 
@@ -796,7 +810,7 @@ async def test_retry_executed_device_query_delivers_one_summary(
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """重试成功的 device_query 应同步持久化并广播唯一一条总结。"""
+    """重试成功的 device_query 在后台执行后持久化并广播唯一一条总结。"""
     fixed_summary = "重试后的固定总结"
     event_order: list[str] = []
     envelopes: list[AgentWsServerMessage] = []
@@ -833,9 +847,10 @@ async def test_retry_executed_device_query_delivers_one_summary(
             json={"dynamic_credential_password": "retry-only-password"},
             headers=auth_headers,
         )
+        await hitl_execution_queue.drain()
 
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["status"] == "EXECUTED"
+    assert response.status_code == 202, response.text
+    assert (await _proposal_after_execution(client, proposal_id, auth_headers))["status"] == "EXECUTED"
     assert event_order == ["hitl_resolved", "assistant_delta"]
     assert envelopes[-1].payload == {"text": fixed_summary, "done": True}
     db_session.expire_all()
@@ -911,9 +926,11 @@ async def test_retry_approved_device_control_executes(
             json={"approve": True},
             headers=auth_headers,
         )
-    assert failed.status_code == 200, failed.text
-    assert failed.json()["data"]["status"] == "UNKNOWN"
-    assert "last_error" in failed.json()["data"]["action_payload"]
+        await hitl_execution_queue.drain()
+    assert failed.status_code == 202, failed.text
+    unknown = await _proposal_after_execution(client, proposal_id, auth_headers)
+    assert unknown["status"] == "UNKNOWN"
+    assert "last_error" in unknown["action_payload"]
 
     authorized = await client.post(
         f"/api/v1/hitl/proposals/{proposal_id}/resolve-unknown",
@@ -931,9 +948,11 @@ async def test_retry_approved_device_control_executes(
             json={},
             headers=auth_headers,
         )
-    assert retried.status_code == 200, retried.text
-    assert retried.json()["data"]["status"] == "EXECUTED"
-    assert "last_error" not in retried.json()["data"]["action_payload"]
+        await hitl_execution_queue.drain()
+    assert retried.status_code == 202, retried.text
+    executed = await _proposal_after_execution(client, proposal_id, auth_headers)
+    assert executed["status"] == "EXECUTED"
+    assert "last_error" not in executed["action_payload"]
 
 
 async def test_retry_pending_proposal_conflicts(

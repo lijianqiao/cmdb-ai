@@ -19,6 +19,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.agent.executors import shutdown_device_executor
 from app.agent.hitl_execution import reconcile_executing_proposals
+from app.agent.hitl_executor import hitl_execution_queue, recover_persisted_execution_requests
 from app.agent.spawn import run_receipt_gc_loop, spawn_manager
 from app.agent.ws_hub import WsSpawnEventPublisher, hub
 from app.api.router import api_router
@@ -117,6 +118,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             "补齐 known_hosts 后请尽快置为 true"
         )
     await reconcile_executing_proposals(AsyncSessionLocal)
+    await recover_persisted_execution_requests(AsyncSessionLocal)
     async with AsyncSessionLocal() as recover_db:
         await agent_session_crud.recover_active_turns(recover_db)
         await recover_db.commit()
@@ -135,6 +137,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         with suppress(asyncio.CancelledError):
             await task
     await spawn_manager.shutdown()
+    # 审批后的后台执行：还在排队的不再执行（提案停在 APPROVED，可重试），执行中被打断的
+    # 由执行服务落 UNKNOWN 等人工核实——重启不会自动重跑可能已生效的写操作。
+    await hitl_execution_queue.shutdown()
     # 设备线程池不等待在跑的命令（Netmiko 线程不可取消，可能还要几十秒）。
     shutdown_device_executor()
     await close_llm_clients()

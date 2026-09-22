@@ -53,6 +53,7 @@ import { decideHitlProposal } from "@/lib/hitl-api"
 import {
   HITL_RECONCILING_MESSAGE,
   describeHitlOutcome,
+  isExecutionInProgress,
   isOutcomeUnknownError,
   readErrorMessage,
 } from "@/components/ops-assistant/hitlApprovalCardUtils"
@@ -249,7 +250,14 @@ export function OpsAssistantPage() {
       }
       const updated = await decideHitlProposal(activeHitl.proposalId, body)
       const notice = describeHitlOutcome(updated, executedMessage)
-      toast[notice.level](notice.message)
+      const toastId = toast[notice.level](notice.message)
+      if (isExecutionInProgress(updated.execution_state)) {
+        void reconcileHitl(activeHitl.proposalId).then(({ proposal, aborted }) => {
+          if (aborted) return
+          const finalNotice = describeHitlOutcome(proposal, executedMessage)
+          toast[finalNotice.level](finalNotice.message, { id: toastId })
+        })
+      }
     } catch (error: unknown) {
       if (!isOutcomeUnknownError(error)) {
         toast.error(readErrorMessage(error, "批准失败"))

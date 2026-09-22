@@ -103,6 +103,8 @@ export interface HitlProposalSafeSummary {
   asset_id: number | null
   result_excerpt: string | null
   has_full_result: boolean
+  /** 后台执行状态。刷新后用来区分「正在执行」和「可以重试」 */
+  execution_state?: "queued" | "running" | "awaiting_credential" | null
   created_at: string
   execution_started_at: string | null
   resolved_at: string | null

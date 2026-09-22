@@ -21,6 +21,10 @@ export interface HitlProposal {
   created_at: string
   result_excerpt?: string | null
   asset_credential_type?: string | null
+  /** 后台执行：queued 排队、running 执行中、awaiting_credential 需重新输入动态密码 */
+  execution_state?: "queued" | "running" | "awaiting_credential" | null
+  /** 本次后台执行请求的 ID；重复提交拿到同一个 ID，说明没有重复入队 */
+  execution_request_id?: string | null
   /** 审批成功但执行未启动时的原因。非空表示提案已 APPROVED、可直接重试 */
   execution_error?: string | null
 }

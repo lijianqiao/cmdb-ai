@@ -130,6 +130,7 @@ export function ExecutionProcessCollapsible({
                       assetId={item.assetId}
                       resultExcerpt={item.resultExcerpt}
                       hasFullResult={item.hasFullResult}
+                      executionState={item.executionState}
                     />
                   </div>
                 )

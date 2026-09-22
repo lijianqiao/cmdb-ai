@@ -24,6 +24,7 @@ from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.agent.hitl_executor import hitl_execution_queue
 from app.agent.hitl_gate import HitlGateHook, dispatch_through_hitl_gate
 from app.agent.tool_dispatch import build_root_tool_dispatcher, build_tool_dispatcher
 from app.core.cmdb_credential import encrypt_credential_password
@@ -171,8 +172,10 @@ async def test_scenario_a_notify_manual_approve_end_to_end(
         json={"approve": True},
         headers=auth_headers,
     )
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["status"] == "EXECUTED"
+    assert response.status_code == 202, response.text
+    await hitl_execution_queue.drain()
+    after = await client.get(f"/api/v1/hitl/proposals/{proposal_id}", headers=auth_headers)
+    assert after.json()["data"]["status"] == "EXECUTED"
 
     db_session.expire_all()
     actions = {
@@ -244,8 +247,8 @@ async def test_scenario_b_unclassified_device_control_forced_hitl_and_unreachabl
             json={"approve": True},
             headers=auth_headers,
         )
-    assert first.status_code == 200, first.text
-    assert first.json()["data"]["status"] == "APPROVED"
+        await hitl_execution_queue.drain()
+    assert first.status_code == 202, first.text
 
     db_session.expire_all()
     reverted = await hitl_proposal_crud.get(db_session, proposal_id)

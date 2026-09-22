@@ -74,6 +74,8 @@ class HitlProposalResponse(ApiModel):
     created_at: datetime
     result_excerpt: str | None = None
     asset_credential_type: str | None = None
-    # 审批成功但执行未启动时的原因。非 None 表示提案已 APPROVED、可直接重试，
-    # 前端据此把主操作从「批准」切换成「重试执行」而不是显示「批准失败」。
-    execution_error: str | None = None
+    # 后台执行状态：queued 排队、running 执行中、awaiting_credential 要重新输入动态密码。
+    # APPROVED 且为 None 才表示「已批准、没在执行，可以重试」。
+    execution_state: Literal["queued", "running", "awaiting_credential"] | None = None
+    # 本次后台执行请求的 ID；重复点重试拿到同一个 ID，说明没有重复入队
+    execution_request_id: str | None = None
