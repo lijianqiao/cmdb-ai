@@ -505,13 +505,14 @@ async def test_child_agent_dispatcher_rejects_query_device_command(
     assert "未知工具" in result.content
 
 
-async def test_whitelisted_reboot_executes_with_interactive_confirmation(
+async def test_whitelisted_reboot_sends_confirmation_then_awaits_manual_verification(
     db_session: AsyncSession,
     test_user: User,
     monkeypatch: pytest.MonkeyPatch,
     grant_permissions,
 ) -> None:
-    """assist 档位下白名单 + 静态凭据的交换机：device_control 一次调用当场执行 reboot。"""
+    """assist 档位下白名单 + 静态凭据的交换机：device_control 一次调用当场下发 reboot 并应答确认。
+    重启后连接会断、拿不到成功证据，结果如实落 UNKNOWN 等人工核实（R3），不报执行成功。"""
     await grant_permissions(test_user, "agent:auto_execute")
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     session_id, asset_id = await _make_session_and_switch_asset(
@@ -545,12 +546,14 @@ async def test_whitelisted_reboot_executes_with_interactive_confirmation(
             },
         )
 
-    assert tool_result.control == "ok", tool_result.content
-    assert "rebooting now" in tool_result.content
+    assert tool_result.control == "failed", tool_result.content
+    assert "人工核实" in tool_result.content
     assert "reboot-static-pass" not in tool_result.content
     # 第一次拿确认提示，第二次发应答。
     assert fake_connection.send_command_timing.call_count == 2
     fake_connection.send_command.assert_not_called()
+    proposals = await hitl_proposal_crud.list_for_session(db_session, session_id)
+    assert [proposal.status for proposal in proposals] == ["UNKNOWN"]
 
 
 async def test_blacklisted_port_disable_is_rejected_without_creating_proposal(
@@ -677,7 +680,8 @@ async def test_dynamic_credential_reboot_still_forces_manual_approval_even_when_
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """动态凭据即使白名单 reboot 也强制人工；decide 缺密码 422，补密码后执行。"""
+    """动态凭据即使白名单 reboot 也强制人工；decide 缺密码 422，补密码后下发。
+    重启发出后拿不到成功证据，结果落 UNKNOWN 等人工核实（R3），不标成已执行。"""
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     session_id, asset_id = await _make_session_and_switch_asset(
         db_session,
@@ -724,5 +728,6 @@ async def test_dynamic_credential_reboot_still_forces_manual_approval_even_when_
             headers=auth_headers,
         )
     assert with_password.status_code == 200, with_password.text
-    assert with_password.json()["data"]["status"] == "EXECUTED"
+    assert with_password.json()["data"]["status"] == "UNKNOWN"
+    assert fake_connection.send_command_timing.call_count == 2
     assert "one-time-pass" not in with_password.text

@@ -11,6 +11,14 @@
 3. VendorName 定义在这里而不是 app/schemas/cmdb.py：厂商是否有效，唯一
    权威来源就是这个目录——目录里没有任何命令给这个厂商登记模板，这个厂商
    值本身就没有意义。CmdbAsset 的 vendor 字段校验从这里导入这个类型。
+4. 「设备回了文本」不等于「命令成功」，判定规则也登记在这里（R3）：
+   - DEVICE_ERROR_PATTERNS：按厂商登记的明确报错句式（行首锚定的具体短语），
+     配置命令交给 Netmiko 的 error_pattern 逐行检查，普通命令只看输出开头几行；
+     绝不用一个宽泛的 error 正则扫整段输出——配置正文里本来就有 logging errors 之类正常内容。
+   - CONFIG_SUCCESS_MARKERS：需要明确成功回显的厂商（Junos 必须看到 commit complete）。
+   - confirmation：按顺序登记每一轮确认提示与应答；设备问了目录里没登记的问题
+     （例如「要不要保存配置」），执行器停下、不替人回答、报告不确定。
+   - verify_manually：重启/关机发出后连接会断，拿不到成功证据，结果只能交给人工核实。
 """
 
 import re
@@ -40,11 +48,50 @@ type CommandName = Literal[
 type CommandType = Literal["read_only", "state_changing"]
 type RequiresArgument = Literal["none", "interface_name"]
 
-DEVICE_COMMAND_CATALOG_VERSION = "t13-v1"
+# t14：加入按厂商的错误识别、Junos 提交成功回显、多轮确认与重启/关机的人工核实语义
+DEVICE_COMMAND_CATALOG_VERSION = "t14-v1"
 
 # 命令级正则、按厂商 CLI 语法书写；只用于 send_interactive 匹配确认提示，
 # 不接受任何运行时输入，跟 templates 一样是代码层常量。
 _INTERFACE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9/.\-]{1,64}$")
+
+# 各厂商 CLI 拒绝命令时的明确报错句式。行首锚定、只认具体短语：
+# 这些正则会被 Netmiko 以 re.M 逐条检查配置命令的回显，也会被执行器用来检查
+# 普通命令输出的开头几行（报错总是紧跟在命令回显之后）。
+_UNIX_ERROR_PATTERN = (
+    r"^(?:sudo: .*|.*: (?:command not found|Permission denied|Operation not permitted))$"
+)
+DEVICE_ERROR_PATTERNS: Mapping[VendorName, str] = {
+    "cisco_iosxe": (
+        r"^\s*%\s*(?:Invalid input|Incomplete command|Ambiguous command|Unknown command"
+        r"|Unrecognized command|(?:Command )?[Aa]uthorization failed)"
+    ),
+    "cisco_small_business": (
+        r"^\s*%\s*(?:Unrecognized command|Invalid input|Incomplete command|Ambiguous command"
+        r"|missing mandatory parameter|bad parameter value|Wrong number of parameters"
+        r"|Authorization failed)"
+    ),
+    "huawei_vrp": r"^\s*Error:",
+    "hp_comware": (
+        r"^\s*%\s*(?:Unrecognized command|Incomplete command|Wrong parameter"
+        r"|Too many parameters|Ambiguous command|Permission denied|Authorization failed)"
+    ),
+    "juniper_junos": r"^\s*(?:syntax error|unknown command|error:)",
+    "linux": _UNIX_ERROR_PATTERN,
+    "generic": _UNIX_ERROR_PATTERN,
+}
+
+# 配置命令需要看到的明确成功回显；没登记的厂商以「逐行无报错」为成功。
+CONFIG_SUCCESS_MARKERS: Mapping[VendorName, str] = {
+    "juniper_junos": r"commit complete",
+}
+
+# 重启确认提示：同一行里要提到 reboot/reload/reset，并带确认记号；
+# 含 save 的行（保存配置的询问）一律不匹配——那是另一个决定，不能替人回答。
+_REBOOT_CONFIRM_PROMPT = (
+    r"(?im)^(?!.*\bsave).*\b(?:reboot|reload|reset)\b.*"
+    r"(?:\[confirm\]|\[y/n\]|\(y/n\)|\[yes,no\])"
+)
 
 
 def validate_interface_name(value: str) -> bool:
@@ -72,8 +119,10 @@ class DeviceCommandDefinition:
     requires_argument: RequiresArgument = "none"
     # 仅 config-mode 命令（如端口开关）使用；send_configs 而非 send_command 执行。
     config_templates: Mapping[VendorName, tuple[str, ...]] | None = None
-    # 仅需要人工确认提示的 exec-mode 命令（reboot/shutdown）使用。
-    confirmation: Mapping[VendorName, CommandConfirmation] | None = None
+    # 仅需要人工确认提示的 exec-mode 命令使用：按顺序登记每一轮提示与应答。
+    confirmation: Mapping[VendorName, tuple[CommandConfirmation, ...]] | None = None
+    # 发出后拿不到成功证据（重启/关机会断开连接）：结果交给人工核实，不标成已执行。
+    verify_manually: bool = False
 
 
 class UnknownDeviceCommandError(ValueError):
@@ -163,14 +212,17 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
             "juniper_junos": "request system reboot",
         },
         confirmation={
-            "cisco_iosxe": CommandConfirmation(prompt_pattern=r"[Cc]onfirm", response="\n"),
-            "cisco_small_business": CommandConfirmation(
-                prompt_pattern=r"\([Yy]/[Nn]\)", response="y"
+            "cisco_iosxe": (CommandConfirmation(prompt_pattern=_REBOOT_CONFIRM_PROMPT, response="\n"),),
+            "cisco_small_business": (
+                CommandConfirmation(prompt_pattern=_REBOOT_CONFIRM_PROMPT, response="y"),
             ),
-            "huawei_vrp": CommandConfirmation(prompt_pattern=r"[Yy]/[Nn]", response="y"),
-            "hp_comware": CommandConfirmation(prompt_pattern=r"[Yy]/[Nn]", response="y"),
-            "juniper_junos": CommandConfirmation(prompt_pattern=r"yes,no", response="yes"),
+            "huawei_vrp": (CommandConfirmation(prompt_pattern=_REBOOT_CONFIRM_PROMPT, response="y"),),
+            "hp_comware": (CommandConfirmation(prompt_pattern=_REBOOT_CONFIRM_PROMPT, response="y"),),
+            "juniper_junos": (
+                CommandConfirmation(prompt_pattern=_REBOOT_CONFIRM_PROMPT, response="yes"),
+            ),
         },
+        verify_manually=True,
     ),
     "shutdown": DeviceCommandDefinition(
         name="shutdown",
@@ -184,6 +236,7 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
             "generic": "sudo shutdown -h now",
             "linux": "sudo shutdown -h now",
         },
+        verify_manually=True,
     ),
     "port_enable": DeviceCommandDefinition(
         name="port_enable",

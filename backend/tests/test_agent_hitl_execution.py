@@ -7,9 +7,12 @@
 """
 
 import asyncio
+import re
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
+from netmiko.exceptions import ConfigInvalidException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -48,6 +51,7 @@ async def _approved_device_proposal(
     action_type: str = "device_query",
     command_name: str = "show_version",
     vendor: str = "cisco_iosxe",
+    interface_name: str | None = None,
 ) -> tuple[HitlProposal, int]:
     session = await agent_session_crud.create(
         db,
@@ -75,6 +79,7 @@ async def _approved_device_proposal(
             "asset_id": asset.id,
             "command_name": command_name,
             "proposal_reason": "verify policy drift",
+            **({"interface_name": interface_name} if interface_name is not None else {}),
         },
     )
     await hitl_proposal_crud.decide(
@@ -254,6 +259,51 @@ async def test_execution_stops_for_deactivated_actor(
     assert executor.calls == []
     assert summary.status == "APPROVED"
     assert "停用" in (summary.last_error or "")
+
+
+async def test_device_rejected_port_disable_lands_unknown_not_executed(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """审查报告 R3 走完整链路：真实执行器 + HITL 收尾。设备回 % Invalid input，
+    提案不能落 EXECUTED（没有成功证据），落 UNKNOWN 并写明设备拒绝，等人工核实。"""
+    proposal, _ = await _approved_device_proposal(
+        db_session,
+        test_user,
+        action_type="device_control",
+        command_name="port_disable",
+        interface_name="GigabitEthernet0/1",
+    )
+    proposal_id = proposal.id
+    device_output = "SW(config-if)#shutdown\n% Invalid input detected at '^' marker.\n"
+
+    def send_config_set(
+        lines: list[str], *, read_timeout: float, error_pattern: str = "", **_: object
+    ) -> str:
+        if error_pattern and re.search(error_pattern, device_output, flags=re.M):
+            raise ConfigInvalidException(f"Invalid input detected at command: {lines[-1]}")
+        return device_output
+
+    connection = MagicMock()
+    connection.send_config_set = send_config_set
+    monkeypatch.setattr("app.agent.executors._open_netmiko_connection", lambda **_: connection)
+
+    summary = await execute_approved_proposal(
+        session_factory=async_sessionmaker(db_engine, expire_on_commit=False),
+        proposal_id=proposal_id,
+        actor_user_id=test_user.id,
+        dynamic_password="one-use-password",
+    )
+
+    assert summary.status == "UNKNOWN"
+    assert "设备拒绝" in (summary.last_error or "")
+    db_session.expire_all()
+    persisted = await hitl_proposal_crud.get(db_session, proposal_id)
+    assert persisted is not None
+    assert persisted.status == "UNKNOWN"
+    assert persisted.executed_at is None
 
 
 async def test_build_result_preview_preserves_at_limit_and_marks_long_output() -> None:

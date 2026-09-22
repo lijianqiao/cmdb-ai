@@ -924,7 +924,11 @@ async def test_whitelisted_device_control_auto_executes_with_static_credential(
     monkeypatch: pytest.MonkeyPatch,
     grant_permissions,
 ) -> None:
-    """白名单 + 静态凭据：跟 device_query 一样一次调用直接 EXECUTED。"""
+    """白名单 + 静态凭据：跟 device_query 一样一次调用直接 EXECUTED。
+
+    用接口启停：配置逐行无报错是明确的成功证据；重启发出后拿不到成功证据，
+    只会落 UNKNOWN 等人工核实（R3）。
+    """
     await grant_permissions(test_user, "agent:auto_execute")
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
@@ -939,7 +943,7 @@ async def test_whitelisted_device_control_auto_executes_with_static_credential(
         {
             "scope": "asset",
             "asset_id": asset_id,
-            "command_name": "reboot",
+            "command_name": "port_disable",
             "decision": "whitelist",
         },
     )
@@ -949,7 +953,7 @@ async def test_whitelisted_device_control_auto_executes_with_static_credential(
     from unittest.mock import MagicMock, patch
 
     fake_connection = MagicMock()
-    fake_connection.send_command_timing = MagicMock(return_value="rebooting")
+    fake_connection.send_config_set = MagicMock(return_value="SW(config-if)#shutdown")
     with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         gate = _make_hitl_gate(db_engine, session_id=session_id, actor_user_id=test_user.id)
         dispatch = build_root_tool_dispatcher(
@@ -962,7 +966,12 @@ async def test_whitelisted_device_control_auto_executes_with_static_credential(
             gate,
             dispatch,
             "device_control",
-            {"asset_id": asset_id, "command_name": "reboot", "reason": "故障恢复"},
+            {
+                "asset_id": asset_id,
+                "command_name": "port_disable",
+                "interface_name": "GigabitEthernet0/1",
+                "reason": "故障恢复",
+            },
         )
 
     proposal = await hitl_proposal_crud.list_for_session(db_session, session_id)

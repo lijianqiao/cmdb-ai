@@ -1232,6 +1232,35 @@ describe("HitlApprovalCard UNKNOWN 人工处置", () => {
     expect(screen.queryByTestId("hitl-retry-button")).not.toBeInTheDocument()
   })
 
+  it("UNKNOWN 时展示不确定的原因，帮审批人决定是确认已执行还是允许重试", async () => {
+    mockUsePermission.mockReturnValue(permissionResult(true))
+    mockGetHitlProposal.mockResolvedValue(
+      buildProposal({
+        status: "UNKNOWN",
+        action_type: "device_control",
+        action_payload: {
+          asset_id: 9,
+          last_error: "命令已发送，设备正在重启/关机；这期间无法自动确认结果，请在设备恢复后人工核实",
+        },
+      }),
+    )
+    render(
+      <HitlApprovalCard
+        sessionId={10}
+        proposalId={1}
+        actionType="device_control"
+        status="UNKNOWN"
+        reason="重启交换机"
+        assetId={9}
+        hasFullResult={false}
+      />,
+    )
+
+    expect(await screen.findByTestId("hitl-last-error")).toHaveTextContent(
+      "设备正在重启/关机",
+    )
+  })
+
   it("无审批权限时 UNKNOWN 仅展示状态，不显示处置按钮", async () => {
     render(
       <HitlApprovalCard

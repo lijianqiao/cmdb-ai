@@ -13,8 +13,15 @@
 4. ExecutionResult.dispatched 回答"这次失败有没有可能已经把命令发到设备上"：
    连接建立之前的任何失败都是 False（确定没下发，上层可安全回退重试），连接一旦
    建立就置 True（之后失败无法确定命令是否已生效，上层必须走 UNKNOWN 人工核实）。
+   设备回了报错文本也保持 True：配置可能已部分生效，不能因为看到错误就当成没下发。
 5. 失败时把真实异常堆栈写进服务端日志（logger.exception），只把异常类名放进
    detail["error_class"] 供上层展示——既能定位问题，又不把原始异常文本泄漏给模型。
+6. 设备回了文本不等于成功（R3），ok=True 只给有明确成功证据的结果：
+   - 配置命令把厂商报错句式交给 Netmiko 的 error_pattern 逐行检查，命中即失败；
+     需要提交回显的厂商（Junos 的 commit complete）没看到回显也不算成功；
+   - 普通命令只检查输出开头几行的厂商报错句式，避免把配置正文里的 error 字样误判；
+   - 确认流程按目录逐轮匹配，设备问了没登记的问题就停下、不替人回答；
+   - 重启/关机发出后拿不到成功证据，返回「待人工核实」，由上层落 UNKNOWN。
 
 为什么用 Netmiko 而不是 Scrapli：本项目要同时管思科/华三/华为/锐捷等多厂商设备，
 而"关闭分页"这一步各厂商命令完全不同（华为 screen-length 0 temporary、华三
@@ -37,9 +44,12 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from netmiko import ConnectHandler
+from netmiko.exceptions import ConfigInvalidException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.device_commands import (
+    CONFIG_SUCCESS_MARKERS,
+    DEVICE_ERROR_PATTERNS,
     UnknownDeviceCommandError,
     VendorName,
     command_supports_vendor,
@@ -188,6 +198,85 @@ def _open_netmiko_connection(
     return ConnectHandler(**kwargs)
 
 
+# 普通命令的报错总是紧跟在命令回显之后：只看输出开头这么多行，
+# 避免把 show running-config 正文里的 logging errors、横幅里的 % 行误判成失败。
+_ERROR_SCAN_HEAD_LINES = 5
+_MAX_ERROR_LINE_CHARS = 160
+
+
+def _device_error_line(vendor: VendorName, output: str, *, head_only: bool) -> str | None:
+    """返回设备报错的那一行；没有明确报错返回 None。"""
+    pattern = DEVICE_ERROR_PATTERNS.get(vendor)
+    if pattern is None:
+        return None
+    lines = [line for line in output.splitlines() if line.strip()]
+    if head_only:
+        lines = lines[:_ERROR_SCAN_HEAD_LINES]
+    for line in lines:
+        if re.search(pattern, line):
+            return line.strip()[:_MAX_ERROR_LINE_CHARS]
+    return None
+
+
+def _rejected(message: str) -> ExecutionResult:
+    """设备明确拒绝了命令。已连上设备，可能部分生效，所以 dispatched 仍为 True。"""
+    return ExecutionResult(
+        ok=False,
+        message=message,
+        detail={"error_class": "DeviceRejected"},
+        dispatched=True,
+    )
+
+
+def _unconfirmed(message: str) -> ExecutionResult:
+    """命令已下发，但拿不到明确的成功证据：交给上层按 UNKNOWN 人工核实。"""
+    return ExecutionResult(
+        ok=False,
+        message=message,
+        detail={"error_class": "Unconfirmed"},
+        dispatched=True,
+    )
+
+
+def _run_confirmation_flow(
+    connection: Any,
+    *,
+    vendor: VendorName,
+    template: str,
+    steps: tuple[Any, ...],
+    read_timeout: float,
+) -> ExecutionResult | str:
+    """按目录逐轮走确认提示；成功返回完整回显，任何一步不对都返回失败结果。
+
+    设备问了目录里没登记的问题（例如「要不要保存配置」）就停下，不替人回答——
+    替人回答 y 可能悄悄存盘或丢弃改动。停下时命令还在等输入，断开后通常会取消，
+    但无法百分之百确认，所以同样按「已下发、未确认」报告。
+    """
+    # 确认提示不是标准提示符，send_command 会一直等不到而超时；
+    # send_command_timing 按「读到安静为止」返回，才能拿到提示并应答。
+    chunk = connection.send_command_timing(
+        template, read_timeout=read_timeout, strip_prompt=False, strip_command=False
+    )
+    transcript = chunk
+    for step in steps:
+        error_line = _device_error_line(vendor, chunk, head_only=False)
+        if error_line is not None:
+            return _rejected(f"设备拒绝了命令：{error_line}")
+        if not re.search(step.prompt_pattern, chunk):
+            return _unconfirmed(
+                "未出现预期的确认提示（设备可能在问目录里没登记的问题），已停止、没有替人回答；"
+                "请人工核实设备状态"
+            )
+        chunk = connection.send_command_timing(
+            step.response, read_timeout=read_timeout, strip_prompt=False, strip_command=False
+        )
+        transcript += chunk
+    error_line = _device_error_line(vendor, chunk, head_only=False)
+    if error_line is not None:
+        return _rejected(f"设备拒绝了命令：{error_line}")
+    return str(transcript)
+
+
 def _run_device_command(
     *,
     host: str,
@@ -200,7 +289,7 @@ def _run_device_command(
     conn_timeout: float,
     read_timeout: float,
 ) -> ExecutionResult:
-    """在工作线程里跑完整条 Netmiko 会话：连接 → 按类型分派 → 返回完整输出 → 断开。
+    """在工作线程里跑完整条 Netmiko 会话：连接 → 按类型分派 → 判定结果 → 断开。
 
     全程同步阻塞，由 DeviceQueryExecutor.execute 用 asyncio.to_thread 调用。
     连接建立后置 dispatched=True，之后任何异常都无法确定命令是否已生效。
@@ -225,27 +314,41 @@ def _run_device_command(
             ]
             if any("<" in line or ">" in line for line in rendered):
                 return ExecutionResult(ok=False, message="命令模板含未解析占位符")
-            output = connection.send_config_set(rendered, read_timeout=read_timeout)
-        elif definition.confirmation is not None and vendor in definition.confirmation:
-            confirm = definition.confirmation[vendor]
-            template = definition.templates[vendor]
-            # 确认提示不是标准提示符，send_command 会一直等不到而超时；
-            # send_command_timing 按「读到安静为止」返回，才能拿到提示并应答。
-            output = connection.send_command_timing(
-                template, read_timeout=read_timeout, strip_prompt=False, strip_command=False
-            )
-            if re.search(confirm.prompt_pattern, output):
-                output += connection.send_command_timing(
-                    confirm.response,
+            try:
+                # error_pattern 让 Netmiko 每发一行就检查回显，命中立即抛异常，
+                # 不会在第一行就失败的情况下继续往下发。
+                output = connection.send_config_set(
+                    rendered,
                     read_timeout=read_timeout,
-                    strip_prompt=False,
-                    strip_command=False,
+                    error_pattern=DEVICE_ERROR_PATTERNS[vendor],
                 )
+            except ConfigInvalidException:
+                logger.warning(
+                    "设备拒绝了配置命令 host=%s vendor=%s command=%s", host, vendor, command_name
+                )
+                return _rejected("设备拒绝了配置命令，可能已部分生效，请人工核实")
+            marker = CONFIG_SUCCESS_MARKERS.get(vendor)
+            if marker is not None and not re.search(marker, output):
+                return _unconfirmed("未看到设备确认配置已提交，配置可能未生效或部分生效，请人工核实")
+        elif definition.confirmation is not None and vendor in definition.confirmation:
+            flow = _run_confirmation_flow(
+                connection,
+                vendor=vendor,
+                template=definition.templates[vendor],
+                steps=definition.confirmation[vendor],
+                read_timeout=read_timeout,
+            )
+            if isinstance(flow, ExecutionResult):
+                return flow
+            output = flow
         else:
             template = get_command_template(command_name, vendor)
             if "<" in template or ">" in template:
                 return ExecutionResult(ok=False, message="命令模板含未解析占位符")
             output = connection.send_command(template, read_timeout=read_timeout)
+            error_line = _device_error_line(vendor, output, head_only=True)
+            if error_line is not None:
+                return _rejected(f"设备拒绝了命令：{error_line}")
     except Exception as exc:
         # 真实堆栈只进服务端日志：既能定位平台/认证/分页类故障，又不外泄异常文本。
         logger.exception(
@@ -273,6 +376,11 @@ def _run_device_command(
             except Exception:
                 pass
 
+    if definition.verify_manually:
+        # 重启/关机发出后设备就断开了：断线或没有报错都不是成功证据。
+        return _unconfirmed(
+            "命令已发送，设备正在重启/关机；这期间无法自动确认结果，请在设备恢复后人工核实"
+        )
     return ExecutionResult(
         ok=True,
         message="命令执行完成",

@@ -104,6 +104,7 @@ async def _make_pending_device_query_proposal(
     credential_type: str = "dynamic",
     action_type: str = "device_query",
     command_name: str = "show_version",
+    interface_name: str | None = None,
 ) -> tuple[int, int]:
     """创建动态凭据资产的 PENDING 设备提案。"""
     session = await agent_session_crud.create(
@@ -123,13 +124,16 @@ async def _make_pending_device_query_proposal(
         },
     )
     await db.flush()
+    payload: dict[str, object] = {"command_name": command_name}
+    if interface_name is not None:
+        payload["interface_name"] = interface_name
     summary = await propose_action(
         db,
         session_id=session.id,
         proposed_by_agent_id=None,
         action_type=action_type,  # type: ignore[arg-type]
         asset_id=asset.id,
-        payload={"command_name": command_name},
+        payload=payload,
         reason="查询设备版本",
         actor_user_id=user_id,
     )
@@ -761,15 +765,18 @@ async def test_approve_executed_device_control_does_not_deliver_query_summary(
     )
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     await _grant_hitl_approve(db_session, test_user)
+    # 用接口启停：配置逐行无报错就是明确的成功证据，能真正落到 EXECUTED
+    # （重启发出后拿不到成功证据，只会落 UNKNOWN，见 R3）。
     _, proposal_id = await _make_pending_device_query_proposal(
         db_session,
         user_id=test_user.id,
         action_type="device_control",
-        command_name="reboot",
+        command_name="port_disable",
+        interface_name="GigabitEthernet0/1",
     )
 
     fake_connection = MagicMock()
-    fake_connection.send_command_timing = MagicMock(return_value="reboot control output")
+    fake_connection.send_config_set = MagicMock(return_value="SW(config-if)#shutdown")
     with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         response = await client.post(
             f"/api/v1/hitl/proposals/{proposal_id}/decide",
@@ -852,7 +859,11 @@ async def test_retry_approved_device_control_executes(
     auth_headers: Headers,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """UNKNOWN 经 allow_retry 回到 APPROVED 后可通过 /retry 再次执行。"""
+    """UNKNOWN 经 allow_retry 回到 APPROVED 后可通过 /retry 再次执行。
+
+    用接口启停而不是重启：配置逐行无报错是明确的成功证据，重试才可能落到 EXECUTED；
+    重启发出后拿不到成功证据，永远只会落 UNKNOWN（R3）。
+    """
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     await _grant_hitl_approve(db_session, test_user)
     ciphertext = encrypt_credential_password("whatever")
@@ -863,10 +874,10 @@ async def test_retry_approved_device_control_executes(
     asset = await cmdb_asset_crud.create(
         db_session,
         {
-            "asset_type": "server",
-            "hostname": "srv-hitl-retry",
+            "asset_type": "switch",
+            "hostname": "sw-hitl-retry",
             "ip_address": "10.0.0.33",
-            "vendor": "linux",
+            "vendor": "cisco_iosxe",
             "credential_type": "static",
             "credential_username": "admin",
             "credential_password_encrypted": ciphertext,
@@ -879,7 +890,7 @@ async def test_retry_approved_device_control_executes(
         proposed_by_agent_id=None,
         action_type="device_control",
         asset_id=asset.id,
-        payload={"command_name": "reboot"},
+        payload={"command_name": "port_disable", "interface_name": "GigabitEthernet0/1"},
         reason="故障恢复",
         actor_user_id=test_user.id,
     )
@@ -888,7 +899,9 @@ async def test_retry_approved_device_control_executes(
 
     # 连接已建立但下发途中断开：结果不确定，走 UNKNOWN 人工核实流程。
     broken_connection = MagicMock()
-    broken_connection.send_command = MagicMock(side_effect=ConnectionError("dropped mid-command"))
+    broken_connection.send_config_set = MagicMock(
+        side_effect=ConnectionError("dropped mid-command")
+    )
     with patch(
         "app.agent.executors._open_netmiko_connection",
         return_value=broken_connection,
@@ -911,7 +924,7 @@ async def test_retry_approved_device_control_executes(
     assert authorized.json()["data"]["status"] == "APPROVED"
 
     fake_connection = MagicMock()
-    fake_connection.send_command = MagicMock(return_value="Linux host info")
+    fake_connection.send_config_set = MagicMock(return_value="SW(config-if)#shutdown")
     with patch("app.agent.executors._open_netmiko_connection", return_value=fake_connection):
         retried = await client.post(
             f"/api/v1/hitl/proposals/{proposal_id}/retry",

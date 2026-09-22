@@ -416,6 +416,12 @@ export function HitlApprovalCard({
               上次执行失败：{lastError}
             </p>
           ) : null}
+          {lastError && normalized === "UNKNOWN" ? (
+            // 设备拒绝了命令、还是重启后拿不到回显——原因不同，处置方式也不同
+            <p className="text-xs text-destructive" data-testid="hitl-last-error">
+              结果不确定的原因：{lastError}
+            </p>
+          ) : null}
 
           {reconciling ? (
             <div className="flex items-center gap-2 text-xs text-muted-foreground">

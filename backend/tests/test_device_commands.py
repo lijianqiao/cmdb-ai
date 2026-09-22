@@ -1,9 +1,12 @@
 """命令目录：只读、代码层、按厂商区分真实命令字符串。"""
 
+import re
+
 import pytest
 
 from app.agent.device_commands import (
     DEVICE_COMMAND_CATALOG_VERSION,
+    DEVICE_ERROR_PATTERNS,
     UnknownDeviceCommandError,
     UnsupportedVendorError,
     command_supports_vendor,
@@ -201,8 +204,7 @@ def test_cisco_small_business_uses_sg350x_commands() -> None:
     reboot = get_device_command("reboot")
     assert reboot.templates["cisco_small_business"] == "reload"
     assert reboot.confirmation is not None
-    confirmation = reboot.confirmation["cisco_small_business"]
-    assert confirmation.prompt_pattern == r"\([Yy]/[Nn]\)"
+    (confirmation,) = reboot.confirmation["cisco_small_business"]
     assert confirmation.response == "y"
 
     port_enable = get_device_command("port_enable")
@@ -235,3 +237,58 @@ def test_cisco_small_business_uses_sg350x_commands() -> None:
 )
 def test_interface_name_validation_is_strict_allowlist(value: str, expected: bool) -> None:
     assert validate_interface_name(value) is expected
+
+
+# R3：确认流程与错误识别都登记在目录里，执行器只照目录办事。
+
+
+@pytest.mark.parametrize(
+    ("vendor", "prompt"),
+    [
+        ("cisco_iosxe", "Proceed with reload? [confirm]"),
+        (
+            "cisco_small_business",
+            "This command will reset the whole system and disconnect your current session. "
+            "Do you want to continue ? (Y/N)[N]",
+        ),
+        ("huawei_vrp", "System will reboot! Continue? [y/n]:"),
+        ("hp_comware", "This command will reboot the device. Continue? [Y/N]:"),
+        ("juniper_junos", "Reboot the system ? [yes,no] (no)"),
+    ],
+)
+def test_reboot_confirmation_matches_the_reboot_question(vendor: str, prompt: str) -> None:
+    reboot = get_device_command("reboot")
+    assert reboot.confirmation is not None
+    (step,) = reboot.confirmation[vendor]
+    assert re.search(step.prompt_pattern, prompt)
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "System configuration has been modified. Save? [yes/no]:",
+        "You haven't saved your changes. Are you sure you want to continue ? (Y/N)[N]",
+        "Warning: All the configuration will be saved to the next startup configuration. "
+        "Continue? [y/n]:",
+        "Current configuration will be lost after the reboot, save current configuration? [Y/N]:",
+    ],
+)
+def test_reboot_confirmation_never_answers_a_save_configuration_question(prompt: str) -> None:
+    """「要不要保存配置」是另一个决定：替人回答 y 会悄悄存盘或丢弃改动。
+    目录里的重启确认一个都不能匹配它——匹配不上执行器就停下、报告不确定。"""
+    reboot = get_device_command("reboot")
+    assert reboot.confirmation is not None
+    for steps in reboot.confirmation.values():
+        for step in steps:
+            assert not re.search(step.prompt_pattern, prompt), (step.prompt_pattern, prompt)
+
+
+def test_every_vendor_has_a_device_error_pattern() -> None:
+    vendors = {vendor for item in list_device_commands() for vendor in item.templates}
+    assert vendors <= set(DEVICE_ERROR_PATTERNS)
+
+
+def test_only_reboot_and_shutdown_need_manual_verification() -> None:
+    """重启/关机后连接会断：拿不到成功证据，结果只能交给人工核实。"""
+    needs_manual = {item.name for item in list_device_commands() if item.verify_manually}
+    assert needs_manual == {"reboot", "shutdown"}
