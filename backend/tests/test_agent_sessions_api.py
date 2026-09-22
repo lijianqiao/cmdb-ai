@@ -200,7 +200,10 @@ async def test_patch_approval_mode_owner_and_audit(
     db_session: AsyncSession,
     test_user: User,
     auth_headers: Headers,
+    grant_permissions,
 ) -> None:
+    # 切到自动档位需要独立的自动执行权限（R1），本用例关注归属与审计
+    await grant_permissions(test_user, "agent:auto_execute")
     create_resp = await client.post(
         "/api/v1/agent/sessions",
         json={"title": "改档"},
@@ -270,6 +273,89 @@ async def test_patch_approval_mode_rejects_invalid_and_non_owner(
         headers=other_headers,
     )
     assert forbidden.status_code == 404
+
+
+@pytest.mark.parametrize("mode", ["assist", "full"])
+async def test_patch_to_auto_mode_requires_auto_execute_permission(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    auth_headers: Headers,
+    mode: str,
+) -> None:
+    """只有 agent:use 的用户不能自己打开自动执行档位：前端的确认弹窗不是授权。"""
+    from sqlalchemy import func, select
+
+    from app.models.audit_log import AuditLog
+
+    create_resp = await client.post(
+        "/api/v1/agent/sessions",
+        json={"title": "越权改档"},
+        headers=auth_headers,
+    )
+    session_id = create_resp.json()["data"]["id"]
+
+    response = await client.patch(
+        f"/api/v1/agent/sessions/{session_id}",
+        json={"approval_mode": mode},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 403, response.text
+    assert "agent:auto_execute" in response.json()["message"]
+    current = await client.get(f"/api/v1/agent/sessions/{session_id}", headers=auth_headers)
+    assert current.json()["data"]["approval_mode"] == "ask"
+    audit_count = await db_session.scalar(
+        select(func.count()).select_from(AuditLog).where(
+            AuditLog.action == "update_session_approval_mode"
+        )
+    )
+    assert audit_count == 0
+
+
+async def test_superuser_can_enable_full_mode(
+    client: AsyncClient,
+    superuser_headers: Headers,
+) -> None:
+    """超管沿用既有超管规则，不需要单独授予自动执行权限。"""
+    create_resp = await client.post(
+        "/api/v1/agent/sessions",
+        json={"title": "超管改档"},
+        headers=superuser_headers,
+    )
+    session_id = create_resp.json()["data"]["id"]
+
+    response = await client.patch(
+        f"/api/v1/agent/sessions/{session_id}",
+        json={"approval_mode": "full"},
+        headers=superuser_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["approval_mode"] == "full"
+
+
+async def test_switch_back_to_ask_never_needs_auto_execute(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+) -> None:
+    """旧会话里存着 full，而用户已无自动执行权限：切回请求审批不能被拦住。"""
+    session = await agent_session_crud.create(
+        db_session,
+        {"user_id": test_user.id, "title": "旧 full 会话", "status": "active"},
+    )
+    session.approval_mode = "full"
+    await db_session.commit()
+
+    response = await client.patch(
+        f"/api/v1/agent/sessions/{session.id}",
+        json={"approval_mode": "ask"},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["approval_mode"] == "ask"
 
 
 async def test_list_messages_root_transcript_only(

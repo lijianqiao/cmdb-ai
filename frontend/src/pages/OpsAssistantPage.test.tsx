@@ -420,3 +420,97 @@ describe("OpsAssistantPage 自动弹出的审批窗口", () => {
     })
   })
 })
+
+describe("OpsAssistantPage 自动执行档位授权", () => {
+  const noPermission = {
+    permissions: [],
+    hasPermission: () => false,
+    hasAnyPermission: () => false,
+    hasAllPermissions: () => false,
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    Element.prototype.scrollIntoView = vi.fn()
+    mockUsePermission.mockReturnValue(noPermission)
+    mockUseOpsChat.mockImplementation(() => ({
+      messages: [],
+      isLoadingHistory: false,
+      isSending: false,
+      inputDisabled: false,
+      wsStatus: "open",
+      reconnecting: false,
+      monitorAlert: null,
+      clearMonitorAlert: vi.fn(),
+      sendMessage: vi.fn(),
+      cancelTurn: vi.fn(),
+      reloadSnapshot: vi.fn(),
+      loadOlder: vi.fn(),
+      hasMore: false,
+      isLoadingOlder: false,
+    }))
+  })
+
+  afterEach(() => {
+    mockUsePermission.mockReturnValue(noPermission)
+  })
+
+  it("会话存着完全访问、账号却没有自动执行权限时，提示档位不会生效", async () => {
+    mockListAgentSessions.mockResolvedValue({
+      items: [buildSession(1, "full")],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    })
+    render(<OpsAssistantPage />)
+
+    expect(await screen.findByText(/没有自动执行权限/)).toBeInTheDocument()
+  })
+
+  it("持有自动执行权限时不显示该提示", async () => {
+    mockUsePermission.mockReturnValue({
+      permissions: ["agent:auto_execute"],
+      hasPermission: (code: string) => code === "agent:auto_execute",
+      hasAnyPermission: () => true,
+      hasAllPermissions: () => true,
+    })
+    mockListAgentSessions.mockResolvedValue({
+      items: [buildSession(1, "full")],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    })
+    render(<OpsAssistantPage />)
+
+    await screen.findAllByText("会话 #1")
+    expect(screen.queryByText(/没有自动执行权限/)).not.toBeInTheDocument()
+  })
+
+  it("服务端拒绝改档时，显示服务端给出的原因而不是笼统的失败", async () => {
+    const reason = "无权开启自动执行档位（需要权限：agent:auto_execute）"
+    mockListAgentSessions.mockResolvedValue({
+      items: [buildSession(1)],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    })
+    mockPatchAgentSession.mockRejectedValue(
+      new AxiosError("Request failed with status code 403", AxiosError.ERR_BAD_REQUEST, undefined, undefined, {
+        status: 403,
+        statusText: "",
+        data: { code: 403, data: null, message: reason },
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+      }),
+    )
+    render(<OpsAssistantPage />)
+    await screen.findAllByText("会话 #1")
+
+    await openFullAccessDialog()
+    await confirmFullAccess()
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(reason)
+    })
+  })
+})

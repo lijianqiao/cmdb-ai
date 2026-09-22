@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import asdict
 
 import pytest
+import pytest_asyncio
 from cryptography.fernet import Fernet
 from pydantic import SecretStr
 from sqlalchemy import func, select
@@ -39,6 +40,16 @@ from app.models.hitl_proposal import HitlProposal
 from app.models.user import User
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _test_user_is_approver(test_user: User, grant_permissions) -> None:
+    """执行前会复核触发人的审批权限（R1）；本文件的 resume 用例都以审批人身份触发。
+
+    自动执行权限不在这里默认授予：自动批准相关的用例要各自显式声明，
+    这样「没有自动执行权限就不能自动批准」的用例才有意义。
+    """
+    await grant_permissions(test_user, "agent:hitl_approve")
 
 
 def _hitl_session_factory(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
@@ -338,8 +349,10 @@ async def test_gate_action_auto_approve_stays_approved_without_executor(
     db_session: AsyncSession,
     test_user: User,
     monkeypatch: pytest.MonkeyPatch,
+    grant_permissions,
 ) -> None:
     """assist 档位下 gate_action 自动批准应停留 APPROVED，且不调用执行器或 resume。"""
+    await grant_permissions(test_user, "agent:auto_execute")
     session_id, asset_id = await _make_context(db_session, test_user.id)
     await _set_session_approval_mode(db_session, session_id, "assist")
 
@@ -371,8 +384,10 @@ async def test_notify_auto_approve_executes_once_through_gate(
     db_session: AsyncSession,
     test_user: User,
     monkeypatch: pytest.MonkeyPatch,
+    grant_permissions,
 ) -> None:
     """assist 档位完整路径：门控 before 内统一执行，执行器只调一次。"""
+    await grant_permissions(test_user, "agent:auto_execute")
     session_id, asset_id = await _make_context(db_session, test_user.id)
     await _set_session_approval_mode(db_session, session_id, "assist")
     publisher = RecordingPublisher()
@@ -906,8 +921,10 @@ async def test_whitelisted_device_control_auto_executes_with_static_credential(
     db_session: AsyncSession,
     test_user: User,
     monkeypatch: pytest.MonkeyPatch,
+    grant_permissions,
 ) -> None:
     """白名单 + 静态凭据：跟 device_query 一样一次调用直接 EXECUTED。"""
+    await grant_permissions(test_user, "agent:auto_execute")
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     ciphertext = encrypt_credential_password("whatever")
@@ -983,6 +1000,117 @@ async def test_dynamic_credential_device_control_never_auto_executes(db_session:
     )
 
     assert summary.status == "PENDING"
+
+
+async def _propose_unclassified_reboot(
+    db_session: AsyncSession,
+    *,
+    user_id: int,
+    approval_mode: str,
+) -> ProposalSafeSummary:
+    """在给定档位的会话里对静态凭据资产提一个未分类的 reboot。"""
+    session_id, _ = await _make_session_and_asset(db_session, user_id)
+    asset_id = await _make_query_asset(db_session)
+    await _set_session_approval_mode(db_session, session_id, approval_mode)
+    return await gate_action(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="device_control",
+        asset_id=asset_id,
+        payload={"command_name": "reboot"},
+        reason="故障恢复",
+        actor_user_id=user_id,
+    )
+
+
+async def test_full_mode_without_auto_execute_permission_stays_pending(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """审查报告 R1 的复现：会话存着 full，但发起人没有自动执行权限——必须退回人工审批。"""
+    summary = await _propose_unclassified_reboot(
+        db_session, user_id=test_user.id, approval_mode="full"
+    )
+
+    assert summary.status == "PENDING"
+    proposal = await hitl_proposal_crud.get(db_session, summary.proposal_id)
+    assert proposal is not None
+    assert proposal.reviewed_by_user_id is None
+
+
+async def test_full_mode_with_auto_execute_permission_auto_approves(
+    db_session: AsyncSession,
+    test_user: User,
+    grant_permissions,
+) -> None:
+    await grant_permissions(test_user, "agent:auto_execute")
+
+    summary = await _propose_unclassified_reboot(
+        db_session, user_id=test_user.id, approval_mode="full"
+    )
+
+    assert summary.status == "APPROVED"
+
+
+async def test_superuser_full_mode_auto_approves_without_explicit_grant(
+    db_session: AsyncSession,
+    superuser: User,
+) -> None:
+    """超管沿用既有超管规则。"""
+    summary = await _propose_unclassified_reboot(
+        db_session, user_id=superuser.id, approval_mode="full"
+    )
+
+    assert summary.status == "APPROVED"
+
+
+async def test_revoking_auto_execute_takes_effect_on_next_proposal(
+    db_session: AsyncSession,
+    test_user: User,
+    grant_permissions,
+    revoke_permissions,
+) -> None:
+    """授权按提案当时的权限判断，不是按会话里存的档位：撤销后下一个提案立刻回到人工审批。"""
+    await grant_permissions(test_user, "agent:auto_execute")
+    first = await _propose_unclassified_reboot(
+        db_session, user_id=test_user.id, approval_mode="full"
+    )
+    await revoke_permissions(test_user, "agent:auto_execute")
+    second = await _propose_unclassified_reboot(
+        db_session, user_id=test_user.id, approval_mode="full"
+    )
+
+    assert first.status == "APPROVED"
+    assert second.status == "PENDING"
+
+
+async def test_full_mode_without_permission_never_reaches_executor_through_gate(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """走真实门控路径：没有自动执行权限时只建待审批提案，执行器一次都不调。"""
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    asset_id = await _make_query_asset(db_session)
+    await _set_session_approval_mode(db_session, session_id, "full")
+    await db_session.commit()
+
+    async def fail_execute(*args: object, **kwargs: object) -> ExecutionResult:
+        raise AssertionError("没有自动执行权限时不得调用设备执行器")
+
+    monkeypatch.setattr("app.agent.executors.DeviceQueryExecutor.execute", fail_execute)
+    gate = _make_hitl_gate(db_engine, session_id=session_id, actor_user_id=test_user.id)
+
+    decision = await gate.before(
+        "device_control",
+        {"asset_id": asset_id, "command_name": "reboot", "reason": "故障恢复"},
+    )
+
+    assert decision.block is True
+    assert decision.result is not None
+    assert decision.result.control == "pending_approval"
 
 
 async def test_device_control_reboot_rejects_interface_name_with_credentialed_asset(
@@ -1269,8 +1397,10 @@ async def test_device_query_whitelist_auto_executes_for_static_credential(
     db_session: AsyncSession,
     test_user: User,
     monkeypatch: pytest.MonkeyPatch,
+    grant_permissions,
 ) -> None:
     """assist 档位下白名单 + 静态凭据的 device_query 应一次调用直接 EXECUTED。"""
+    await grant_permissions(test_user, "agent:auto_execute")
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     ciphertext = encrypt_credential_password("whatever")
@@ -1373,8 +1503,10 @@ async def test_device_query_unclassified_auto_executes_in_full_mode(
     db_session: AsyncSession,
     test_user: User,
     monkeypatch: pytest.MonkeyPatch,
+    grant_permissions,
 ) -> None:
     """full 档位下未分类 + 静态凭据的 device_query 应一次调用直接 EXECUTED。"""
+    await grant_permissions(test_user, "agent:auto_execute")
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
     session_id, _ = await _make_session_and_asset(db_session, test_user.id)
     ciphertext = encrypt_credential_password("whatever")

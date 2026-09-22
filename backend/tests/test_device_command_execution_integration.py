@@ -181,8 +181,11 @@ async def test_whitelisted_static_credential_query_executes_in_one_call(
     db_session: AsyncSession,
     test_user: User,
     monkeypatch: pytest.MonkeyPatch,
+    grant_permissions,
 ) -> None:
     """assist 档位下白名单 + 静态凭据：query_device_command 一次调用当场执行并返回输出。"""
+    # 档位自动执行只对持有自动执行权限的账号生效（R1）
+    await grant_permissions(test_user, "agent:auto_execute")
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     session_id, asset_id = await _make_session_and_switch_asset(
         db_session,
@@ -497,8 +500,10 @@ async def test_whitelisted_reboot_executes_with_interactive_confirmation(
     db_session: AsyncSession,
     test_user: User,
     monkeypatch: pytest.MonkeyPatch,
+    grant_permissions,
 ) -> None:
     """assist 档位下白名单 + 静态凭据的交换机：device_control 一次调用当场执行 reboot。"""
+    await grant_permissions(test_user, "agent:auto_execute")
     monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
     session_id, asset_id = await _make_session_and_switch_asset(
         db_session,

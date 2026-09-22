@@ -26,6 +26,7 @@ from app.agent.hitl import (
 )
 from app.agent.hitl_execution import execute_approved_proposal
 from app.agent.loop import BeforeToolDecision, ToolDispatcher, ToolResult
+from app.agent.permissions import AUTO_EXECUTE
 from app.agent.tool_args import (
     DeviceControlArgs,
     NotifyArgs,
@@ -233,6 +234,8 @@ class HitlGateHook:
             proposal_id=summary.proposal_id,
             actor_user_id=self._actor_user_id,
             publisher=self._publisher,
+            # 走到这里的都是档位自动批准：执行前按自动执行权限复核，不能借审批人身份放行
+            required_permission=AUTO_EXECUTE,
         )
         return BeforeToolDecision(
             block=True,

@@ -18,6 +18,7 @@ from app.agent.device_commands import list_device_commands as list_catalog_comma
 from app.agent.hitl import HitlEventPublisher
 from app.agent.hitl_gate import HitlGateHook
 from app.agent.loop import ToolResult
+from app.agent.permissions import AUTO_EXECUTE, effective_approval_mode
 from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
@@ -227,7 +228,11 @@ async def list_device_commands_for_asset(
     if session is None:
         return ToolResult(control="rejected", content="会话不存在")
 
-    approval_mode = session.approval_mode
+    # 用实际生效的档位出策略句：会话存着自动档位、账号却没有自动执行权限时，
+    # 门控会退回人工审批，这里必须同样说「需人工审批」，模型才不会承诺直接执行。
+    approval_mode = await effective_approval_mode(
+        db, approval_mode=session.approval_mode, user_id=session.user_id
+    )
 
     asset = await cmdb_asset_crud.get(db, asset_id)
     if asset is None:
@@ -262,6 +267,11 @@ async def list_device_commands_for_asset(
             content=f"厂商 {asset.vendor} 当前没有任何可用命令。",
         )
 
+    if approval_mode != session.approval_mode:
+        lines.append(
+            f"注意：会话设为自动档位，但当前账号没有自动执行权限（{AUTO_EXECUTE}），"
+            "所有命令都需要人工审批。"
+        )
     if asset.credential_type == "none":
         lines.append("注意：该资产未配置登录凭据，执行任何命令前需先在 CMDB 中配置凭据。")
     elif asset.credential_type == "dynamic":

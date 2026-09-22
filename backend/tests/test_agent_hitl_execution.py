@@ -9,6 +9,7 @@
 import asyncio
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -32,6 +33,12 @@ from app.models.hitl_proposal import HitlProposal
 from app.models.user import User
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _test_user_may_execute_approved(test_user: User, grant_permissions) -> None:
+    """执行前会复核触发人的当前权限（R1）；本文件的用例默认以审批人身份触发执行。"""
+    await grant_permissions(test_user, "agent:hitl_approve")
 
 
 async def _approved_device_proposal(
@@ -141,6 +148,112 @@ class OutputDeviceExecutor:
             detail={"output": self.output, "truncated": False},
             dispatched=True,
         )
+
+
+async def _assert_not_dispatched(
+    db_session: AsyncSession,
+    proposal_id: int,
+    executor: RecordingDeviceExecutor,
+    summary: ProposalSafeSummary,
+    missing_code: str,
+) -> None:
+    """复核不通过：不认领、不下发，提案停在 APPROVED，并写明缺哪个权限。"""
+    assert executor.calls == []
+    assert summary.status == "APPROVED"
+    assert missing_code in (summary.last_error or "")
+    db_session.expire_all()
+    persisted = await hitl_proposal_crud.get(db_session, proposal_id)
+    assert persisted is not None
+    assert persisted.status == "APPROVED"
+    assert persisted.execution_started_at is None
+
+
+async def test_execution_stops_when_approver_lost_permission(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    revoke_permissions,
+) -> None:
+    """批准后审批权限被撤销：尚未下发的操作必须停下，不能凭旧授权继续碰设备。"""
+    proposal, _ = await _approved_device_proposal(db_session, test_user)
+    await revoke_permissions(test_user, "agent:hitl_approve")
+    executor = RecordingDeviceExecutor()
+
+    summary = await execute_approved_proposal(
+        session_factory=async_sessionmaker(db_engine, expire_on_commit=False),
+        proposal_id=proposal.id,
+        actor_user_id=test_user.id,
+        dynamic_password="one-use-password",
+        device_executor=executor,
+    )
+
+    await _assert_not_dispatched(db_session, proposal.id, executor, summary, "agent:hitl_approve")
+
+
+async def test_auto_execution_is_rechecked_against_auto_execute_permission(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """自动执行按自动执行权限复核：只持有人工审批权限不够，不能借审批人身份放行。"""
+    proposal, _ = await _approved_device_proposal(db_session, test_user)
+    executor = RecordingDeviceExecutor()
+
+    summary = await execute_approved_proposal(
+        session_factory=async_sessionmaker(db_engine, expire_on_commit=False),
+        proposal_id=proposal.id,
+        actor_user_id=test_user.id,
+        dynamic_password="one-use-password",
+        device_executor=executor,
+        required_permission="agent:auto_execute",
+    )
+
+    await _assert_not_dispatched(db_session, proposal.id, executor, summary, "agent:auto_execute")
+
+
+async def test_manual_execution_does_not_require_auto_execute(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """人工批准的执行只看审批权限，不能被错误要求持有自动执行权限。"""
+    proposal, _ = await _approved_device_proposal(db_session, test_user)
+    executor = RecordingDeviceExecutor()
+
+    summary = await execute_approved_proposal(
+        session_factory=async_sessionmaker(db_engine, expire_on_commit=False),
+        proposal_id=proposal.id,
+        actor_user_id=test_user.id,
+        dynamic_password="one-use-password",
+        device_executor=executor,
+    )
+
+    assert summary.status == "EXECUTED"
+    assert len(executor.calls) == 1
+
+
+async def test_execution_stops_for_deactivated_actor(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """账号被停用后，它批准的、尚未下发的操作同样停下。"""
+    proposal, _ = await _approved_device_proposal(db_session, test_user)
+    test_user.is_active = False
+    await db_session.commit()
+    executor = RecordingDeviceExecutor()
+
+    summary = await execute_approved_proposal(
+        session_factory=async_sessionmaker(db_engine, expire_on_commit=False),
+        proposal_id=proposal.id,
+        actor_user_id=test_user.id,
+        dynamic_password="one-use-password",
+        device_executor=executor,
+    )
+
+    assert executor.calls == []
+    assert summary.status == "APPROVED"
+    assert "停用" in (summary.last_error or "")
 
 
 async def test_build_result_preview_preserves_at_limit_and_marks_long_output() -> None:
@@ -550,6 +663,8 @@ async def test_claim_loser_refreshes_executed_without_crash(
         proposal_id=proposal_id,
         dynamic_password=None,
         publisher=None,
+        actor_user_id=test_user.id,
+        required_permission="agent:hitl_approve",
     )
 
     assert isinstance(result, ProposalSafeSummary)
@@ -585,6 +700,8 @@ async def test_claim_loser_polls_executing_until_done(
         proposal_id=proposal_id,
         dynamic_password=None,
         publisher=None,
+        actor_user_id=test_user.id,
+        required_permission="agent:hitl_approve",
     )
     await finish_task
 

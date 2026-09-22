@@ -27,6 +27,45 @@ describe("ChatInput", () => {
     expect(screen.getByText("帮我审批")).toBeInTheDocument()
   })
 
+  it("没有自动执行权限时，帮我审批/完全访问两个档位不可选", async () => {
+    render(
+      <ChatInput
+        approvalMode="ask"
+        canAutoExecute={false}
+        onApprovalModeSelect={vi.fn()}
+        onSend={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByLabelText("审批模式"))
+
+    const options = await screen.findAllByRole("option")
+    const byLabel = (label: string) =>
+      options.find((option) => option.textContent?.includes(label))
+    expect(byLabel("请求审批")).not.toHaveAttribute("aria-disabled", "true")
+    expect(byLabel("帮我审批")).toHaveAttribute("aria-disabled", "true")
+    expect(byLabel("完全访问")).toHaveAttribute("aria-disabled", "true")
+  })
+
+  it("有自动执行权限时三个档位都可选", async () => {
+    render(
+      <ChatInput
+        approvalMode="ask"
+        canAutoExecute={true}
+        onApprovalModeSelect={vi.fn()}
+        onSend={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByLabelText("审批模式"))
+
+    const options = await screen.findAllByRole("option")
+    expect(options).toHaveLength(3)
+    for (const option of options) {
+      expect(option).not.toHaveAttribute("aria-disabled", "true")
+    }
+  })
+
   it("无会话时禁用审批档位选择器", () => {
     render(
       <ChatInput

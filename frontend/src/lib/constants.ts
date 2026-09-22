@@ -61,6 +61,7 @@ export const PERMISSIONS = {
   // Agent
   AGENT_USE: "agent:use",
   AGENT_HITL_APPROVE: "agent:hitl_approve",
+  AGENT_AUTO_EXECUTE: "agent:auto_execute",
   // 设备命令策略
   DEVICE_COMMAND_POLICY_READ: "device_command_policy:read",
   DEVICE_COMMAND_POLICY_MANAGE: "device_command_policy:manage",

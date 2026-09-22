@@ -6,7 +6,9 @@
 @Docs: HITL 独立执行服务：策略复检、持久化认领、外部执行与 UNKNOWN 恢复。
 
 实现流程：
-1. execute_approved_proposal 先经 _preflight_and_claim 在同一短事务内复检策略并认领 EXECUTING。
+1. execute_approved_proposal 先经 _preflight_and_claim 在同一短事务内复检授权与策略并认领 EXECUTING；
+   授权按触发人此刻的账号状态与权限现查（人工路径看审批权限，档位自动批准看自动执行权限），
+   不通过则不认领、不下发，提案保持 APPROVED 并写明原因。
 2. 认领提交后 _execute_prepared 调用注入或默认执行器；执行器内可观测已提交的 EXECUTING 状态。
 3. 执行成功后在同一收尾事务 mark_executed、保存安全预览，并仅为查询动作保存完整正文；执行失败或异常统一 mark_unknown(dispatch_outcome_unknown)。
 4. reconcile_executing_proposals 供启动恢复，将遗留 EXECUTING 批量转为 UNKNOWN。
@@ -38,6 +40,7 @@ from app.agent.hitl import (
     _publish,
     _summary,
 )
+from app.agent.permissions import HITL_APPROVE, load_permission_context
 from app.core.config import settings
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
@@ -189,12 +192,36 @@ async def _handle_claim_conflict(
     raise HitlResumeError(f"状态 {refreshed.status} 的 HITL 提案不可恢复执行")
 
 
+async def _authorization_denial(
+    db: AsyncSession,
+    actor_user_id: int | None,
+    required_permission: str,
+) -> str | None:
+    """执行前复核触发人的当前授权。
+
+    批准和真正下发之间有时间差（S6 异步执行后会更长）：这段时间里账号可能被停用、
+    权限可能被撤销。撤销后还没下发的操作必须停下；已经下发的命令没法撤回，
+    那一侧照常记录真实结果或 UNKNOWN，不在这里处理。
+
+    Returns:
+        拒绝原因（会写进 last_error 给界面和模型看）；None 表示放行。
+    """
+    context = await load_permission_context(db, actor_user_id)
+    if context is None:
+        return "执行前复核未通过：触发执行的账号不存在或已停用"
+    if not context.has(required_permission):
+        return f"执行前复核未通过：当前账号已无权执行（需要权限：{required_permission}）"
+    return None
+
+
 async def _preflight_and_claim(
     *,
     session_factory: async_sessionmaker[AsyncSession],
     proposal_id: int,
     dynamic_password: str | None,
     publisher: HitlEventPublisher | None,
+    actor_user_id: int | None,
+    required_permission: str,
 ) -> PreparedExecution | ProposalSafeSummary:
     """在同一短事务内完成复检、策略拒绝或认领 EXECUTING 并提交。
 
@@ -203,6 +230,8 @@ async def _preflight_and_claim(
         proposal_id: 待执行提案 ID。
         dynamic_password: 动态凭据明文，不落库。
         publisher: 可选安全事件发布器。
+        actor_user_id: 触发执行的账号。
+        required_permission: 触发人此刻必须持有的权限（人工 / 自动执行各不相同）。
 
     Returns:
         认领成功返回 PreparedExecution；否则返回当前安全摘要。
@@ -223,6 +252,12 @@ async def _preflight_and_claim(
             proposal = polled
         if proposal.status != "APPROVED":
             raise HitlResumeError(f"状态 {proposal.status} 的 HITL 提案不可恢复执行")
+
+        denial = await _authorization_denial(db, actor_user_id, required_permission)
+        if denial is not None:
+            _store_last_error(proposal, denial)
+            await db.commit()
+            return _summary(proposal)
 
         detached_asset: CmdbAsset | None = None
         action_type = proposal.action_type
@@ -503,8 +538,9 @@ async def execute_approved_proposal(
     notify_executor: NotifyExecutorProtocol | None = None,
     device_executor: DeviceExecutorProtocol | None = None,
     actor_ip: str = "",
+    required_permission: str = HITL_APPROVE,
 ) -> ProposalSafeSummary:
-    """执行已批准提案：复检策略、认领 EXECUTING、调用外部执行器并完成状态迁移。
+    """执行已批准提案：复检授权与策略、认领 EXECUTING、调用外部执行器并完成状态迁移。
 
     Args:
         session_factory: 独立短会话工厂。
@@ -514,6 +550,9 @@ async def execute_approved_proposal(
         dynamic_password: 动态凭据明文，不落库。
         notify_executor: 可选通知执行器。
         device_executor: 可选设备执行器。
+        actor_ip: 触发来源 IP，写进审计。
+        required_permission: 触发人此刻必须持有的权限。默认是人工审批权限（更严的一侧，
+            调用方忘了传也不会放宽）；档位自动批准的路径必须显式传 agent:auto_execute。
 
     Returns:
         执行完成或预检/UNKNOWN 后的安全摘要。
@@ -527,6 +566,8 @@ async def execute_approved_proposal(
         proposal_id=proposal_id,
         dynamic_password=dynamic_password,
         publisher=publisher,
+        actor_user_id=actor_user_id,
+        required_permission=required_permission,
     )
     if isinstance(prepared, ProposalSafeSummary):
         return prepared

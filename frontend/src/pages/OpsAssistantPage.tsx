@@ -40,6 +40,8 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { useHitlReconcile } from "@/hooks/use-hitl-reconcile"
+import { usePermission } from "@/hooks/use-permission"
+import { PERMISSIONS } from "@/lib/constants"
 import { useOpsChat } from "@/hooks/use-ops-chat"
 import {
   createAgentSession,
@@ -88,6 +90,8 @@ export function OpsAssistantPage() {
       ? null
       : sessions.find((row) => row.id === selectedSessionId) ?? null
   const approvalMode = selectedSession?.approval_mode ?? null
+  const { hasPermission } = usePermission()
+  const canAutoExecute = hasPermission(PERMISSIONS.AGENT_AUTO_EXECUTE)
 
   const {
     messages,
@@ -203,8 +207,9 @@ export function OpsAssistantPage() {
         approval_mode: mode,
       })
       updateSessionInList(updated)
-    } catch {
-      toast.error("变更审批模式失败")
+    } catch (error: unknown) {
+      // 服务端会说明拒绝原因（例如缺自动执行权限），照原话提示，别只说「失败」
+      toast.error(readErrorMessage(error, "变更审批模式失败"))
     } finally {
       setPatchingApprovalMode(false)
     }
@@ -562,10 +567,17 @@ export function OpsAssistantPage() {
                     inputDisabled || isExecutingHitl || isBusy
                   }
                 />
+                {approvalMode != null && approvalMode !== "ask" && !canAutoExecute ? (
+                  <p className="text-xs text-muted-foreground">
+                    当前账号没有自动执行权限：「{APPROVAL_MODE_LABELS[approvalMode]}」档位不会生效，
+                    设备命令仍需人工审批。
+                  </p>
+                ) : null}
                 <ChatInput
                   disabled={inputDisabled || isExecutingHitl}
                   isSending={isBusy}
                   approvalMode={approvalMode}
+                  canAutoExecute={canAutoExecute}
                   onApprovalModeSelect={handleApprovalModeSelect}
                   onSend={sendMessage}
                   // HITL 执行中不给停止入口：那一轮不是 chat turn，停不掉

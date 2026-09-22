@@ -40,6 +40,7 @@ from app.agent.device_result_summary import (
     deliver_device_query_summary,
 )
 from app.agent.loop import LoopOutcome
+from app.agent.permissions import AUTO_EXECUTE
 from app.agent.session import append_user_message
 from app.agent.turn_registry import turn_registry
 from app.agent.ws_hub import BufferedWsHitlEventPublisher, hub
@@ -50,6 +51,7 @@ from app.crud.agent_registry import agent_registry_crud
 from app.crud.agent_session import agent_session_crud
 from app.crud.hitl_execution_result import hitl_execution_result_crud
 from app.crud.hitl_proposal import hitl_proposal_crud
+from app.crud.user import user_crud
 from app.models.agent_message import AgentMessage
 from app.models.agent_registry import AgentRegistry
 from app.models.agent_session import AgentSession
@@ -321,8 +323,20 @@ async def patch_session_approval_mode(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("agent:use")),
 ) -> ResponseEnvelope[AgentSessionResponse]:
-    """更新会话审批模式；非所有者返回 404；相同档位不写审计。"""
+    """更新会话审批模式；非所有者返回 404；相同档位不写审计。
+
+    切到 assist/full 需要独立的 agent:auto_execute 权限：这两个档位会让门控自动批准
+    并执行设备命令，是和「使用运维助手」「人工审批」不同的责任。前端的确认弹窗
+    只是提醒，不是授权。切回 ask 永远放行，不能因为缺权限把人困在自动档位里。
+    """
     session = await _owned_session_or_404(db, session_id, current_user.id)
+    if body.approval_mode != "ask" and not await user_crud.has_permission_or_superuser(
+        db, current_user, AUTO_EXECUTE
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"无权开启自动执行档位（需要权限：{AUTO_EXECUTE}）",
+        )
     old_mode = session.approval_mode
     if old_mode != body.approval_mode:
         updated = await agent_session_crud.update(

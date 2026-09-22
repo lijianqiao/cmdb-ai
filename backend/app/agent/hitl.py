@@ -9,6 +9,7 @@
 1. gate_action（propose_action 别名）先合并顶层 asset_id，再用严格 Pydantic 模型校验动作载荷并检查 CMDB 资产。
 2. 载荷校验失败只回传固定中文原因与字段名，绝不拼接 ValidationError / 原始 input_value。
 3. 合法提案始终先以 PENDING 追加；assist/full 档位下按策略表自动批准，但不执行。
+   档位只有在发起人当前持有 agent:auto_execute 时才生效，否则按 ask 处理。
 4. decide_proposal 只复用 CRUD 的审批状态机，不隐式恢复执行，避免人工 API 路径重复执行。
 5. resume_proposal 委托独立执行服务 execute_approved_proposal，聊天与 HTTP 路径复用同一语义。
 6. 对 Agent 和事件发布器只暴露安全摘要（含全文结果存在标志），不返回原始 payload，避免设备凭据或未知字段泄露。
@@ -29,6 +30,7 @@ from app.agent.device_commands import (
     list_commands_for_vendor,
     validate_interface_name,
 )
+from app.agent.permissions import HITL_APPROVE, effective_approval_mode
 from app.crud.agent_session import agent_session_crud
 from app.crud.cmdb_asset import cmdb_asset_crud
 from app.crud.device_command_policy import device_command_policy_crud
@@ -324,7 +326,11 @@ async def gate_action(
     session = await agent_session_crud.get(db, session_id)
     if session is None:
         raise HitlProposalRejectedError("会话不存在")
-    approval_mode = session.approval_mode
+    # 会话存的档位只是用户的选择：发起人当前没有自动执行权限时一律按 ask 处理，
+    # 旧会话里存着 full 也不例外（R1）。
+    approval_mode = await effective_approval_mode(
+        db, approval_mode=session.approval_mode, user_id=actor_user_id
+    )
 
     proposal = await hitl_proposal_crud.create(
         db,
@@ -456,6 +462,8 @@ async def resume_proposal(
         publisher=publisher,
         dynamic_password=dynamic_password,
         actor_ip=actor_ip,
+        # 这条路径只服务人工审批 / 人工重试：按审批权限复核，不要求自动执行权限
+        required_permission=HITL_APPROVE,
     )
     db.expire_all()
     return summary

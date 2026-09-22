@@ -34,6 +34,8 @@ export interface ChatInputProps {
   isSending?: boolean
   placeholder?: string
   approvalMode: ApprovalMode | null
+  /** 是否持有 agent:auto_execute；没有时两个自动档位不可选（服务端同样会拒绝） */
+  canAutoExecute?: boolean
   onApprovalModeSelect: (mode: ApprovalMode) => void
   onSend: (content: string) => void | Promise<void>
   onCancel?: () => void | Promise<void>
@@ -50,6 +52,7 @@ export interface ChatInputProps {
  *   isSending: 显示发送中 Spinner
  *   placeholder: 占位文案
  *   approvalMode: 当前会话已保存的审批档位
+ *   canAutoExecute: 是否可选帮我审批/完全访问；缺省按没有权限处理
  *   onApprovalModeSelect: 用户选择新档位（由页面处理 PATCH / 确认弹窗）
  *   onSend: 提交非空正文
  *   onCancel: 撤回本轮请求；传了才会出现停止态
@@ -59,6 +62,7 @@ export function ChatInput({
   isSending = false,
   placeholder = "输入消息，Enter 发送，Shift+Enter 换行",
   approvalMode,
+  canAutoExecute = false,
   onApprovalModeSelect,
   onSend,
   onCancel,
@@ -111,11 +115,17 @@ export function ChatInput({
           </SelectTrigger>
           <SelectContent>
             <SelectGroup>
-              {APPROVAL_MODE_ITEMS.map((item) => (
-                <SelectItem key={item.value} value={item.value}>
-                  {item.label}
-                </SelectItem>
-              ))}
+              {APPROVAL_MODE_ITEMS.map((item) => {
+                const locked = item.value !== "ask" && !canAutoExecute
+                return (
+                  <SelectItem key={item.value} value={item.value} disabled={locked}>
+                    {item.label}
+                    {locked ? (
+                      <span className="text-xs text-muted-foreground">（需自动执行权限）</span>
+                    ) : null}
+                  </SelectItem>
+                )
+              })}
             </SelectGroup>
           </SelectContent>
         </Select>

@@ -627,10 +627,13 @@ async def test_list_device_commands_rejects_asset_without_vendor(
 async def test_list_device_commands_reports_policy_and_credential_state(
     db_session: AsyncSession,
     test_user: User,
+    grant_permissions,
 ) -> None:
     """命令清单应含白名单/黑名单/需审批标注与凭据前提提示。"""
     from app.crud.device_command_policy import device_command_policy_crud
 
+    # 自动档位的策略句只对真正持有自动执行权限的账号成立（R1）
+    await grant_permissions(test_user, "agent:auto_execute")
     session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
     asset = await cmdb_asset_crud.get(db_session, asset_id)
     assert asset is not None
@@ -681,6 +684,43 @@ async def test_list_device_commands_reports_policy_and_credential_state(
     assert assist_result.control == "ok"
     assert "白名单（可自动执行）" in assist_result.content
     assert "device_control" in assist_result.content
+
+
+async def test_list_device_commands_follows_effective_mode_without_auto_execute(
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """会话存着 full，但账号没有自动执行权限：策略句必须按人工审批说，
+    否则模型会告诉用户「可以直接执行」，而门控实际会把它退回人工审批。"""
+    from app.crud.device_command_policy import device_command_policy_crud
+
+    session_id, asset_id = await _make_session_and_asset(db_session, test_user.id)
+    asset = await cmdb_asset_crud.get(db_session, asset_id)
+    assert asset is not None
+    asset.vendor = "cisco_iosxe"
+    await device_command_policy_crud.create(
+        db_session,
+        {
+            "scope": "asset",
+            "asset_id": asset_id,
+            "command_name": "show_version",
+            "decision": "whitelist",
+        },
+    )
+    session = await agent_session_crud.get(db_session, session_id)
+    assert session is not None
+    session.approval_mode = "full"
+    await db_session.commit()
+
+    result = await hitl_tools.list_device_commands_for_asset(
+        db_session, session_id=session_id, asset_id=asset_id
+    )
+
+    assert result.control == "ok"
+    assert "可自动执行" not in result.content
+    assert "白名单（当前为请求审批，需人工批准）" in result.content
+    assert "未分类（需人工审批）" in result.content
+    assert "agent:auto_execute" in result.content
 
 
 async def test_root_dispatcher_routes_list_device_commands(

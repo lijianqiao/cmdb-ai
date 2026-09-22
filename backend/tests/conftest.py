@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import event
+from sqlalchemy import delete, event, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -45,13 +45,14 @@ from app.core.security import hash_password  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Base  # noqa: E402
 from app.models.permission import Permission  # noqa: E402
-from app.models.role import Role  # noqa: E402
-from app.models.user import User  # noqa: E402
+from app.models.role import Role, role_permissions  # noqa: E402
+from app.models.user import User, user_roles  # noqa: E402
 from app.services.auth import login_rate_limiter, registration_rate_limiter  # noqa: E402
 
 type Headers = dict[str, str]
 type PermissionData = dict[str, Any]
 type LoginUser = Callable[[str, str], Awaitable[Headers]]
+type ChangePermissions = Callable[..., Awaitable[None]]
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -225,6 +226,62 @@ async def login_user(client: AsyncClient) -> LoginUser:
         return {"Authorization": f"Bearer {token}"}
 
     return login
+
+
+@pytest_asyncio.fixture
+async def grant_permissions(db_session: AsyncSession) -> ChangePermissions:
+    """Return a helper granting permission codes to a user's first role.
+
+    Missing permission rows are created on the fly, so a test can state exactly
+    which codes the user holds instead of depending on the administrator
+    fixture's set (which deliberately contains no Agent or business codes).
+    """
+
+    async def grant(user: User, *codes: str) -> None:
+        role_id = (
+            await db_session.execute(
+                select(user_roles.c.role_id).where(user_roles.c.user_id == user.id).limit(1)
+            )
+        ).scalar_one()
+        for code in codes:
+            permission = (
+                await db_session.execute(select(Permission).where(Permission.code == code))
+            ).scalar_one_or_none()
+            if permission is None:
+                permission = Permission(name=code, code=code, module="测试")
+                db_session.add(permission)
+                await db_session.flush()
+            already = await db_session.scalar(
+                select(role_permissions.c.permission_id).where(
+                    role_permissions.c.role_id == role_id,
+                    role_permissions.c.permission_id == permission.id,
+                )
+            )
+            if already is None:
+                await db_session.execute(
+                    role_permissions.insert().values(role_id=role_id, permission_id=permission.id)
+                )
+        await db_session.commit()
+
+    return grant
+
+
+@pytest_asyncio.fixture
+async def revoke_permissions(db_session: AsyncSession) -> ChangePermissions:
+    """Return a helper removing permission codes from every role of a user."""
+
+    async def revoke(user: User, *codes: str) -> None:
+        role_ids = select(user_roles.c.role_id).where(user_roles.c.user_id == user.id)
+        permission_ids = select(Permission.id).where(Permission.code.in_(codes))
+        await db_session.execute(
+            delete(role_permissions).where(
+                role_permissions.c.role_id.in_(role_ids),
+                role_permissions.c.permission_id.in_(permission_ids),
+            )
+        )
+        await db_session.commit()
+
+    return revoke
 
 
 @pytest_asyncio.fixture

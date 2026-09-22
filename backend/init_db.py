@@ -213,6 +213,15 @@ SEED_PERMISSIONS: tuple[SeedPermission, ...] = (
         "description": "审批或驳回 Agent 提出的 HITL 提案",
     },
     {
+        "name": "启用自动执行档位",
+        "code": "agent:auto_execute",
+        "module": "Agent",
+        "description": (
+            "允许把自己的会话切到辅助/完全访问档位，由档位自动批准并执行设备命令；"
+            "与人工审批是两种责任，种子不分配给任何角色，需管理员按需授予"
+        ),
+    },
+    {
         "name": "管理系统配置",
         "code": "system_config:manage",
         "module": "系统配置",
