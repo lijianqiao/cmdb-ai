@@ -16,8 +16,8 @@
 6. POST messages：归属校验后 claim turn 租约 → 落库用户消息 → run_chat_turn；
    整轮结束后一次 commit；HITL 事件经 BufferedWsHitlEventPublisher 在 commit 之后再广播。
    同会话并发请求返回 409；异常时仍尽量 commit 已写入的用户消息；finally 释放租约。
-7. 设备查询完整结果只经会话归属专用端点按需返回；总结恢复只处理已保存正文，
-   复用幂等总结服务且在消息提交后广播，不触发设备执行或再次使用动态凭据。
+7. 设备查询完整结果只经会话归属专用端点按需返回，且要求当前持有 cmdb:read；总结恢复
+   只处理已保存正文，复用幂等总结服务且在消息提交后广播，不触发设备执行或再次使用动态凭据。
 8. 快照包含可恢复态提案及已执行查询，但只暴露 payload 中的预览；完整结果存在性
    用一次批量 ID 查询计算，正文绝不进入快照。
 """
@@ -40,7 +40,7 @@ from app.agent.device_result_summary import (
     deliver_device_query_summary,
 )
 from app.agent.loop import LoopOutcome
-from app.agent.permissions import AUTO_EXECUTE
+from app.agent.permissions import AUTO_EXECUTE, CMDB_READ
 from app.agent.session import append_user_message
 from app.agent.turn_registry import turn_registry
 from app.agent.ws_hub import BufferedWsHitlEventPublisher, hub
@@ -226,6 +226,18 @@ async def _owned_device_query_result_or_404(
             detail="设备查询完整结果不存在",
         )
     return result_row
+
+
+async def _require_cmdb_read(db: AsyncSession, user: User) -> None:
+    """设备命令结果属于资产数据：按当前 cmdb:read 放行。
+
+    历史结果接口不能成为绕过撤销的后门——权限被收回后，完整正文与总结恢复一并不可用。
+    """
+    if not await user_crud.has_permission_or_superuser(db, user, CMDB_READ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"无权查看设备命令结果（需要权限：{CMDB_READ}）",
+        )
 
 
 async def _broadcast_summary_delivery(delivery: SummaryDelivery) -> None:
@@ -417,6 +429,8 @@ async def get_device_query_result(
     current_user: User = Depends(require_permission("agent:use")),
 ) -> ResponseEnvelope[DeviceQueryResultResponse]:
     """让当前会话所有者按需读取设备查询完整正文。"""
+    await _owned_session_or_404(db, session_id, current_user.id)
+    await _require_cmdb_read(db, current_user)
     result_row = await _owned_device_query_result_or_404(
         db,
         session_id=session_id,
@@ -437,6 +451,8 @@ async def recover_device_query_summary(
     current_user: User = Depends(require_permission("agent:use")),
 ) -> ResponseEnvelope[DeviceQueryResultResponse]:
     """只对已保存正文恢复总结，不重新连接设备。"""
+    await _owned_session_or_404(db, session_id, current_user.id)
+    await _require_cmdb_read(db, current_user)
     await _owned_device_query_result_or_404(
         db,
         session_id=session_id,

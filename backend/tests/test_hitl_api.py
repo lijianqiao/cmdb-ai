@@ -995,8 +995,8 @@ async def test_auto_approved_device_query_keeps_only_existing_agent_reply(
     grant_permissions,
 ) -> None:
     """自动审批的 device_query 不应被 HTTP 人工审批链路追加总结消息。"""
-    # 档位自动执行只对持有自动执行权限的账号生效（R1）
-    await grant_permissions(test_user, "agent:auto_execute")
+    # 档位自动执行只对持有自动执行权限的账号生效（R1）；门控工具还要 agent:use + cmdb:read（R2）
+    await grant_permissions(test_user, "agent:auto_execute", "agent:use", "cmdb:read")
     original_reply = "Agent loop 原有回复"
 
     async def fake_chat(*args: Any, **kwargs: Any) -> ChatResult:

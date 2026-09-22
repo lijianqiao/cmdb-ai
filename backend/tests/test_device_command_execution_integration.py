@@ -16,6 +16,7 @@ import re
 from unittest.mock import MagicMock, patch
 
 import pytest
+import pytest_asyncio
 from cryptography.fernet import Fernet
 from httpx import AsyncClient
 from pydantic import SecretStr
@@ -36,6 +37,12 @@ from app.models.role import role_permissions
 from app.models.user import User, user_roles
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _test_user_may_use_device_tools(test_user: User, grant_permissions) -> None:
+    """设备命令工具按发起人的业务权限放行（R2）：本文件以 test_user 走真实门控路径。"""
+    await grant_permissions(test_user, "agent:use", "cmdb:read")
 
 type Headers = dict[str, str]
 
@@ -476,11 +483,13 @@ async def test_response_bodies_never_contain_plaintext_or_ciphertext_password(
 
 async def test_child_agent_dispatcher_rejects_query_device_command(
     db_session: AsyncSession,
+    test_user: User,
 ) -> None:
     """子角色调度器不得暴露或执行 query_device_command。"""
     dispatch = build_tool_dispatcher(
         db_session,
         ("query_monitor_status", "query_device_command"),
+        user_id=test_user.id,
     )
 
     result = await dispatch(

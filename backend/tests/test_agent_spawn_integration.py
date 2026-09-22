@@ -36,7 +36,7 @@ from app.agent.orchestration import (
     investigate_root_cause,
 )
 from app.agent.spawn import ChildReceipt, ChildRunResult, SpawnManager
-from app.core.llm import ChatMessage, ChatResult, LlmRequestError
+from app.core.llm import ChatMessage, ChatResult, LlmRequestError, ToolCall
 from app.crud.agent_message import agent_message_crud
 from app.crud.agent_registry import agent_registry_crud
 from app.crud.agent_trace_event import agent_trace_event_crud
@@ -453,3 +453,54 @@ async def _completed_runner(
     _budget: Budget,
 ) -> ChildRunResult:
     return ChildRunResult(status="COMPLETED", result_summary="integration-done")
+
+
+async def test_child_agent_is_capped_by_session_owner_permissions(
+    integration_db: IntegrationDatabase,
+) -> None:
+    """子 Agent 的工具权限以会话所有者为上限（R2）：所有者没有 knowledge:read 时，
+    子 Agent 的工具清单里看不到知识库工具，模型硬要调也会在执行边界被拒。
+    角色白名单只限定「这个角色可以用哪些工具」，替代不了登录用户的授权。"""
+    offered: list[list[str]] = []
+    tool_replies: list[str] = []
+
+    async def chat(
+        model_key: str,
+        messages: list[ChatMessage],
+        *,
+        tools: list[dict[str, object]] | None = None,
+    ) -> ChatResult:
+        del model_key
+        offered.append(
+            [str(tool["function"]["name"]) for tool in tools or []]  # type: ignore[index]
+        )
+        replies = [message.content for message in messages if message.role == "tool"]
+        if not replies:
+            return ChatResult(
+                content=None,
+                tool_calls=[
+                    ToolCall(id="call-1", name="kb_read", arguments='{"path": "sop/a.md"}')
+                ],
+                finish_reason="tool_calls",
+                prompt_tokens=1,
+                completion_tokens=1,
+            )
+        tool_replies.extend(replies)
+        return ChatResult(
+            content="知识库读不到，已结束",
+            tool_calls=[],
+            finish_reason="stop",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    manager = SpawnManager(integration_db.session_factory, chat_fn=chat)
+    receipt = await manager.spawn_agent(
+        session_id=integration_db.session_id,
+        role="kb_explorer",
+        task_brief="读一份 SOP",
+    )
+    await manager.wait_agent(receipt.child_id)
+
+    assert offered and "kb_read" not in offered[0]
+    assert tool_replies and "knowledge:read" in tool_replies[0]

@@ -45,11 +45,12 @@ pytestmark = pytest.mark.asyncio
 @pytest_asyncio.fixture(autouse=True)
 async def _test_user_is_approver(test_user: User, grant_permissions) -> None:
     """执行前会复核触发人的审批权限（R1）；本文件的 resume 用例都以审批人身份触发。
+    门控工具还要按发起人的业务权限放行（R2：agent:use + cmdb:read）。
 
     自动执行权限不在这里默认授予：自动批准相关的用例要各自显式声明，
     这样「没有自动执行权限就不能自动批准」的用例才有意义。
     """
-    await grant_permissions(test_user, "agent:hitl_approve")
+    await grant_permissions(test_user, "agent:use", "cmdb:read", "agent:hitl_approve")
 
 
 def _hitl_session_factory(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

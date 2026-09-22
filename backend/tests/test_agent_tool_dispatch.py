@@ -3,11 +3,20 @@
 from typing import Any
 
 import pytest
+import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import tool_dispatch
 from app.agent.loop import ToolResult
 from app.agent.tool_dispatch import build_tool_dispatcher, tool_schemas_for
+from app.models.user import User
+
+
+@pytest_asyncio.fixture
+async def user_id(superuser: User) -> int:
+    """这些用例验证白名单、参数校验与转发，不验证业务权限：以超管身份调度
+    （超管视为持有全部权限）。业务权限本身见 test_agent_tool_permissions.py。"""
+    return superuser.id
 
 
 def test_tool_schemas_expose_only_requested_names() -> None:
@@ -42,8 +51,8 @@ def test_all_seven_registered_tools_have_strict_schemas() -> None:
     )
 
 
-async def test_dispatch_rejects_tool_outside_allowlist(db_session: AsyncSession) -> None:
-    dispatch = build_tool_dispatcher(db_session, ("kb_read",))
+async def test_dispatch_rejects_tool_outside_allowlist(db_session: AsyncSession, user_id: int) -> None:
+    dispatch = build_tool_dispatcher(db_session, ("kb_read",), user_id=user_id)
 
     result = await dispatch("query_cmdb", {})
 
@@ -53,8 +62,9 @@ async def test_dispatch_rejects_tool_outside_allowlist(db_session: AsyncSession)
 
 async def test_dispatch_rejects_unknown_tool_even_if_persisted_allowlist_contains_it(
     db_session: AsyncSession,
+    user_id: int,
 ) -> None:
-    dispatch = build_tool_dispatcher(db_session, ("unknown_tool",))
+    dispatch = build_tool_dispatcher(db_session, ("unknown_tool",), user_id=user_id)
 
     result = await dispatch("unknown_tool", {})
 
@@ -64,8 +74,9 @@ async def test_dispatch_rejects_unknown_tool_even_if_persisted_allowlist_contain
 
 async def test_dispatch_requests_clarification_for_invalid_arguments(
     db_session: AsyncSession,
+    user_id: int,
 ) -> None:
-    dispatch = build_tool_dispatcher(db_session, ("kb_read",))
+    dispatch = build_tool_dispatcher(db_session, ("kb_read",), user_id=user_id)
 
     result = await dispatch("kb_read", {"path": "sop.md", "offset": -1})
 
@@ -73,8 +84,8 @@ async def test_dispatch_requests_clarification_for_invalid_arguments(
     assert "参数无效" in result.content
 
 
-async def test_dispatch_does_not_coerce_argument_types(db_session: AsyncSession) -> None:
-    dispatch = build_tool_dispatcher(db_session, ("kb_read",))
+async def test_dispatch_does_not_coerce_argument_types(db_session: AsyncSession, user_id: int) -> None:
+    dispatch = build_tool_dispatcher(db_session, ("kb_read",), user_id=user_id)
 
     result = await dispatch("kb_read", {"path": "sop.md", "offset": "1"})
 
@@ -94,9 +105,9 @@ async def test_dispatch_does_not_coerce_argument_types(db_session: AsyncSession)
     ],
 )
 async def test_every_tool_rejects_its_boundary_violation(
-    db_session: AsyncSession, tool_name: str, arguments: dict[str, Any]
+    db_session: AsyncSession, user_id: int, tool_name: str, arguments: dict[str, Any]
 ) -> None:
-    dispatch = build_tool_dispatcher(db_session, (tool_name,))
+    dispatch = build_tool_dispatcher(db_session, (tool_name,), user_id=user_id)
 
     result = await dispatch(tool_name, arguments)
 
@@ -104,7 +115,7 @@ async def test_every_tool_rejects_its_boundary_violation(
 
 
 async def test_dispatch_calls_validated_knowledge_tool(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    db_session: AsyncSession, user_id: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, Any] = {}
 
@@ -113,7 +124,7 @@ async def test_dispatch_calls_validated_knowledge_tool(
         return ToolResult(control="ok", content="document")
 
     monkeypatch.setattr(tool_dispatch, "kb_read", fake_kb_read)
-    dispatch = build_tool_dispatcher(db_session, ("kb_read",))
+    dispatch = build_tool_dispatcher(db_session, ("kb_read",), user_id=user_id)
 
     result = await dispatch("kb_read", {"path": "sop/a.md", "limit": 100})
 
@@ -122,7 +133,7 @@ async def test_dispatch_calls_validated_knowledge_tool(
 
 
 async def test_dispatch_calls_validated_db_tool(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    db_session: AsyncSession, user_id: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, Any] = {}
 
@@ -144,7 +155,7 @@ async def test_dispatch_calls_validated_db_tool(
         return ToolResult(control="ok", content="asset")
 
     monkeypatch.setattr(tool_dispatch, "query_cmdb", fake_query_cmdb)
-    dispatch = build_tool_dispatcher(db_session, ("query_cmdb",))
+    dispatch = build_tool_dispatcher(db_session, ("query_cmdb",), user_id=user_id)
 
     result = await dispatch("query_cmdb", {"ip": "10.0.0.5"})
 
@@ -181,12 +192,13 @@ async def test_dispatch_calls_validated_db_tool(
             {},
             "query_monitor_status",
             ("db_session",),
-            {"target_ids": None, "ip_prefix": None, "since_limit": 5},
+            {"target_ids": None, "ip_prefix": None, "since_limit": 5, "include_history": True},
         ),
     ],
 )
 async def test_dispatch_calls_validated_remaining_tools(
     db_session: AsyncSession,
+    user_id: int,
     monkeypatch: pytest.MonkeyPatch,
     tool_name: str,
     arguments: dict[str, Any],
@@ -201,7 +213,7 @@ async def test_dispatch_calls_validated_remaining_tools(
         return ToolResult(control="ok", content="result")
 
     monkeypatch.setattr(tool_dispatch, target, fake_tool)
-    dispatch = build_tool_dispatcher(db_session, (tool_name,))
+    dispatch = build_tool_dispatcher(db_session, (tool_name,), user_id=user_id)
 
     result = await dispatch(tool_name, arguments)
 
@@ -213,13 +225,13 @@ async def test_dispatch_calls_validated_remaining_tools(
 
 
 async def test_dispatch_hides_internal_exception_detail(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    db_session: AsyncSession, user_id: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def broken_kb_read(path: str, *, offset: int, limit: int | None) -> ToolResult:
         raise RuntimeError("secret database address")
 
     monkeypatch.setattr(tool_dispatch, "kb_read", broken_kb_read)
-    dispatch = build_tool_dispatcher(db_session, ("kb_read",))
+    dispatch = build_tool_dispatcher(db_session, ("kb_read",), user_id=user_id)
 
     result = await dispatch("kb_read", {"path": "sop/a.md"})
 
@@ -230,11 +242,13 @@ async def test_dispatch_hides_internal_exception_detail(
 
 async def test_child_dispatcher_rejects_query_device_command(
     db_session: AsyncSession,
+    user_id: int,
 ) -> None:
     """子角色调度器不得暴露或执行 query_device_command。"""
     dispatch = build_tool_dispatcher(
         db_session,
         ("query_monitor_status", "query_device_command"),
+        user_id=user_id,
     )
 
     result = await dispatch(
@@ -252,11 +266,13 @@ async def test_child_dispatcher_rejects_query_device_command(
 
 async def test_child_dispatcher_rejects_get_device_query_result(
     db_session: AsyncSession,
+    user_id: int,
 ) -> None:
     """子角色调度器不得暴露或执行 get_device_query_result。"""
     dispatch = build_tool_dispatcher(
         db_session,
         ("query_monitor_status", "get_device_query_result"),
+        user_id=user_id,
     )
 
     result = await dispatch("get_device_query_result", {"proposal_id": 1})

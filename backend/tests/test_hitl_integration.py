@@ -17,6 +17,7 @@ import re
 from unittest.mock import patch
 
 import pytest
+import pytest_asyncio
 from cryptography.fernet import Fernet
 from httpx import AsyncClient
 from pydantic import SecretStr
@@ -35,6 +36,12 @@ from app.models.permission import Permission
 from app.models.user import User, user_roles
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _test_user_may_use_hitl_tools(test_user: User, grant_permissions) -> None:
+    """notify / 设备工具按发起人的业务权限放行（R2）：本文件以 test_user 走真实门控路径。"""
+    await grant_permissions(test_user, "agent:use", "cmdb:read")
 
 type Headers = dict[str, str]
 
@@ -257,11 +264,13 @@ async def test_scenario_b_unclassified_device_control_forced_hitl_and_unreachabl
 
 async def test_scenario_c_child_dispatcher_rejects_notify(
     db_session: AsyncSession,
+    test_user: User,
 ) -> None:
     """Scenario C：子角色调度器不得暴露或执行 notify。"""
     dispatch = build_tool_dispatcher(
         db_session,
         ("query_monitor_status", "notify"),
+        user_id=test_user.id,
     )
 
     result = await dispatch(

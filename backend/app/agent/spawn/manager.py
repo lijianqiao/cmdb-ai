@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.budget import Budget
 from app.agent.loop import ChatFn, ToolResult, run_loop
+from app.agent.permissions import load_permission_context, permitted_tool_schemas
 from app.agent.roles import get_role
 from app.agent.session import append_user_message
 from app.agent.spawn.admission import depth_from_path, path_depth, validate_child_budget
@@ -574,7 +575,12 @@ class SpawnManager:
         budget: Budget,
     ) -> ChildRunResult:
         definition = get_role(receipt.role)
-        dispatcher = build_tool_dispatcher(db, receipt.tools_allowlist)
+        # 子 Agent 以会话所有者的业务权限为上限：角色白名单只说明这个角色能用哪些工具，
+        # 替代不了登录用户的授权。工具清单按当时权限过滤，调度器每次调用再现查一次。
+        session = await db.get(AgentSession, receipt.session_id)
+        owner_id = session.user_id if session is not None else None
+        owner_context = await load_permission_context(db, owner_id)
+        dispatcher = build_tool_dispatcher(db, receipt.tools_allowlist, user_id=owner_id)
 
         async def dispatch_tool(
             name: str, arguments: dict[str, Any]
@@ -591,7 +597,9 @@ class SpawnManager:
             session_id=receipt.session_id,
             model_key=receipt.model,
             dispatch_tool=dispatch_tool,
-            tools=tool_schemas_for(receipt.tools_allowlist),
+            tools=permitted_tool_schemas(
+                owner_context, tool_schemas_for(receipt.tools_allowlist)
+            ),
             budget=budget,
             chat_fn=self._chat_fn,
             agent_id=receipt.child_id,

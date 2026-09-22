@@ -458,6 +458,8 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 - **失败原因可追**：分类原因（含异常类名）写入 `action_payload.last_error`，经安全摘要透出到审批卡片与 Agent 上下文；完整异常堆栈只进服务端日志，不外泄。审计日志 `detail` 刻意不含异常文本
 - 待审批期间，`action_payload` 中的敏感字段不通过 WebSocket 回传给发起对话的 Agent 上下文，Agent 只收到"提案已创建，等待审批"的摘要
 - 新增权限码 `agent:hitl_approve`，只有持有该权限的用户能操作 `PENDING → APPROVED/REJECTED`、`UNKNOWN` 人工处置，以及 `POST /api/v1/hitl/proposals/{id}/retry`（复用现有 RBAC，不新建权限体系）
+- 独立权限码 `agent:auto_execute`（种子不分配给任何角色）：只有持有它才能把会话切到 `assist`/`full`（否则 `PATCH` 返回 403，切回 `ask` 永远放行）；门控每个提案都按发起人**当时**的权限判断档位是否生效，会话里存着 `full` 而账号没有该权限时按 `ask` 处理
+- **执行前复核授权**：`_preflight_and_claim` 在认领 `EXECUTING` 之前复核触发人此刻的账号状态与权限——人工审批/重试路径看 `agent:hitl_approve`，档位自动批准看 `agent:auto_execute`，互不要求对方的权限；不通过则不认领、不下发，提案保持 `APPROVED` 并把原因写入 `last_error`。已经下发的命令无法撤回，照常记录真实结果或 `UNKNOWN`
 
 **`device_query` 结果交付**：`DeviceQueryExecutor` 在内存中返回完整原始输出；执行收尾仅为查询拆分两种数据。完整正文写入 `HitlExecutionResult.content`，只可作为隔离、无工具的总结服务临时不可信输入，或由当前会话所有者通过专用 GET 按需读取；它不进入普通 `agent_messages` / 模型历史、WebSocket、快照、审计或日志。与之对应的 4000 字符 `last_result_excerpt` 预览可进入 HITL 安全摘要、WebSocket 和普通 Agent 工具上下文。
 
@@ -532,10 +534,28 @@ UNKNOWN ──allow_retry──────> APPROVED（检查后允许重试）
 | :------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | L1 能力最小化 | 除 `notify`、`device_control` 外全部工具只读（`query_device_command` 为只读诊断，经策略门控但不改设备状态）；子 Agent allowlist 不含这三个执行工具；`kb_grep`/`kb_read` 路径必须落在 `knowledge/` 目录内，代码层做 realpath 前缀校验防目录穿越   |
 | L2 动作审查   | `notify.payload` 做 JSON Schema 校验，不接受自由文本命令；`device_control` 的 `command_name` 必须在设备命令目录内且通过参数校验（如 `interface_name` 约束），不接受自由文本 CLI；门控工具在 `HitlGateHook.before` 用与 dispatch 相同的 Pydantic 模型校验 |
-| L3 风险分级   | 审批模式在 `AgentSession.approval_mode`（默认 `ask`）；黑名单不可绕过；动态凭据始终要人输入本次密码；`full` 仅额外放开未分类非动态命令；`assist`/`full` 对白名单+非动态凭据可当场执行，`ask` 默认白名单亦须人工审批                                                                                         |
+| L3 风险分级   | 审批模式在 `AgentSession.approval_mode`（默认 `ask`）；`assist`/`full` 只对持有 `agent:auto_execute` 的账号生效，逐提案现查；黑名单不可绕过；动态凭据始终要人输入本次密码；`full` 仅额外放开未分类非动态命令；`assist`/`full` 对白名单+非动态凭据可当场执行，`ask` 默认白名单亦须人工审批 |
 | L4 执行沙箱   | `device_control` 已接入真实执行通道：当场执行范围跟会话档位走（见 L3）；动态凭据强制人工审批并输入本次密码；生产启用 `state_changing` 白名单前须在测试网段完成手工验证（见第 11 节 A6）                                                            |
 | L5 审计       | `AgentMessage`/`MonitorStatusEvent`/`HitlProposal`/`AuditLog` 全部 append-only                                                                                                                                                 |
 | L6 预算       | 见第 5 节 spawn 预算划拨 + 会话级 `max_total_cost_usd`                                                                                                                                                                         |
+
+#### 工具与业务权限
+
+`agent:use` 只代表能用对话入口，不隐含任何业务权限。Agent 工具读的是哪类业务数据，就要求页面/REST 读同类数据时的同一个权限（`app/agent/permissions.py::TOOL_PERMISSIONS`）：
+
+| 工具 | 在 `agent:use` 之外还需要 |
+| :--- | :--- |
+| `kb_glob` / `kb_grep` / `kb_read` / `kb_semantic_search` | `knowledge:read` |
+| `query_cmdb` / `query_cmdb_dependencies` | `cmdb:read` |
+| `query_monitor_status` | `monitor:read`；探测历史另需 `monitor_log:read`，缺它只返回当前状态 |
+| `list_device_commands` / `query_device_command` / `device_control` / `get_device_query_result` / `notify` | `cmdb:read`（系统没有按资产的访问控制，按「能看 CMDB 资产」这一层授权；变更执行还受 HITL 与 `agent:auto_execute` 约束） |
+| `classify_documents` / `investigate_root_cause` | 无（编排工具本身不读业务数据；派出的子 Agent 每调一个工具各自再查） |
+
+- **阻断在执行边界**：根调度器、HITL 门控（门控工具在 `before` 里执行，先于普通调度器）、子 Agent 调度器都在每次调用时按可信用户现查，撤销立即生效；超管沿用既有超管规则。给模型的工具清单也按权限过滤，但那只是体验。
+- **子 Agent 以会话所有者为上限**：角色白名单只说明「这个角色能用哪些工具」，替代不了登录用户的授权；用户身份只来自可信上下文，绝不从模型参数里取。
+- **没登记的工具一律拒绝**，新增工具时必须在映射表里写清它读的是哪类数据（有测试兜底）。
+- **设备命令结果接口**（完整正文 `GET` 与总结恢复 `POST`）同样要求当前 `cmdb:read`，不能用历史结果接口绕过撤销。
+- **已写进会话历史的内容不追溯隐藏**：当时有权限时查到、已经写进聊天记录（含执行结果预览）的内容，会话所有者仍能在自己的聊天记录里看到；撤销只挡住之后的新调用和完整结果接口。
 
 ### 10. 可观测性与预算
 

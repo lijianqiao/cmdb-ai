@@ -125,12 +125,17 @@ async def query_monitor_status(
     target_ids: list[int] | None = None,
     ip_prefix: str | None = None,
     since_limit: int = 5,
+    include_history: bool = True,
 ) -> ToolResult:
     """Report each target's current status derived from its latest event and recent history.
 
     ``ip_prefix`` is a literal string-prefix match, not CIDR arithmetic. The
     name deliberately matches ``monitor_target_crud.list_by_ip_prefix``'s
     behavior instead of promising unsupported CIDR semantics.
+
+    ``include_history=False`` omits the probe history: the REST event log needs
+    ``monitor_log:read``, so a caller holding only ``monitor:read`` gets the
+    current state and nothing more.
     """
     targets: list[MonitorTarget]
     if target_ids is not None:
@@ -151,10 +156,14 @@ async def query_monitor_status(
     )
     # 一次窗口查询取回所有目标的最近历史，取代「每个目标一次 list_recent_for_target」。
     # 无过滤条件时 targets 是全系统目标，逐条查会打出与目标数等量的往返。
-    recent_by_target = await monitor_status_event_crud.list_recent_for_targets(
-        db,
-        target_id_list,
-        limit=since_limit,
+    recent_by_target = (
+        await monitor_status_event_crud.list_recent_for_targets(
+            db,
+            target_id_list,
+            limit=since_limit,
+        )
+        if include_history
+        else {}
     )
 
     lines: list[str] = []
@@ -165,11 +174,12 @@ async def query_monitor_status(
             lines.append(f"{header} — 尚未探测")
             continue
 
-        recent = recent_by_target.get(target.id, [])
-        history = ", ".join(f"{event.status}@{event.checked_at:%H:%M:%S}" for event in recent)
         latency_text = f"{latest.latency_ms}ms" if latest.latency_ms is not None else "—"
-        lines.append(
-            f"{header} — 当前: {latest.status} (延迟 {latency_text}); 最近记录: {history}"
-        )
+        line = f"{header} — 当前: {latest.status} (延迟 {latency_text})"
+        if include_history:
+            recent = recent_by_target.get(target.id, [])
+            history = ", ".join(f"{event.status}@{event.checked_at:%H:%M:%S}" for event in recent)
+            line = f"{line}; 最近记录: {history}"
+        lines.append(line)
 
     return ToolResult(control="ok", content="\n".join(lines))

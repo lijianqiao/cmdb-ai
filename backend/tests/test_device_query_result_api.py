@@ -27,12 +27,17 @@ type Headers = dict[str, str]
 
 @pytest_asyncio.fixture(autouse=True)
 async def _grant_agent_use(db_session: AsyncSession, test_role: Role) -> None:
-    permission = Permission(name="使用运维助手", code="agent:use", module="Agent")
-    db_session.add(permission)
-    await db_session.flush()
-    await db_session.execute(
-        role_permissions.insert().values(role_id=test_role.id, permission_id=permission.id)
-    )
+    """设备命令结果属于资产数据：读取需要 agent:use 之外再有 cmdb:read（R2）。"""
+    for name, code, module in (
+        ("使用运维助手", "agent:use", "Agent"),
+        ("查看 CMDB", "cmdb:read", "CMDB"),
+    ):
+        permission = Permission(name=name, code=code, module=module)
+        db_session.add(permission)
+        await db_session.flush()
+        await db_session.execute(
+            role_permissions.insert().values(role_id=test_role.id, permission_id=permission.id)
+        )
     await db_session.commit()
 
 
@@ -210,6 +215,30 @@ async def test_result_endpoints_require_agent_use_permission(
     )
 
     assert get_response.status_code == 403
+    assert post_response.status_code == 403
+
+
+async def test_result_endpoints_require_current_cmdb_read(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    revoke_permissions,
+) -> None:
+    """会话所有者失去 cmdb:read 后，不能再经历史结果接口读取设备输出，
+    也不能触发总结恢复——不能用结果接口绕过撤销后的授权。"""
+    session_id, proposal_id = await _create_result(db_session, test_user)
+    await revoke_permissions(test_user, "cmdb:read")
+
+    get_response = await client.get(_result_path(session_id, proposal_id), headers=auth_headers)
+    post_response = await client.post(
+        f"{_result_path(session_id, proposal_id)}/summary",
+        headers=auth_headers,
+    )
+
+    assert get_response.status_code == 403
+    assert "cmdb:read" in get_response.json()["message"]
+    assert "hostname edge-01" not in get_response.text
     assert post_response.status_code == 403
 
 

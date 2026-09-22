@@ -80,11 +80,14 @@ async def spawn_db(tmp_path: Path) -> AsyncIterator[SpawnDatabase]:
         autoflush=False,
     )
     async with session_factory() as db:
+        # 子 Agent 的工具以会话所有者的业务权限为上限（R2）。本文件验证运行时机制，
+        # 所有者用超管（视为持有全部权限）；权限上限本身见 spawn 集成测试。
         user = User(
             username="spawn-user",
             email="spawn@example.com",
             hashed_password="not-used",
             nickname="Spawn",
+            is_superuser=True,
         )
         db.add(user)
         await db.flush()
@@ -1962,7 +1965,10 @@ async def test_default_runner_maps_escaped_dispatch_exception_to_tool(
     def raising_dispatcher(
         _db: AsyncSession,
         _allowlist: tuple[str, ...],
+        *,
+        user_id: int | None,
     ) -> object:
+        del user_id
         return escaped_dispatch
 
     async def tool_call_chat(

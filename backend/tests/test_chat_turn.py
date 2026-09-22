@@ -57,6 +57,52 @@ async def test_root_ops_system_prompt_states_orchestration_policy() -> None:
         assert withdrawn not in ROOT_OPS_SYSTEM_PROMPT, withdrawn
 
 
+async def test_chat_turn_offers_only_tools_the_user_may_use(
+    db_session: AsyncSession,
+    test_user: User,
+    grant_permissions,
+) -> None:
+    """给模型的工具清单按当前用户的业务权限过滤：只有 knowledge:read 时，
+    模型看不到 CMDB/设备/监控工具，也就不会去调一个注定被拒的工具。
+    （过滤只是体验；真正的阻断在执行边界，见 test_agent_tool_permissions.py。）"""
+    from app.agent.chat_turn import run_chat_turn
+
+    await grant_permissions(test_user, "knowledge:read")
+    session_id = await _make_session(db_session, test_user.id)
+    captured_tools: list[dict[str, Any]] = []
+
+    async def fake_chat(model_key: str, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        if not captured_tools:
+            captured_tools.extend(kwargs.get("tools") or [])
+        return ChatResult(
+            content="好的", tool_calls=[], finish_reason="stop", prompt_tokens=1, completion_tokens=1
+        )
+
+    await append_user_message(db_session, session_id, "你好")
+    await run_chat_turn(
+        db_session,
+        session_id=session_id,
+        actor_user_id=test_user.id,
+        chat_fn=fake_chat,
+        hub_instance=AgentWsHub(),
+    )
+
+    tool_names = {item["function"]["name"] for item in captured_tools}
+    assert {"kb_glob", "kb_grep", "kb_read", "kb_semantic_search"} <= tool_names
+    assert tool_names.isdisjoint(
+        {
+            "query_cmdb",
+            "query_cmdb_dependencies",
+            "query_monitor_status",
+            "list_device_commands",
+            "query_device_command",
+            "device_control",
+            "get_device_query_result",
+            "notify",
+        }
+    )
+
+
 async def test_chat_turn_passes_orchestration_tools_in_production_schema(
     db_session: AsyncSession,
     test_user: User,

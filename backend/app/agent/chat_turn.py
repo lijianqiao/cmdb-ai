@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.budget import Budget
 from app.agent.hitl_gate import HitlGateHook
 from app.agent.loop import ChatFn, LoopOutcome, ToolDispatcher, ToolResult, run_loop
+from app.agent.permissions import load_permission_context, permitted_tool_schemas
 from app.agent.spawn import spawn_manager
 from app.agent.spawn_tools import (
     SPAWN_TOOL_NAMES,
@@ -205,6 +206,11 @@ async def run_chat_turn(
         if spawn_dispatch is not None
         else root_tool_schemas()
     )
+    if dispatch_tool is None:
+        # 工具清单按当前用户的业务权限过滤，模型就不会去调注定被拒的工具。
+        # 这只是体验：真正的阻断在调度器 / 门控的执行边界，每次调用都会现查。
+        # 注入替身调度器的调用方自己定义能力，不在这里过滤。
+        tools = permitted_tool_schemas(await load_permission_context(db, actor_user_id), tools)
 
     async def wrapped_chat(
         mk: str,

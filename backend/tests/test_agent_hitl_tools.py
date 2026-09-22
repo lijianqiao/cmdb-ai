@@ -9,6 +9,7 @@
 from typing import Any
 
 import pytest
+import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.agent import hitl_tools, tool_dispatch
@@ -52,6 +53,13 @@ def _hitl_session_factory(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSes
     return async_sessionmaker(db_engine, expire_on_commit=False, autoflush=False)
 
 
+@pytest_asyncio.fixture
+async def actor_id(superuser: User) -> int:
+    """门控与调度器会按发起人现查业务权限（R2），发起人必须是真实可用账号。
+    本文件验证门控/路由机制而不是权限本身，以超管身份发起（超管视为持有全部权限）。"""
+    return superuser.id
+
+
 def _make_gated_dispatch(
     db_engine: AsyncEngine,
     db_session: AsyncSession,
@@ -76,6 +84,7 @@ async def test_gate_before_notify_returns_pending_without_payload(
     db_engine: AsyncEngine,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    actor_id: int,
 ) -> None:
     """待审批提案应停止循环，且不得把敏感载荷返回模型。"""
     captured: dict[str, object] = {}
@@ -96,7 +105,7 @@ async def test_gate_before_notify_returns_pending_without_payload(
     gate = HitlGateHook(
         _hitl_session_factory(db_engine),
         session_id=11,
-        actor_user_id=13,
+        actor_user_id=actor_id,
         proposed_by_agent_id="root-agent",
         publisher=publisher,  # type: ignore[arg-type]
     )
@@ -143,6 +152,7 @@ async def test_gate_before_notify_returns_actionable_rejection(
     db_engine: AsyncEngine,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    actor_id: int,
 ) -> None:
     """载荷或资产校验失败应返回可操作的中文拒绝原因。"""
 
@@ -151,7 +161,7 @@ async def test_gate_before_notify_returns_actionable_rejection(
 
     monkeypatch.setattr("app.agent.hitl_gate.gate_action", fake_gate_action)
 
-    gate = HitlGateHook(_hitl_session_factory(db_engine), session_id=12, actor_user_id=14)
+    gate = HitlGateHook(_hitl_session_factory(db_engine), session_id=12, actor_user_id=actor_id)
     decision = await gate.before(
         "notify",
         {
@@ -172,8 +182,10 @@ async def test_gate_before_notify_rejects_extra_secret_without_echo(
     db_engine: AsyncEngine,
     db_session: AsyncSession,
     test_user: User,
+    grant_permissions,
 ) -> None:
     """真实校验路径拒绝额外密钥字段时，工具结果不得回显密钥值。"""
+    await grant_permissions(test_user, "agent:use", "cmdb:read")
     session = await agent_session_crud.create(
         db_session,
         {"user_id": test_user.id, "title": "HITL 工具拒绝", "status": "active"},
@@ -217,6 +229,7 @@ async def test_gate_before_notify_hides_unexpected_exception_detail(
     db_engine: AsyncEngine,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    actor_id: int,
 ) -> None:
     """意外异常只应暴露异常类型，不得泄露内部详情。"""
 
@@ -225,7 +238,7 @@ async def test_gate_before_notify_hides_unexpected_exception_detail(
 
     monkeypatch.setattr("app.agent.hitl_gate.gate_action", fake_gate_action)
 
-    gate = HitlGateHook(_hitl_session_factory(db_engine), session_id=12, actor_user_id=14)
+    gate = HitlGateHook(_hitl_session_factory(db_engine), session_id=12, actor_user_id=actor_id)
     decision = await gate.before(
         "notify",
         {
@@ -246,6 +259,7 @@ async def test_gate_before_device_control_returns_pending(
     db_engine: AsyncEngine,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    actor_id: int,
 ) -> None:
     async def fake_gate_action(db: AsyncSession, **kwargs: object) -> ProposalSafeSummary:
         return ProposalSafeSummary(
@@ -258,7 +272,7 @@ async def test_gate_before_device_control_returns_pending(
 
     monkeypatch.setattr("app.agent.hitl_gate.gate_action", fake_gate_action)
 
-    gate = HitlGateHook(_hitl_session_factory(db_engine), session_id=1, actor_user_id=2)
+    gate = HitlGateHook(_hitl_session_factory(db_engine), session_id=1, actor_user_id=actor_id)
     decision = await gate.before(
         "device_control",
         {"asset_id": 9, "command_name": "reboot", "reason": "故障恢复"},
@@ -320,7 +334,7 @@ def test_root_schema_has_notify_and_device_control_without_propose() -> None:
 
 
 async def test_root_dispatcher_routes_device_control(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, actor_id: int
 ) -> None:
     captured: dict[str, object] = {}
 
@@ -329,7 +343,7 @@ async def test_root_dispatcher_routes_device_control(
         return ToolResult(control="pending_approval", content="提案 70 待审批")
 
     monkeypatch.setattr(tool_dispatch, "device_control", fake_device_control)
-    dispatch = build_root_tool_dispatcher(db_session, session_id=21, actor_user_id=22)
+    dispatch = build_root_tool_dispatcher(db_session, session_id=21, actor_user_id=actor_id)
 
     result = await dispatch(
         "device_control",
@@ -343,6 +357,7 @@ async def test_root_dispatcher_routes_device_control(
 async def test_root_dispatcher_binds_context_to_notify(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    actor_id: int,
 ) -> None:
     """根调度器应固定可信会话身份，并仅从模型参数接收动作内容。"""
     captured: dict[str, object] = {}
@@ -357,7 +372,7 @@ async def test_root_dispatcher_binds_context_to_notify(
     dispatch = build_root_tool_dispatcher(
         db_session,
         session_id=21,
-        actor_user_id=22,
+        actor_user_id=actor_id,
         proposed_by_agent_id="root-agent",
         publisher=publisher,
     )
@@ -373,7 +388,7 @@ async def test_root_dispatcher_binds_context_to_notify(
 
     assert result.control == "pending_approval"
     assert captured["session_id"] == 21
-    assert captured["actor_user_id"] == 22
+    assert captured["actor_user_id"] == actor_id
     assert captured["asset_id"] == 23
     assert captured["payload"] == {"message": "告警"}
     assert captured["reason"] == "主机离线"
@@ -394,12 +409,13 @@ async def test_root_dispatcher_binds_context_to_notify(
 async def test_root_dispatcher_rejects_invalid_notify_arguments(
     db_session: AsyncSession,
     arguments: dict[str, Any],
+    actor_id: int,
 ) -> None:
     """根调度器应拒绝缺字段、越界枚举和伪造可信上下文。"""
     dispatch = build_root_tool_dispatcher(
         db_session,
         session_id=21,
-        actor_user_id=22,
+        actor_user_id=actor_id,
     )
 
     result = await dispatch("notify", arguments)
@@ -409,9 +425,12 @@ async def test_root_dispatcher_rejects_invalid_notify_arguments(
 
 async def test_child_dispatcher_rejects_notify_execution_tool(
     db_session: AsyncSession,
+    actor_id: int,
 ) -> None:
     """子调度器若被污染点到 notify，必须拒绝。"""
-    dispatch = build_tool_dispatcher(db_session, ("query_monitor_status", "notify"))
+    dispatch = build_tool_dispatcher(
+        db_session, ("query_monitor_status", "notify"), user_id=actor_id
+    )
 
     result = await dispatch(
         "notify",
@@ -428,12 +447,13 @@ async def test_child_dispatcher_rejects_notify_execution_tool(
 
 async def test_root_dispatcher_rejects_command_name_outside_catalog_enum(
     db_session: AsyncSession,
+    actor_id: int,
 ) -> None:
     """command_name 不在目录枚举里应在校验阶段被拒绝，不进入 gate_action。"""
     dispatch = build_root_tool_dispatcher(
         db_session,
         session_id=21,
-        actor_user_id=22,
+        actor_user_id=actor_id,
     )
 
     result = await dispatch(
@@ -450,9 +470,10 @@ async def test_root_dispatcher_rejects_command_name_outside_catalog_enum(
 
 async def test_child_dispatcher_never_exposes_execution_tools(
     db_session: AsyncSession,
+    actor_id: int,
 ) -> None:
     """即使持久化白名单被污染，子调度器也必须拒绝写工具。"""
-    dispatch = build_tool_dispatcher(db_session, ("notify",))
+    dispatch = build_tool_dispatcher(db_session, ("notify",), user_id=actor_id)
 
     result = await dispatch(
         "notify",
@@ -471,6 +492,7 @@ async def test_query_device_command_returns_pending_when_not_executed(
     db_engine: AsyncEngine,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    actor_id: int,
 ) -> None:
     """待审批设备命令查询应停止循环并返回提案 ID。"""
 
@@ -485,7 +507,7 @@ async def test_query_device_command_returns_pending_when_not_executed(
 
     monkeypatch.setattr("app.agent.hitl_gate.gate_action", fake_gate_action)
 
-    gate = HitlGateHook(_hitl_session_factory(db_engine), session_id=1, actor_user_id=2)
+    gate = HitlGateHook(_hitl_session_factory(db_engine), session_id=1, actor_user_id=actor_id)
     decision = await gate.before(
         "query_device_command",
         {"asset_id": 9, "command_name": "show_version", "reason": "排查交换机"},
@@ -726,6 +748,7 @@ async def test_list_device_commands_follows_effective_mode_without_auto_execute(
 async def test_root_dispatcher_routes_list_device_commands(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    actor_id: int,
 ) -> None:
     """根调度器应把 list_device_commands 路由到工具实现，并对非法参数给可行动错误。"""
     captured: dict[str, object] = {}
@@ -735,7 +758,7 @@ async def test_root_dispatcher_routes_list_device_commands(
         return ToolResult(control="ok", content="命令清单")
 
     monkeypatch.setattr(tool_dispatch, "list_device_commands_for_asset", fake_list)
-    dispatch = build_root_tool_dispatcher(db_session, session_id=1, actor_user_id=2)
+    dispatch = build_root_tool_dispatcher(db_session, session_id=1, actor_user_id=actor_id)
 
     ok_result = await dispatch("list_device_commands", {"asset_id": 9})
     assert ok_result.control == "ok"

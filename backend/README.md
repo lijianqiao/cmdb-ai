@@ -72,7 +72,7 @@ backend/
 | `/monitor` | GET, CRUD | Target health status, probe configuration, history logs | `monitor:*` |
 | `/knowledge` | GET, POST | Category creation and document vector upload | `knowledge:*` |
 | `/hitl` | GET, POST | Pending proposals, approve/reject decisions, retry | `agent:hitl_approve` |
-| `/agent` | CRUD, POST | Chat session management, snapshot restore, message turns | `agent:use` |
+| `/agent` | CRUD, POST | Chat session management, snapshot restore, message turns | `agent:use` (switching to assist/full also needs `agent:auto_execute`; device command results also need `cmdb:read`) |
 | `/ws/agent/{session_id}` | WS | Real-time token streaming and status event broadcasts | `agent:use` |
 | `/system-config` | GET, PUT | Dynamic LLM model, price rates, and monitoring settings | `system_config:*` |
 | `/audit-logs` | GET | Comprehensive administrative and execution audit trail | `audit:read` |

@@ -72,7 +72,7 @@ backend/
 | `/monitor` | GET, CRUD | 监控目标配置、实时健康状态与探活日志 | `monitor:*` |
 | `/knowledge` | GET, POST | 知识分类创建与 Markdown/TXT 文档向量上传 | `knowledge:*` |
 | `/hitl` | GET, POST | 待审批提案、批准/拒绝决策、重试执行、处置 | `agent:hitl_approve` |
-| `/agent` | CRUD, POST | 会话管理、快照安全恢复、发送用户提问 | `agent:use` |
+| `/agent` | CRUD, POST | 会话管理、快照安全恢复、发送用户提问 | `agent:use`（切到帮我审批/完全访问另需 `agent:auto_execute`；设备命令结果另需 `cmdb:read`） |
 | `/ws/agent/{session_id}` | WebSocket | 实时 Token 流推送与状态事件广播 | `agent:use` |
 | `/system-config` | GET, PUT | 运行时动态大模型、费率与监控参数配置 | `system_config:*` |
 | `/audit-logs` | GET | 全局操作与系统审计日志多维检索 | `audit:read` |

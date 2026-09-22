@@ -10,7 +10,10 @@
 2. 将角色持久化的工具白名单冻结到调度闭包中，调用时再次检查权限。
 3. 子调度器始终只认识七个只读工具，不接受任何角色白名单扩展写权限。
 4. 根调度器绑定可信会话身份；HITL 门控在 run_loop before 钩子，薄工具只真执行。
-5. 校验通过后才转发；参数问题要求澄清，意外异常只返回类型。
+5. 每次调用都按绑定的可信用户现查业务权限（permissions.tool_denial）：角色白名单只说明
+   「这个角色可以用哪些工具」，替代不了登录用户的授权；用户 ID 只来自可信上下文，
+   绝不从模型参数里取。
+6. 校验通过后才转发；参数问题要求澄清，意外异常只返回类型。
 """
 
 from collections.abc import Iterable
@@ -31,6 +34,12 @@ from app.agent.hitl_tools import (
 from app.agent.knowledge_tools import kb_glob, kb_grep, kb_read, kb_semantic_search
 from app.agent.loop import ToolDispatcher, ToolResult
 from app.agent.ops_tools import query_cmdb, query_cmdb_dependencies, query_monitor_status
+from app.agent.permissions import (
+    MONITOR_LOG_READ,
+    PermissionContext,
+    load_permission_context,
+    tool_denial,
+)
 from app.agent.roles import ToolName
 
 # 参数模型定义在叶子模块 tool_args 里（见该模块 docstring：打破本模块与
@@ -129,6 +138,7 @@ async def _dispatch_validated(
     db: AsyncSession,
     name: ToolName,
     parsed: _Args,
+    context: PermissionContext,
 ) -> ToolResult:
     if isinstance(parsed, KbGlobArgs):
         return await kb_glob(parsed.pattern, category=parsed.category)
@@ -168,6 +178,8 @@ async def _dispatch_validated(
             target_ids=parsed.target_ids,
             ip_prefix=parsed.ip_prefix,
             since_limit=parsed.since_limit,
+            # 探测历史与 REST 事件接口一样要 monitor_log:read，缺它只给当前状态
+            include_history=context.has(MONITOR_LOG_READ),
         )
     return ToolResult(control="failed", content=f"工具 {name!r} 参数模型未绑定执行器")
 
@@ -175,8 +187,15 @@ async def _dispatch_validated(
 def build_tool_dispatcher(
     db: AsyncSession,
     allowlist: Iterable[str],
+    *,
+    user_id: int | None,
 ) -> ToolDispatcher:
-    """Bind one DB session and immutable role allowlist into a loop dispatcher."""
+    """Bind one DB session, immutable role allowlist and trusted user into a dispatcher.
+
+    ``user_id`` is the account whose business permissions cap every call (the
+    session owner). It must come from the trusted request context, never from
+    model arguments; ``None`` means no usable account and rejects everything.
+    """
     allowed = frozenset(allowlist)
 
     async def dispatch(name: str, arguments: dict[str, Any]) -> ToolResult:
@@ -184,12 +203,18 @@ def build_tool_dispatcher(
             return ToolResult(control="rejected", content=f"工具 {name!r} 不在角色白名单")
         if name not in _ARGUMENT_MODELS:
             return ToolResult(control="rejected", content=f"未知工具 {name!r}")
+        context = await load_permission_context(db, user_id)
+        denial = tool_denial(context, name)
+        if denial is not None:
+            return ToolResult(control="rejected", content=denial)
+        assert context is not None  # 账号不可用时 tool_denial 一定给出拒绝原因
         tool_name: ToolName = name
+        permitted: PermissionContext = context
         return await validate_and_run(
             name,
             arguments,
             _ARGUMENT_MODELS[tool_name],
-            lambda parsed: _dispatch_validated(db, tool_name, parsed),
+            lambda parsed: _dispatch_validated(db, tool_name, parsed, permitted),
         )
 
     return dispatch
@@ -203,6 +228,17 @@ _ROOT_READ_ONLY_TOOLS: tuple[ToolName, ...] = (
     "query_cmdb",
     "query_cmdb_dependencies",
     "query_monitor_status",
+)
+
+# 只有根 Agent 才有的工具（执行类薄工具与设备命令辅助工具）
+_ROOT_ONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        "notify",
+        "device_control",
+        "query_device_command",
+        "list_device_commands",
+        "get_device_query_result",
+    }
 )
 
 def _inline_command_name_enum(parameters: dict[str, Any]) -> dict[str, Any]:
@@ -326,9 +362,14 @@ def build_root_tool_dispatcher(
     Returns:
         可调用只读与执行类工具的调度函数。
     """
-    read_dispatch = build_tool_dispatcher(db, _ROOT_READ_ONLY_TOOLS)
+    read_dispatch = build_tool_dispatcher(db, _ROOT_READ_ONLY_TOOLS, user_id=actor_user_id)
 
     async def dispatch(name: str, arguments: dict[str, Any]) -> ToolResult:
+        # 只读工具由 read_dispatch 自己查权限；根专属工具在这里先查
+        if name in _ROOT_ONLY_TOOLS:
+            denial = tool_denial(await load_permission_context(db, actor_user_id), name)
+            if denial is not None:
+                return ToolResult(control="rejected", content=denial)
         if name == "notify":
             return await validate_and_run(
                 name,

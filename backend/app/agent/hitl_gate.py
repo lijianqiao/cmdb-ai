@@ -6,7 +6,8 @@
 @Docs: HITL 门控钩子：before 建提案并统一执行，阻止 base dispatcher 重复执行。
 
 实现流程：
-1. run_loop 在 dispatch 前调用 before：门控工具先走与 tool_dispatch 相同的 Pydantic 校验。
+1. run_loop 在 dispatch 前调用 before：门控工具先走与 tool_dispatch 相同的 Pydantic 校验，
+   再在建提案的同一个短会话里按发起人当前的业务权限放行（与调度器同一张 TOOL_PERMISSIONS 表）。
 2. 校验通过后 gate_action 在独立短会话中建提案；PENDING 返回 pending_approval 并 block。
 3. 自动批准时 before 内调用 execute_approved_proposal，返回完整 ToolResult 并 block。
 4. 非门控工具 before 立即放行；after 不再回写执行结果。
@@ -26,7 +27,7 @@ from app.agent.hitl import (
 )
 from app.agent.hitl_execution import execute_approved_proposal
 from app.agent.loop import BeforeToolDecision, ToolDispatcher, ToolResult
-from app.agent.permissions import AUTO_EXECUTE
+from app.agent.permissions import AUTO_EXECUTE, load_permission_context, tool_denial
 from app.agent.tool_args import (
     DeviceControlArgs,
     NotifyArgs,
@@ -147,7 +148,7 @@ class HitlGateHook:
         self._publisher = publisher
 
     async def before(self, name: str, arguments: dict[str, Any]) -> BeforeToolDecision:
-        """门控工具校验参数、建提案并统一执行；其它工具立即放行。"""
+        """门控工具校验权限与参数、建提案并统一执行；其它工具立即放行。"""
         if name not in _GATED_TOOLS:
             return BeforeToolDecision(block=False)
 
@@ -199,6 +200,16 @@ class HitlGateHook:
 
         try:
             async with self._session_factory() as gate_db:
+                # 门控工具在这里就执行完了，根本到不了普通调度器——业务权限必须在这里查，
+                # 而且要先于建提案：没权限的人连待审批提案都不该产生。
+                denial = tool_denial(
+                    await load_permission_context(gate_db, self._actor_user_id), name
+                )
+                if denial is not None:
+                    return BeforeToolDecision(
+                        block=True,
+                        result=ToolResult(control="rejected", content=denial),
+                    )
                 summary = await gate_action(
                     gate_db,
                     session_id=self._session_id,
