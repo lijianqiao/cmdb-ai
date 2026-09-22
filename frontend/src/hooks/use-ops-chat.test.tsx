@@ -3,6 +3,8 @@
 // @vitest-environment jsdom
 
 import { act, renderHook, waitFor } from "@testing-library/react"
+import { AxiosError, AxiosHeaders } from "axios"
+import { toast } from "sonner"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type {
@@ -453,5 +455,28 @@ describe("useOpsChat snapshot recovery", () => {
     })
 
     expect(mockCancelTurn).not.toHaveBeenCalled()
+  })
+
+  it("服务端拒绝发送时提示它给出的原因，比如同时进行的对话太多", async () => {
+    const reason = "你同时进行的对话太多，请等其中一个结束后稍后再试"
+    mockGetSnapshot.mockResolvedValue(buildSnapshot())
+    mockPostMessage.mockRejectedValue(
+      new AxiosError("Request failed with status code 429", AxiosError.ERR_BAD_REQUEST, undefined, undefined, {
+        status: 429,
+        statusText: "",
+        data: { code: 429, data: null, message: reason },
+        headers: { "retry-after": "10" },
+        config: { headers: new AxiosHeaders() },
+      }),
+    )
+
+    const { result } = renderHook(() => useOpsChat({ sessionId: 9 }))
+    await waitFor(() => expect(mockGetSnapshot).toHaveBeenCalledTimes(1))
+
+    await act(async () => {
+      await result.current.sendMessage("在吗")
+    })
+
+    expect(toast.error).toHaveBeenCalledWith(reason)
   })
 })

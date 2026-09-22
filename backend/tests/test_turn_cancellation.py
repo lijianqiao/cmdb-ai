@@ -17,16 +17,18 @@
 """
 
 import asyncio
+from typing import Any
 
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent import chat_turn as chat_turn_module
 from app.agent.loop import LoopOutcome
-from app.agent.session import append_assistant_message
 from app.agent.turn_registry import TurnRegistry
 from app.api.v1 import agent_sessions as agent_sessions_api
+from app.core.llm import ChatMessage, ChatResult, ToolCall
 from app.core.security import hash_password
 from app.crud.agent_session import agent_session_crud
 from app.models.permission import Permission
@@ -83,15 +85,26 @@ async def test_cancel_stops_turn_discards_output_and_frees_lease(
 ) -> None:
     """取消后：200 + cancelled、本轮助手消息被丢弃、租约立即可再用。"""
     entered = asyncio.Event()
+    model_calls = 0
 
-    async def slow_turn(db, *, session_id: int, **kwargs):
-        # 模拟真实 turn：先写一条未提交的助手消息，再停在一个可被取消的 await 上
-        await append_assistant_message(db, session_id, "只写了一半的回答")
+    async def slow_chat(model_key: str, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        # 真实 turn：第一步已经产出助手消息和工具结果（留在内存里，还没写库），
+        # 第二步停在一个可被取消的 await 上
+        nonlocal model_calls
+        model_calls += 1
+        if model_calls == 1:
+            return ChatResult(
+                content="先查一下监控",
+                tool_calls=[ToolCall(id="call_1", name="query_monitor_status", arguments="{}")],
+                finish_reason="tool_calls",
+                prompt_tokens=1,
+                completion_tokens=1,
+            )
         entered.set()
         await asyncio.Event().wait()
-        return LoopOutcome(reason="final_answer", final_answer="不会走到这里")
+        raise AssertionError("不会走到这里")
 
-    monkeypatch.setattr(agent_sessions_api, "run_chat_turn", slow_turn)
+    monkeypatch.setattr(chat_turn_module, "chat", slow_chat)
 
     turn = asyncio.create_task(
         client.post(

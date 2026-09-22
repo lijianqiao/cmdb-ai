@@ -141,6 +141,11 @@ class Settings(BaseSettings):
     # 最坏耗时 ≈ AGENT_CHILD_MAX_STEPS × (LLM 超时 + DEVICE_COMMAND_CONN + READ)
     #          = 20 × (60 + 15 + 60) = 2700 秒。默认 3600 留出余量。
     AGENT_TURN_LEASE_TIMEOUT_SECONDS: float = Field(default=3600.0, gt=0, le=86_400)
+    # 根 turn 并发准入（进程内计数，本项目单 worker）：全进程 / 单个用户同时在跑的
+    # 对话轮数上限，满了立即返回 503 / 429 + Retry-After，不排队。单会话租约只挡
+    # 同一会话连发，挡不住一个人开很多会话、很多人同时提问。
+    AGENT_MAX_CONCURRENT_TURNS: int = Field(default=10, ge=1)
+    AGENT_MAX_CONCURRENT_TURNS_PER_USER: int = Field(default=3, ge=1)
     # refresh 会话历史清理的轮询间隔（后台循环，见 services/session_cleanup.py）
     SESSION_CLEANUP_INTERVAL_SECONDS: float = Field(default=3600.0, ge=60, le=86_400)
     AGENT_TERMINAL_RECEIPT_TTL_SECONDS: float = Field(

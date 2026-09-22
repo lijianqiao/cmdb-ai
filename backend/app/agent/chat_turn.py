@@ -16,8 +16,12 @@
    由 API 层在 db.commit() 之后 flush，避免前端抢跑 GET 未提交提案。
 5. 调用既有 run_loop，注入中文 ROOT_OPS_SYSTEM_PROMPT；model_key 使用 MODELS 登记键 local-chat。
 6. 正常/early_exit 后广播 turn_done；异常广播中文 error（无堆栈）后原样抛出，由 API 层 commit。
+7. 不在等模型、等工具时占数据库连接（R5）：API 层传会话工厂，工具与历史各用短会话；
+   本轮消息结束时一次写库，同一事务里先锁会话行确认 turn 租约令牌仍是本轮的，
+   再写消息与整轮用量——被接管的旧轮次抛 TurnSupersededError，什么都不写。
 """
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -27,6 +31,7 @@ from app.agent.budget import Budget
 from app.agent.hitl_gate import HitlGateHook
 from app.agent.loop import ChatFn, LoopOutcome, ToolDispatcher, ToolResult, run_loop
 from app.agent.permissions import load_permission_context, permitted_tool_schemas
+from app.agent.session import append_transcript
 from app.agent.spawn import spawn_manager
 from app.agent.spawn_tools import (
     SPAWN_TOOL_NAMES,
@@ -34,10 +39,13 @@ from app.agent.spawn_tools import (
     spawn_tool_schemas,
 )
 from app.agent.tool_dispatch import build_root_tool_dispatcher, root_tool_schemas
+from app.agent.transcript import TranscriptMessage
 from app.agent.ws_hub import AgentWsHub, WsHitlEventPublisher, hub
+from app.core.database import SessionSource, session_scope
 from app.core.llm import ChatResult, chat
 from app.crud.agent_message import agent_message_crud
 from app.crud.agent_registry import agent_registry_crud
+from app.crud.agent_session import agent_session_crud
 from app.schemas.agent_ws import AgentWsServerMessage
 
 # 架构 §8：根指令每轮从代码注入，不参与压缩摘要
@@ -74,6 +82,10 @@ port_enable/port_disable 必须提供 interface_name。
 # 根对话用平衡档：日常问答 + 普通工具调用，既不该用便宜档降质量，
 # 也不该每一轮都烧强档
 _DEFAULT_MODEL_KEY = "chat-balanced"
+
+
+class TurnSupersededError(RuntimeError):
+    """本轮的 turn 租约已被新一轮接管，本轮输出不能再写进会话。"""
 
 
 def _empty_model_usage() -> dict[str, float]:
@@ -146,7 +158,7 @@ async def _record_turn_usage(
 
 
 async def run_chat_turn(
-    db: AsyncSession,
+    db: SessionSource,
     *,
     session_id: int,
     actor_user_id: int,
@@ -155,12 +167,14 @@ async def run_chat_turn(
     hub_instance: AgentWsHub | None = None,
     publisher: WsHitlEventPublisher | None = None,
     model_key: str | None = None,
+    turn_token: str | None = None,
 ) -> LoopOutcome:
     """
     执行一轮 Agent turn：包装推送 → run_loop → turn_done/error。
 
     Args:
-        db: 异步数据库会话（本函数不 commit）
+        db: 会话工厂（生产：每段读写各用短会话，本轮消息结束时自行提交）或借用的会话
+            （测试：只 flush，由调用方提交）
         session_id: Agent 会话 ID
         actor_user_id: 当前用户 ID（绑进 root dispatcher）
         chat_fn: 可选注入的模型调用（单测 mock；默认 llm.chat）
@@ -168,9 +182,13 @@ async def run_chat_turn(
         hub_instance: 可选 WS hub
         publisher: 可选 HITL 发布器
         model_key: 可选模型键
+        turn_token: 本轮持有的 turn 租约令牌；给了就在写库前校验，防止被接管的旧轮次写入
 
     Returns:
         LoopOutcome
+
+    Raises:
+        TurnSupersededError: 写库时发现租约已被新一轮接管，本轮输出未保存
     """
     active_hub = hub_instance if hub_instance is not None else hub
     active_publisher = (
@@ -210,7 +228,9 @@ async def run_chat_turn(
         # 工具清单按当前用户的业务权限过滤，模型就不会去调注定被拒的工具。
         # 这只是体验：真正的阻断在调度器 / 门控的执行边界，每次调用都会现查。
         # 注入替身调度器的调用方自己定义能力，不在这里过滤。
-        tools = permitted_tool_schemas(await load_permission_context(db, actor_user_id), tools)
+        async with session_scope(db) as session:
+            context = await load_permission_context(session, actor_user_id)
+        tools = permitted_tool_schemas(context, tools)
 
     async def wrapped_chat(
         mk: str,
@@ -287,6 +307,31 @@ async def run_chat_turn(
     # 交给 run_loop 自己 new 的话用完就丢了，界面上就没有数字可显示。
     turn_budget = Budget()
     turn_started_at = datetime.now(UTC)
+
+    async def persist_turn(
+        messages: Sequence[TranscriptMessage], usage_index: int | None
+    ) -> int | None:
+        """本轮消息、整轮用量与租约校验放在同一个短事务里。"""
+        if not messages:
+            return None
+        async with session_scope(db, commit=True) as session:
+            # 锁住会话行再比对令牌：之后的写入与新一轮的 claim_turn 在这把行锁上串行
+            if turn_token is not None and not await agent_session_crud.holds_turn(
+                session, session_id, turn_token
+            ):
+                raise TurnSupersededError(f"会话 {session_id} 的 turn 租约已被接管")
+            ids = await append_transcript(session, session_id, messages)
+            usage_message_id = ids[usage_index] if usage_index is not None else None
+            if usage_message_id is not None:
+                await _record_turn_usage(
+                    session,
+                    session_id=session_id,
+                    message_id=usage_message_id,
+                    budget=turn_budget,
+                    turn_started_at=turn_started_at,
+                )
+        return usage_message_id
+
     try:
         outcome = await run_loop(
             db,
@@ -299,6 +344,7 @@ async def run_chat_turn(
             system_prompt=ROOT_OPS_SYSTEM_PROMPT,
             before_tool_call=gate_hook.before if gate_hook is not None else None,
             after_tool_call=gate_hook.after if gate_hook is not None else None,
+            persist_messages=persist_turn,
         )
     except Exception:
         await active_hub.broadcast(
@@ -309,15 +355,6 @@ async def run_chat_turn(
             ),
         )
         raise
-
-    if outcome.usage_message_id is not None:
-        await _record_turn_usage(
-            db,
-            session_id=session_id,
-            message_id=outcome.usage_message_id,
-            budget=turn_budget,
-            turn_started_at=turn_started_at,
-        )
 
     if outcome.reason == "llm_error":
         await active_hub.broadcast(

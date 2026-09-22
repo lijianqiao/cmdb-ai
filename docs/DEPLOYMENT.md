@@ -191,27 +191,19 @@ Windows 必须通过 `main.py` 启动，以使用与异步 psycopg 兼容的 Sel
 | LLM 服务商限流 | 外部约束 | 不变 |
 | 事件循环 | I/O 密集，Netmiko 等阻塞调用已丢进专用线程池 | **最不容易先满的一个** |
 
-**⚠️ 当前真正的天花板：每个进行中的对话，整轮都占着一个数据库连接。**
+**对话在等模型、等工具、等设备时不占数据库连接。** 一轮对话的每一步只用短会话
+读历史、查权限（毫秒级，用完即还），本轮新产生的消息留在内存里、结束时一次写入；
+子 Agent、HITL 设备执行、审批后的设备结果总结同理。所以连接池只需覆盖「同一时刻
+正在执行的短查询」，不再等于「最多能同时进行几轮对话」：
 
-Agent 一轮对话复用请求级数据库会话：先读历史（这一刻 SQLAlchemy 开启事务、
-从池里检出连接），然后**直接等大模型返回**，整轮结束才提交。等模型的这段时间
-连接一直不归还（`app/agent/loop.py` 的 `build_model_history` → `chat_fn`）。
-
-所以连接池的实际含义是「**最多能同时进行几轮对话**」，而不是「能处理多少请求」。
-默认 10 个连接时，大约 10 个并发的慢对话就能把池占满——此时登录、审批、后台巡检
-也拿不到连接，只能排队到超时。审批尤其危险：根对话占着一个连接，还在等 HITL
-去池里再拿一个。
-
-**调大 `DB_POOL_SIZE` 只能推迟这个故障，不能消除它**，而且每多一个连接，PostgreSQL
-那边都要多付一份内存。根治办法是让对话在等模型时不占连接——已列为整改项
-（`pi/implementation-plan-2026-09-21.md` 的 R5 / S5）。修复前：
-
-- 按「预计同时对话数 + 给登录/审批/巡检留的余量」估 `DB_POOL_SIZE`，
-  而不是按用户总数估；
-- 同时对话数明显超过池容量时，先扩池作为临时缓解，并盯住连接获取超时日志；
+- `DB_POOL_SIZE` 按「并发短请求 + 后台巡检」估，默认 10 个连接对单实例足够；
+- 同时进行的对话数由并发准入控制：`AGENT_MAX_CONCURRENT_TURNS`（全进程，默认 10）与
+  `AGENT_MAX_CONCURRENT_TURNS_PER_USER`（每个用户，默认 3）。超出时发消息接口立即返回
+  503 / 429 并带 `Retry-After`，不排队，前端会提示稍后再试；
+- 这两个值应按**模型服务的并发能力**来定（本地 llama.cpp 的并行槽位、云端 API 的限流），
+  而不是按数据库连接数。每轮对话最多还会并行拉起 `AGENT_MAX_CONCURRENT_CHILDREN` 个
+  子 Agent，它们也要占模型并发，调整时一并考虑；
 - **不要**把加 worker 当成解法——见上表，那会让连接压力翻倍。
-
-R5 修复后，连接池只需覆盖短事务，这一节的估算方式会随之改变。
 
 **多实例的正确做法是会话亲和，不是拆微服务。** `ws_hub` 持有的是活的 WebSocket
 对象、`turn_registry` 持有的是正在跑的 asyncio.Task——这两样不可序列化、不可跨进程
@@ -430,6 +422,8 @@ sudo systemctl start fastapi-admin
 | `REFRESH_SESSION_CLEANUP_BATCH_SIZE` | 清理任务单批最大行数 | `1000` |
 | `DB_POOL_SIZE` | 每进程数据库连接池大小 | `5` |
 | `DB_MAX_OVERFLOW` | 每进程连接池最大溢出 | `5` |
+| `AGENT_MAX_CONCURRENT_TURNS` | 全进程同时进行的对话轮数上限，超出返回 503 | `10` |
+| `AGENT_MAX_CONCURRENT_TURNS_PER_USER` | 每个用户同时进行的对话轮数上限，超出返回 429 | `3` |
 | `BACKEND_CORS_ORIGINS` | CORS 白名单（逗号分隔） | `http://localhost:5173,http://localhost:3000` |
 | `COOKIE_SECURE` | Cookie Secure 标志 | `false` |
 | `ALLOWED_HOSTS` | Host 头白名单（逗号分隔） | `localhost,127.0.0.1,test` |

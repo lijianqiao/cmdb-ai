@@ -125,6 +125,17 @@ def test_continuous_compaction_respects_existing_cursor() -> None:
     assert [row.id for row in selected] == [3, 4, 5]
 
 
+def test_in_memory_turn_messages_push_committed_rows_into_summary() -> None:
+    """本轮还没写库的消息也占窗口名额：被它们挤出窗口的已提交行一并压进摘要，
+    切点只落在已提交的行上（本轮消息没有数据库 ID）。"""
+    rows = [_message(i, "user", content=f"m-{i}") for i in range(1, 19)]
+
+    selected = _messages_to_summarize(rows, compacted_through_message_id=None, pending_count=10)
+
+    # 窗口 16 条，本轮占 10 条，已提交的只留最近 6 条原文
+    assert [row.id for row in selected] == list(range(1, 13))
+
+
 async def _make_session(db_session: AsyncSession, user_id: int) -> int:
     session = await agent_session_crud.create(
         db_session, {"user_id": user_id, "title": "", "status": "active"}

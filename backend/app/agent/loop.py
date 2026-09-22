@@ -9,18 +9,24 @@ call; whether the call is allowed is decided entirely inside `dispatch_tool`
 Only `pending_approval` ends the turn early（等待人工审批）。`clarification` /
 `rejected` / `failed` 的工具结果会回灌给模型继续循环，让它修正参数或向用户
 解释原因；连续多轮全部失败才强制退出，防止小模型死循环烧预算。
+
+不在等模型、等工具时占数据库连接（R5）：每一步用短会话读历史（读完即还连接），
+本轮新产生的 assistant/tool 消息留在内存里、与已提交的历史拼成模型窗口，循环
+结束时经 ``persist_messages`` 一次写库。循环因异常或取消中途退出时这些消息直接
+丢弃，与原来「整轮一个事务、出错回滚」的语义一致；绝不每条消息各自提交。
 """
 
 import json
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, replace
+from functools import partial
 from typing import Any, Literal
-
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.budget import Budget, BudgetExceededError
 from app.agent.compaction import ensure_root_compaction
-from app.agent.session import append_assistant_message, append_tool_result, build_model_history
+from app.agent.session import build_model_history, persist_transcript
+from app.agent.transcript import TranscriptMessage
+from app.core.database import SessionSource
 from app.core.llm import ChatResult, ToolCall, chat
 
 type ToolControl = Literal["ok", "rejected", "failed", "clarification", "pending_approval"]
@@ -50,6 +56,10 @@ type ToolDispatcher = Callable[[str, dict[str, Any]], Awaitable[ToolResult]]
 type ChatFn = Callable[..., Awaitable[ChatResult]]
 type BeforeToolCall = Callable[[str, dict[str, Any]], Awaitable[BeforeToolDecision]]
 type AfterToolCall = Callable[[str, dict[str, Any], ToolResult], Awaitable[None]]
+# 把本轮攒下的消息按顺序写库，返回 messages[usage_index] 的主键（没有则 None）。
+type PersistMessages = Callable[
+    [Sequence[TranscriptMessage], int | None], Awaitable[int | None]
+]
 
 
 async def _default_before_tool_call(name: str, arguments: dict[str, Any]) -> BeforeToolDecision:
@@ -90,7 +100,7 @@ def _parse_arguments(tool_call: ToolCall) -> dict[str, Any]:
 
 
 async def run_loop(
-    db: AsyncSession,
+    db: SessionSource,
     *,
     session_id: int,
     model_key: str,
@@ -102,19 +112,32 @@ async def run_loop(
     system_prompt: str | None = None,
     before_tool_call: BeforeToolCall | None = None,
     after_tool_call: AfterToolCall | None = None,
+    persist_messages: PersistMessages | None = None,
 ) -> LoopOutcome:
-    """Run one standard agent loop turn against `session_id`'s transcript."""
+    """Run one standard agent loop turn against `session_id`'s transcript.
+
+    Args:
+        db: 会话工厂（生产：每段读写一个短会话，等模型/工具时不占连接）或借用的会话（测试）
+        persist_messages: 循环结束时写入本轮消息的方式；默认在一个短事务里按顺序写入
+            （借用的会话只 flush，由调用方提交）
+    """
     active_budget = budget or Budget()
     consecutive_failed_rounds = 0
     before_hook = before_tool_call or _default_before_tool_call
     after_hook = after_tool_call or _default_after_tool_call
+    persist = persist_messages or partial(persist_transcript, db, session_id, agent_id=agent_id)
     last_prompt_tokens: int | None = None
+    pending: list[TranscriptMessage] = []
+
+    async def finish(outcome: LoopOutcome, *, usage_index: int | None = None) -> LoopOutcome:
+        usage_message_id = await persist(pending, usage_index)
+        return replace(outcome, usage_message_id=usage_message_id)
 
     while True:
         try:
             active_budget.reserve_step()
         except BudgetExceededError:
-            return LoopOutcome(reason="budget_exceeded", final_answer=None)
+            return await finish(LoopOutcome(reason="budget_exceeded", final_answer=None))
 
         if agent_id is None:
             await ensure_root_compaction(
@@ -123,6 +146,7 @@ async def run_loop(
                 budget=active_budget,
                 system_prompt=system_prompt or "",
                 last_prompt_tokens=last_prompt_tokens,
+                pending=pending,
             )
 
         history = await build_model_history(
@@ -130,6 +154,7 @@ async def run_loop(
             session_id,
             agent_id=agent_id,
             system_prompt=system_prompt,
+            pending=pending,
         )
         result: ChatResult = (
             await chat_fn(model_key, history, tools=tools, db=db)
@@ -138,7 +163,7 @@ async def run_loop(
         )
 
         if result.finish_reason == "error":
-            return LoopOutcome(reason="llm_error", final_answer=None)
+            return await finish(LoopOutcome(reason="llm_error", final_answer=None))
 
         last_prompt_tokens = result.prompt_tokens
 
@@ -156,17 +181,14 @@ async def run_loop(
             cost_exceeded = True
 
         if not result.tool_calls:
-            final_message = await append_assistant_message(
-                db, session_id, result.content or "", agent_id=agent_id
-            )
-            return LoopOutcome(
-                reason="final_answer",
-                final_answer=result.content,
-                usage_message_id=final_message.id,
+            pending.append(TranscriptMessage.assistant(result.content or ""))
+            return await finish(
+                LoopOutcome(reason="final_answer", final_answer=result.content),
+                usage_index=len(pending) - 1,
             )
 
         if cost_exceeded:
-            return LoopOutcome(reason="budget_exceeded", final_answer=None)
+            return await finish(LoopOutcome(reason="budget_exceeded", final_answer=None))
 
         pending_tool_results: list[tuple[ToolCall, ToolResult]] = []
         round_controls: list[ToolControl] = []
@@ -193,50 +215,35 @@ async def run_loop(
                             ),
                         )
                     )
-                exit_message = await append_assistant_message(
-                    db,
-                    session_id,
-                    result.content or "",
-                    agent_id=agent_id,
-                    tool_calls=result.tool_calls,
+                pending.append(
+                    TranscriptMessage.assistant(result.content or "", result.tool_calls)
                 )
-                for paired_call, paired_result in pending_tool_results:
-                    await append_tool_result(
-                        db,
-                        session_id,
-                        paired_call.id,
-                        paired_result.content,
-                        agent_id=agent_id,
-                    )
-                return LoopOutcome(
-                    reason="early_exit",
-                    final_answer=None,
-                    control=tool_result.control,
-                    usage_message_id=exit_message.id,
+                exit_index = len(pending) - 1
+                pending.extend(
+                    TranscriptMessage.tool_result(paired_call.id, paired_result.content)
+                    for paired_call, paired_result in pending_tool_results
+                )
+                return await finish(
+                    LoopOutcome(
+                        reason="early_exit",
+                        final_answer=None,
+                        control=tool_result.control,
+                    ),
+                    usage_index=exit_index,
                 )
 
-        await append_assistant_message(
-            db,
-            session_id,
-            result.content or "",
-            agent_id=agent_id,
-            tool_calls=result.tool_calls,
+        pending.append(TranscriptMessage.assistant(result.content or "", result.tool_calls))
+        pending.extend(
+            TranscriptMessage.tool_result(paired_call.id, paired_result.content)
+            for paired_call, paired_result in pending_tool_results
         )
-        for paired_call, paired_result in pending_tool_results:
-            await append_tool_result(
-                db,
-                session_id,
-                paired_call.id,
-                paired_result.content,
-                agent_id=agent_id,
-            )
 
         # 整轮工具全部失败才累计；有任何一次成功就重置，避免误杀正常纠错。
         if round_controls and all(control in _FAILURE_CONTROLS for control in round_controls):
             consecutive_failed_rounds += 1
             if consecutive_failed_rounds >= _MAX_CONSECUTIVE_FAILED_ROUNDS:
-                return LoopOutcome(
-                    reason="early_exit", final_answer=None, control=round_controls[-1]
+                return await finish(
+                    LoopOutcome(reason="early_exit", final_answer=None, control=round_controls[-1])
                 )
         else:
             consecutive_failed_rounds = 0

@@ -14,6 +14,8 @@
    「这个角色可以用哪些工具」，替代不了登录用户的授权；用户 ID 只来自可信上下文，
    绝不从模型参数里取。
 6. 校验通过后才转发；参数问题要求澄清，意外异常只返回类型。
+7. 不在等工具时占连接（R5）：调度器拿会话工厂时，查权限、每个查库工具各用一个短会话，
+   用完即还；需要调向量模型的工具自己分段，调模型时不持有会话。
 """
 
 from collections.abc import Iterable
@@ -62,6 +64,7 @@ from app.agent.tool_args import (
     validate_and_run,
     validation_reason_for_tool,
 )
+from app.core.database import SessionSource, session_scope
 
 __all__ = [
     "ROOT_TOOL_SCHEMA_VERSION",
@@ -135,7 +138,7 @@ def tool_schemas_for(allowlist: Iterable[str]) -> list[dict[str, Any]]:
 
 
 async def _dispatch_validated(
-    db: AsyncSession,
+    db: SessionSource,
     name: ToolName,
     parsed: _Args,
     context: PermissionContext,
@@ -158,39 +161,42 @@ async def _dispatch_validated(
             top_k=parsed.top_k,
         )
     if isinstance(parsed, QueryCmdbArgs):
-        return await query_cmdb(
-            db,
-            asset_ids=parsed.asset_ids,
-            ip=parsed.ip,
-            business_system=parsed.business_system,
-            hostname=parsed.hostname,
-        )
+        async with session_scope(db) as session:
+            return await query_cmdb(
+                session,
+                asset_ids=parsed.asset_ids,
+                ip=parsed.ip,
+                business_system=parsed.business_system,
+                hostname=parsed.hostname,
+            )
     if isinstance(parsed, QueryCmdbDependenciesArgs):
-        return await query_cmdb_dependencies(
-            db,
-            parsed.asset_id,
-            direction=parsed.direction,
-            max_depth=parsed.max_depth,
-        )
+        async with session_scope(db) as session:
+            return await query_cmdb_dependencies(
+                session,
+                parsed.asset_id,
+                direction=parsed.direction,
+                max_depth=parsed.max_depth,
+            )
     if isinstance(parsed, QueryMonitorStatusArgs):
-        return await query_monitor_status(
-            db,
-            target_ids=parsed.target_ids,
-            ip_prefix=parsed.ip_prefix,
-            since_limit=parsed.since_limit,
-            # 探测历史与 REST 事件接口一样要 monitor_log:read，缺它只给当前状态
-            include_history=context.has(MONITOR_LOG_READ),
-        )
+        async with session_scope(db) as session:
+            return await query_monitor_status(
+                session,
+                target_ids=parsed.target_ids,
+                ip_prefix=parsed.ip_prefix,
+                since_limit=parsed.since_limit,
+                # 探测历史与 REST 事件接口一样要 monitor_log:read，缺它只给当前状态
+                include_history=context.has(MONITOR_LOG_READ),
+            )
     return ToolResult(control="failed", content=f"工具 {name!r} 参数模型未绑定执行器")
 
 
 def build_tool_dispatcher(
-    db: AsyncSession,
+    db: SessionSource,
     allowlist: Iterable[str],
     *,
     user_id: int | None,
 ) -> ToolDispatcher:
-    """Bind one DB session, immutable role allowlist and trusted user into a dispatcher.
+    """Bind a session source, immutable role allowlist and trusted user into a dispatcher.
 
     ``user_id`` is the account whose business permissions cap every call (the
     session owner). It must come from the trusted request context, never from
@@ -203,7 +209,8 @@ def build_tool_dispatcher(
             return ToolResult(control="rejected", content=f"工具 {name!r} 不在角色白名单")
         if name not in _ARGUMENT_MODELS:
             return ToolResult(control="rejected", content=f"未知工具 {name!r}")
-        context = await load_permission_context(db, user_id)
+        async with session_scope(db) as session:
+            context = await load_permission_context(session, user_id)
         denial = tool_denial(context, name)
         if denial is not None:
             return ToolResult(control="rejected", content=denial)
@@ -341,7 +348,7 @@ def root_tool_schemas() -> list[dict[str, Any]]:
 
 
 def build_root_tool_dispatcher(
-    db: AsyncSession,
+    db: SessionSource,
     *,
     session_id: int,
     actor_user_id: int,
@@ -352,7 +359,7 @@ def build_root_tool_dispatcher(
     """创建绑定可信身份的根 Agent 工具调度器。
 
     Args:
-        db: 当前事务使用的异步数据库会话。
+        db: 会话工厂（每次调用各用短会话）或借用的会话。
         session_id: 根 Agent 会话 ID，不允许由模型覆盖。
         actor_user_id: 当前认证用户 ID，不允许由模型覆盖。
         proposed_by_agent_id: 发起提案的 Agent ID，可为空。
@@ -364,19 +371,16 @@ def build_root_tool_dispatcher(
     """
     read_dispatch = build_tool_dispatcher(db, _ROOT_READ_ONLY_TOOLS, user_id=actor_user_id)
 
-    async def dispatch(name: str, arguments: dict[str, Any]) -> ToolResult:
-        # 只读工具由 read_dispatch 自己查权限；根专属工具在这里先查
-        if name in _ROOT_ONLY_TOOLS:
-            denial = tool_denial(await load_permission_context(db, actor_user_id), name)
-            if denial is not None:
-                return ToolResult(control="rejected", content=denial)
+    async def run_root_only(
+        session: AsyncSession, name: str, arguments: dict[str, Any]
+    ) -> ToolResult:
         if name == "notify":
             return await validate_and_run(
                 name,
                 arguments,
                 NotifyArgs,
                 lambda args: notify(
-                    db,
+                    session,
                     asset_id=args.asset_id,
                     payload=args.payload.model_dump(),
                     reason=args.reason,
@@ -393,7 +397,7 @@ def build_root_tool_dispatcher(
                 arguments,
                 DeviceControlArgs,
                 lambda args: device_control(
-                    db,
+                    session,
                     asset_id=args.asset_id,
                     command_name=args.command_name,
                     interface_name=args.interface_name,
@@ -411,7 +415,7 @@ def build_root_tool_dispatcher(
                 arguments,
                 QueryDeviceCommandArgs,
                 lambda args: query_device_command(
-                    db,
+                    session,
                     asset_id=args.asset_id,
                     command_name=args.command_name,
                     reason=args.reason,
@@ -428,18 +432,28 @@ def build_root_tool_dispatcher(
                 arguments,
                 ListDeviceCommandsArgs,
                 lambda args: list_device_commands_for_asset(
-                    db, session_id=session_id, asset_id=args.asset_id
+                    session, session_id=session_id, asset_id=args.asset_id
                 ),
             )
-        if name == "get_device_query_result":
-            return await validate_and_run(
-                name,
-                arguments,
-                GetDeviceQueryResultArgs,
-                lambda args: get_device_query_result(
-                    db, session_id=session_id, proposal_id=args.proposal_id
-                ),
-            )
-        return await read_dispatch(name, arguments)
+        return await validate_and_run(
+            name,
+            arguments,
+            GetDeviceQueryResultArgs,
+            lambda args: get_device_query_result(
+                session, session_id=session_id, proposal_id=args.proposal_id
+            ),
+        )
+
+    async def dispatch(name: str, arguments: dict[str, Any]) -> ToolResult:
+        # 只读工具由 read_dispatch 自己查权限、自己开短会话
+        if name not in _ROOT_ONLY_TOOLS:
+            return await read_dispatch(name, arguments)
+        # 根专属工具都是很短的库操作（门控工具在这里只会失败关闭，真执行在门控钩子里），
+        # 查权限和执行共用一个短会话
+        async with session_scope(db) as session:
+            denial = tool_denial(await load_permission_context(session, actor_user_id), name)
+            if denial is not None:
+                return ToolResult(control="rejected", content=denial)
+            return await run_root_only(session, name, arguments)
 
     return dispatch

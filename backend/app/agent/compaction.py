@@ -10,16 +10,23 @@
 2. 摘要直接调用 app.core.llm.chat（stream=False），不走 run_loop 注入的 chat_fn，避免压缩过程推到 WebSocket。
 3. 运维 ROOT_OPS_SYSTEM_PROMPT 每轮由 build_model_history 注入，永不进入摘要请求；摘要器使用独立的中文系统指令。
 4. 压缩成功则更新 agent_sessions.memory_summary 与 compacted_through_message_id；失败或超预算则保持 40 条 fallback 窗口。
+5. 不在等摘要模型时占数据库连接（R5）：短会话读出摘要、边界与候选消息并转成纯数据 →
+   不带会话调摘要模型 → 短事务保存。保存用「边界没变才更新」的条件写：摘要模型慢的
+   时候别的请求可能已经推进了边界，迟到的结果不能把它盖回去。
+6. 本轮还在内存里的消息（pending）计入窗口估算，但压缩边界只能落在已写库的消息上——
+   它们还没有数据库 ID，不能伪造。本轮消息多到把已提交的行挤出窗口时，这些行一并被摘要。
 """
 
 import json
+from collections.abc import Sequence
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import update
 
 from app.agent.budget import Budget, BudgetExceededError
+from app.agent.transcript import TranscriptMessage
+from app.core.database import SessionSource, session_scope
 from app.core.llm import ChatMessage, ToolCall, chat
 from app.crud.agent_message import agent_message_crud
-from app.models.agent_message import AgentMessage
 from app.models.agent_session import AgentSession
 
 COMPACT_TOKEN_THRESHOLD = 12000
@@ -70,31 +77,37 @@ def _estimate_text_tokens(text: str) -> int:
     return len(text.encode("utf-8")) // 3
 
 
-def _estimate_message_tokens(row: AgentMessage) -> int:
-    total = _estimate_text_tokens(row.content or "")
-    if row.tool_calls:
-        total += _estimate_text_tokens(json.dumps(row.tool_calls, ensure_ascii=False))
+def _estimate_message_tokens(message: TranscriptMessage) -> int:
+    total = _estimate_text_tokens(message.content)
+    if message.tool_calls:
+        total += _estimate_text_tokens(json.dumps(message.tool_calls, ensure_ascii=False))
     return total
 
 
 def _estimate_model_window_tokens(
-    session: AgentSession,
-    all_messages: list[AgentMessage],
+    memory_summary: str | None,
+    compacted_through_message_id: int | None,
+    committed: Sequence[TranscriptMessage],
+    pending: Sequence[TranscriptMessage],
     system_prompt: str,
 ) -> int:
+    """估算下一次模型调用的窗口大小，窗口取法与 build_model_history 一致。"""
     total = _estimate_text_tokens(system_prompt)
-    if session.memory_summary:
-        total += _estimate_text_tokens(MEMORY_SUMMARY_USER_PREFIX + session.memory_summary)
-        after_id = session.compacted_through_message_id
+    if memory_summary:
+        total += _estimate_text_tokens(MEMORY_SUMMARY_USER_PREFIX + memory_summary)
+        after_id = compacted_through_message_id
         recent = [
-            row
-            for row in all_messages
-            if after_id is None or row.id > after_id
+            *(
+                message
+                for message in committed
+                if after_id is None or (message.id is not None and message.id > after_id)
+            ),
+            *pending,
         ][-COMPACT_RECENT_RAW_MESSAGES:]
     else:
-        recent = all_messages[-COMPACT_FALLBACK_MAX_MESSAGES:]
-    for row in recent:
-        total += _estimate_message_tokens(row)
+        recent = [*committed, *pending][-COMPACT_FALLBACK_MAX_MESSAGES:]
+    for message in recent:
+        total += _estimate_message_tokens(message)
     return total
 
 
@@ -106,14 +119,14 @@ def _truncate_for_summarizer(content: str, role: str) -> str:
     return content[:keep] + suffix
 
 
-def _row_to_chat_message(row: AgentMessage, *, for_summarizer: bool) -> ChatMessage:
+def _row_to_chat_message(row: TranscriptMessage, *, for_summarizer: bool) -> ChatMessage:
     tool_calls: list[ToolCall] | None = None
     if row.tool_calls:
         tool_calls = [
             ToolCall(id=tc["id"], name=tc["name"], arguments=tc["arguments"])
             for tc in row.tool_calls
         ]
-    content = row.content or ""
+    content = row.content
     if for_summarizer:
         content = _truncate_for_summarizer(content, row.role)
         if row.role == "tool":
@@ -128,7 +141,7 @@ def _row_to_chat_message(row: AgentMessage, *, for_summarizer: bool) -> ChatMess
     )
 
 
-def _message_units(rows: list[AgentMessage]) -> list[tuple[int, int]]:
+def _message_units(rows: Sequence[TranscriptMessage]) -> list[tuple[int, int]]:
     """
     将消息列表解析为完整单元，索引区间为左闭右开。
 
@@ -158,7 +171,9 @@ def _message_units(rows: list[AgentMessage]) -> list[tuple[int, int]]:
     return units
 
 
-def _safe_compaction_cut_index(rows: list[AgentMessage], recent_raw_count: int) -> int:
+def _safe_compaction_cut_index(
+    rows: Sequence[TranscriptMessage], recent_raw_count: int
+) -> int:
     """
     计算安全压缩切点：只推进到最后一个完整单元末尾。
 
@@ -181,7 +196,9 @@ def _safe_compaction_cut_index(rows: list[AgentMessage], recent_raw_count: int) 
     return cut
 
 
-def _drop_leading_orphan_tools(rows: list[AgentMessage]) -> list[AgentMessage]:
+def _drop_leading_orphan_tools(
+    rows: Sequence[TranscriptMessage],
+) -> list[TranscriptMessage]:
     """丢弃窗口开头的孤立 tool 消息。
 
     按 id 截断可能切开「assistant(tool_calls) + tool 结果」这个单元，留下没有
@@ -191,36 +208,44 @@ def _drop_leading_orphan_tools(rows: list[AgentMessage]) -> list[AgentMessage]:
     start = 0
     while start < len(rows) and rows[start].role == "tool":
         start += 1
-    return rows[start:]
+    return list(rows[start:])
 
 
 def _messages_to_summarize(
-    all_messages: list[AgentMessage],
+    committed: Sequence[TranscriptMessage],
     compacted_through_message_id: int | None,
-) -> list[AgentMessage]:
-    cut_index = _safe_compaction_cut_index(all_messages, COMPACT_RECENT_RAW_MESSAGES)
+    pending_count: int = 0,
+) -> list[TranscriptMessage]:
+    """挑出要压进摘要的已提交消息。
+
+    最近窗口按「已提交 + 本轮内存消息」一起算：本轮消息占掉的名额越多，留作原文的
+    已提交行越少，被挤出窗口的已提交行一并压进摘要。切点只落在已提交消息上。
+    """
+    recent_committed = max(0, COMPACT_RECENT_RAW_MESSAGES - pending_count)
+    cut_index = _safe_compaction_cut_index(committed, recent_committed)
     if cut_index == 0:
         return []
-    candidate = all_messages[:cut_index]
+    candidate = committed[:cut_index]
     return [
         row
         for row in candidate
-        if compacted_through_message_id is None or row.id > compacted_through_message_id
+        if compacted_through_message_id is None
+        or (row.id is not None and row.id > compacted_through_message_id)
     ]
 
 
 def _build_summarizer_messages(
-    session: AgentSession,
-    to_summarize: list[AgentMessage],
+    memory_summary: str | None,
+    to_summarize: Sequence[TranscriptMessage],
 ) -> list[ChatMessage]:
     messages: list[ChatMessage] = [
         ChatMessage(role="system", content=_SUMMARIZER_SYSTEM_PROMPT)
     ]
-    if session.memory_summary:
+    if memory_summary:
         messages.append(
             ChatMessage(
                 role="user",
-                content=f"已有工作摘要：\n{session.memory_summary}",
+                content=f"已有工作摘要：\n{memory_summary}",
             )
         )
     for row in to_summarize:
@@ -235,36 +260,48 @@ def _build_summarizer_messages(
 
 
 async def ensure_root_compaction(
-    db: AsyncSession,
+    db: SessionSource,
     session_id: int,
     *,
     budget: Budget,
     system_prompt: str,
     last_prompt_tokens: int | None = None,
+    pending: Sequence[TranscriptMessage] = (),
 ) -> None:
     """
     根会话在送入用户可见模型前尝试压缩旧消息窗口。
 
-    直接调用 llm.chat，不使用 run_loop 的 chat_fn。
+    直接调用 llm.chat，不使用 run_loop 的 chat_fn。调摘要模型期间不持有数据库会话。
+
+    Args:
+        db: 会话工厂（生产：每段操作一个短会话）或借用的会话（测试）
+        session_id: 根会话 ID
+        budget: 本轮预算，摘要调用的花费记在这里
+        system_prompt: 根指令，只参与窗口估算，永不进入摘要请求
+        last_prompt_tokens: 上一次模型调用的真实 prompt_tokens
+        pending: 本轮还在内存里的消息，计入窗口但不能成为压缩边界
     """
-    session = await db.get(AgentSession, session_id)
-    if session is None:
-        return
-
-    all_messages = _drop_leading_orphan_tools(
-        await agent_message_crud.list_for_agent(
-            db,
-            session_id,
-            agent_id=None,
-            limit=COMPACT_RECENT_RAW_MESSAGES + COMPACT_MAX_CANDIDATES,
+    async with session_scope(db) as session:
+        agent_session = await session.get(AgentSession, session_id)
+        if agent_session is None:
+            return
+        memory_summary = agent_session.memory_summary
+        boundary = agent_session.compacted_through_message_id
+        committed = _drop_leading_orphan_tools(
+            [
+                TranscriptMessage.from_row(row)
+                for row in await agent_message_crud.list_for_agent(
+                    session,
+                    session_id,
+                    agent_id=None,
+                    limit=COMPACT_RECENT_RAW_MESSAGES + COMPACT_MAX_CANDIDATES,
+                )
+            ]
         )
-    )
-    if not all_messages:
+    if not committed:
         return
 
-    to_summarize = _messages_to_summarize(
-        all_messages, session.compacted_through_message_id
-    )
+    to_summarize = _messages_to_summarize(committed, boundary, len(pending))
     if not to_summarize:
         return
 
@@ -273,13 +310,15 @@ async def ensure_root_compaction(
         and last_prompt_tokens >= COMPACT_TOKEN_THRESHOLD
     )
     estimate_triggered = (
-        _estimate_model_window_tokens(session, all_messages, system_prompt)
+        _estimate_model_window_tokens(
+            memory_summary, boundary, committed, pending, system_prompt
+        )
         >= COMPACT_TOKEN_THRESHOLD
     )
     if not token_triggered and not estimate_triggered:
         return
 
-    summarizer_messages = _build_summarizer_messages(session, to_summarize)
+    summarizer_messages = _build_summarizer_messages(memory_summary, to_summarize)
     # 便宜档：纯摘要，而且输入是整段待压缩历史——全项目输入最长、最该省钱的一处
     result = await chat("chat-fast", summarizer_messages, stream=False, db=db)
 
@@ -298,6 +337,16 @@ async def ensure_root_compaction(
     if result.finish_reason == "error" or summary is None or not summary.strip():
         return
 
-    session.memory_summary = summary.strip()
-    session.compacted_through_message_id = to_summarize[-1].id
-    await db.flush()
+    async with session_scope(db, commit=True) as session:
+        # 边界没变才写：读输入之后若别的请求已经推进了压缩，这份摘要就过时了
+        await session.execute(
+            update(AgentSession)
+            .where(
+                AgentSession.id == session_id,
+                AgentSession.compacted_through_message_id.is_not_distinct_from(boundary),
+            )
+            .values(
+                memory_summary=summary.strip(),
+                compacted_through_message_id=to_summarize[-1].id,
+            )
+        )

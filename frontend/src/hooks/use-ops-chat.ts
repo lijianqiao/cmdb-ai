@@ -13,6 +13,7 @@ import {
   postAgentMessage,
 } from "@/lib/agent-api"
 import { useAgentWs, type AgentWsStatus } from "@/hooks/use-agent-ws"
+import { readErrorMessage } from "@/components/ops-assistant/hitlApprovalCardUtils"
 import type {
   AgentMessage,
   AgentSessionSnapshot,
@@ -887,14 +888,17 @@ export function useOpsChat({
       setIsSending(true)
       try {
         await postAgentMessage(sessionId, { content: trimmed })
-      } catch {
-        toast.error("发送失败，请稍后重试")
+      } catch (error) {
+        // 服务端拒绝时说明原因：同时进行的对话太多（429）、助手繁忙（503）、
+        // 这个会话上一条还没处理完（409）等，比笼统的「发送失败」更好判断下一步
+        const message = readErrorMessage(error, "发送失败，请稍后重试")
+        toast.error(message)
         if (shouldSynthesizeSendError(wsErrorForTurnRef.current)) {
           dispatch({
             type: "ws",
             message: {
               type: "error",
-              payload: { message: "发送失败，请稍后重试" },
+              payload: { message },
             },
           })
         }

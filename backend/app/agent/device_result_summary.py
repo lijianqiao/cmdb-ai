@@ -4,8 +4,9 @@
 实现流程：
 1. 用单条条件 UPDATE 认领待总结结果；认领时间既是 worker 令牌，也让崩溃任务在
    五分钟后可恢复，避免两个 Agent worker 同时处理同一份设备输出。
-2. 在独立只读数据库会话中调用统一 LLM 客户端；配置原文被明确标记为外部不可信
-   数据，大输出只按完整行分块，最后仅合并块摘要，且任何调用都不提供工具。
+2. 调统一 LLM 客户端时不持有数据库会话（R5）：只把会话工厂交给它读模型配置，
+   读完即还连接，大输出分块要连调好几次模型也不占连接；配置原文被明确标记为外部
+   不可信数据，大输出只按完整行分块，最后仅合并块摘要，且任何调用都不提供工具。
 3. 模型错误统一降级为固定文案，不改变已经 EXECUTED 的设备提案，也不重试设备。
 4. 新短事务以认领时间做条件收尾，先更新总结再追加根 assistant 消息并一起提交；
    消息失败会整体回滚，迟到 worker 也无法覆盖新 worker 或追加重复消息。
@@ -20,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.session import append_assistant_message
+from app.core.database import SessionSource
 from app.core.llm import ChatMessage, ChatResult, chat
 from app.crud.hitl_execution_result import hitl_execution_result_crud
 from app.models.agent_message import AgentMessage
@@ -51,7 +53,7 @@ class SummaryChatFn(Protocol):
         model_key: str,
         messages: list[ChatMessage],
         *,
-        db: AsyncSession | None = None,
+        db: SessionSource | None = None,
     ) -> Awaitable[ChatResult]: ...
 
 
@@ -209,7 +211,7 @@ def _metadata_prompt(summary_input: _SummaryInput) -> str:
 async def _call_summary_model(
     active_chat: SummaryChatFn,
     *,
-    db: AsyncSession,
+    db: SessionSource,
     user_prompt: str,
 ) -> str:
     result = await active_chat(
@@ -230,7 +232,7 @@ async def _call_summary_model(
 async def _generate_summary(
     active_chat: SummaryChatFn,
     *,
-    db: AsyncSession,
+    db: SessionSource,
     summary_input: _SummaryInput,
 ) -> str:
     metadata = _metadata_prompt(summary_input)
@@ -319,14 +321,13 @@ async def deliver_device_query_summary(
 
     active_chat: SummaryChatFn = chat_fn or chat
     try:
-        async with session_factory() as model_db:
-            content = await _generate_summary(
-                active_chat,
-                db=model_db,
-                summary_input=summary_input,
-            )
-            if _contains_full_config(content, summary_input.content):
-                raise _SummaryModelError("summary model echoed the full device config")
+        content = await _generate_summary(
+            active_chat,
+            db=session_factory,
+            summary_input=summary_input,
+        )
+        if _contains_full_config(content, summary_input.content):
+            raise _SummaryModelError("summary model echoed the full device config")
         summary_status: Literal["completed", "fallback"] = "completed"
     except Exception:
         content = SUMMARY_FALLBACK_MESSAGE

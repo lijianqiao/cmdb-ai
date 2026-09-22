@@ -9,9 +9,8 @@ wiring itself is out of scope for this plan (see T07's header).
 import asyncio
 import shutil
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.agent.loop import ToolResult
+from app.core.database import SessionSource, session_scope
 from app.core.llm import LlmRequestError, embed
 from app.crud.knowledge_chunk import knowledge_chunk_crud
 from app.services import knowledge_storage
@@ -98,7 +97,7 @@ async def kb_grep(
 
 
 async def kb_semantic_search(
-    db: AsyncSession,
+    db: SessionSource,
     query: str,
     *,
     category_id: int | None = None,
@@ -109,6 +108,9 @@ async def kb_semantic_search(
 
     Requires a real Postgres+pgvector backend for `search_similar()` — see
     app/crud/knowledge_chunk.py.
+
+    向量模型是网络调用：先调模型（配置在它自己的短会话里读完），再开短会话查相似分块，
+    调模型期间不持有数据库连接（R5）。
     """
     try:
         embedding_result = await embed(embedding_model_key, [query], db=db)
@@ -119,15 +121,18 @@ async def kb_semantic_search(
     if not embedding_result.vectors:
         return ToolResult(control="failed", content="embedding 服务未返回向量")
 
-    results = await knowledge_chunk_crud.search_similar(
-        db, query_embedding=embedding_result.vectors[0], category_id=category_id, top_k=top_k
-    )
-    if not results:
+    async with session_scope(db) as session:
+        results = await knowledge_chunk_crud.search_similar(
+            session,
+            query_embedding=embedding_result.vectors[0],
+            category_id=category_id,
+            top_k=top_k,
+        )
+        lines = [
+            f"[document_id={chunk.document_id} chunk_index={chunk.chunk_index} "
+            f"distance={distance:.4f}] {chunk.content}"
+            for chunk, distance in results
+        ]
+    if not lines:
         return ToolResult(control="ok", content="没有找到相关内容")
-
-    lines = [
-        f"[document_id={chunk.document_id} chunk_index={chunk.chunk_index} "
-        f"distance={distance:.4f}] {chunk.content}"
-        for chunk, distance in results
-    ]
     return ToolResult(control="ok", content="\n\n".join(lines))

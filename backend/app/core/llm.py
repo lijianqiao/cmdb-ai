@@ -17,10 +17,10 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.data_encryption import DataDecryptError, DataEncryptionKeyMissingError
+from app.core.database import SessionSource, session_scope
 from app.schemas.system_config import ChatTier
 from app.services.system_config import get_effective_llm_config
 
@@ -256,13 +256,14 @@ def _cost_usd(config: ModelConfig, prompt_tokens: int, completion_tokens: int) -
 
 async def _resolve_model_config(
     model_key: str,
-    db: AsyncSession | None,
+    db: SessionSource | None,
 ) -> ModelConfig:
     """
     按模型键解析本次请求应使用的 ModelConfig。
 
     有 db 时读取数据库有效配置覆盖三档 chat 与 local-embedding；
     无 db 时回退 MODELS 登记表（.env 兜底）。未知键一律抛错，不静默兜底。
+    传会话工厂时配置在一个短会话里读完即归还连接，之后的 HTTP 请求不占连接。
     """
     model_key = _MODEL_KEY_ALIASES.get(model_key, model_key)
     base = MODELS.get(model_key)
@@ -274,7 +275,8 @@ async def _resolve_model_config(
         return base
 
     try:
-        effective = await get_effective_llm_config(db)
+        async with session_scope(db) as session:
+            effective = await get_effective_llm_config(session)
     except (DataDecryptError, DataEncryptionKeyMissingError) as exc:
         raise LlmRequestError("读取系统 LLM 配置失败，请检查密钥加密设置") from exc
 
@@ -443,7 +445,7 @@ async def chat(
     client: httpx.AsyncClient | None = None,
     stream: bool = False,
     on_delta: ChatDeltaCallback | None = None,
-    db: AsyncSession | None = None,
+    db: SessionSource | None = None,
 ) -> ChatResult:
     """
     发送一次 OpenAI 兼容 chat completion，返回助手回合。
@@ -455,7 +457,7 @@ async def chat(
         client: 可注入的 httpx 客户端（单测用）
         stream: False=整段返回（默认，兼容旧调用）；True=SSE 真 token 流
         on_delta: 仅 stream=True 时生效；每段文本增量回调
-        db: 可选数据库会话；传入时读取系统配置覆盖 local-chat
+        db: 可选会话或会话工厂；传入时读取系统配置覆盖 local-chat（传工厂则读完即还连接）
 
     Returns:
         完整 ChatResult（流式时也是聚合结果）
@@ -514,7 +516,7 @@ async def embed(
     inputs: list[str],
     *,
     client: httpx.AsyncClient | None = None,
-    db: AsyncSession | None = None,
+    db: SessionSource | None = None,
 ) -> EmbeddingResult:
     """
     发送一次 OpenAI 兼容 embeddings 请求，按输入顺序返回向量。
@@ -523,7 +525,7 @@ async def embed(
         model_key: MODELS 登记键
         inputs: 待嵌入文本列表
         client: 可注入的 httpx 客户端（单测用）
-        db: 可选数据库会话；传入时读取系统配置覆盖 local-embedding
+        db: 可选会话或会话工厂；传入时读取系统配置覆盖 local-embedding（传工厂则读完即还连接）
 
     Returns:
         向量与 token 用量

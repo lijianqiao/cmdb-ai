@@ -503,6 +503,10 @@ PENDING ──会话归档──> REJECTED（status_reason=withdrawn_on_archive�
 
 **Turn token 串行化**：`AgentSession.active_turn_token` 保证同一会话同一时刻只有一个活跃 turn。`POST /api/v1/agent/sessions/{session_id}/messages` 在短事务内认领 token 后才启动 `run_chat_turn`；进程启动时 `recover_active_turns` 清空遗留 token，避免崩溃后永久锁死。
 
+**等模型时不占数据库连接（R5）**：`run_loop` 接收会话工厂（`app.core.database.SessionSource`），每一步在短会话里读历史、跑压缩判断，读完即还连接；本轮新产生的 assistant/tool 消息留在内存（`TranscriptMessage`），与已提交的行拼成模型窗口，循环结束时经 `persist_messages` 一次写库。异常或用户取消时内存消息直接丢弃，语义与原来的整轮回滚一致，不做逐条提交。根 turn 写库时在同一事务里 `holds_turn`（锁会话行）确认租约令牌仍属于本轮，再写消息和整轮用量——被接管的旧轮次抛 `TurnSupersededError`、接口返回 409，什么都不写。压缩拆成「读输入 → 不带会话调摘要模型 → 边界没变才写」三段，边界只能落在已提交的消息上。工具调度器、语义检索（先调向量模型再短会话查库）、子 Agent、HITL 设备执行与审批后的结果总结都遵循同一原则。
+
+**并发准入**：发消息接口在认领租约前先向 `turn_admission` 占名额（进程内计数，单 worker 前提），单用户超过 `AGENT_MAX_CONCURRENT_TURNS_PER_USER` 返回 429、全进程超过 `AGENT_MAX_CONCURRENT_TURNS` 返回 503，均带 `Retry-After` 且不排队；名额在请求结束时归还。
+
 **会话归档而不是删除（R4）**：`DELETE /api/v1/agent/sessions/{session_id}` 只把会话 `status` 置为 `archived`——列表、快照、发消息、改档位、WebSocket 对所有者也按不存在处理，`claim_turn` 拒绝归档会话，消息与提案全部保留。检查与更新在同一事务内按「会话行 → 该会话未结束的提案行」加锁：有未超时的活跃 turn、运行中的子 Agent，或 `APPROVED`/`EXECUTING`/`UNKNOWN` 提案时返回 409 并说明原因；`PENDING` 提案随归档撤回（转 `REJECTED` + `withdrawn_on_archive`，逐条写 `hitl_withdrawn` 审计），归档后会话里只剩已结束的提案。不能用拒绝归档来处理 `PENDING`：没有审批权限的用户拒绝不了自己的提案，聊天就永远收不起来。知识库分类作业的临时会话不产生提案，仍按原方式物理删除
 
 **快照恢复 vs WebSocket 加速**：

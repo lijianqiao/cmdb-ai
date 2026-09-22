@@ -68,16 +68,12 @@ async def _deliver_executed_query_summary(
     *,
     proposal_id: int,
 ) -> SummaryDelivery | None:
-    """仅为已成功执行的 device_query 交付总结；失败不影响设备成功状态。"""
-    try:
-        proposal = await hitl_proposal_crud.get(db, proposal_id)
-        if (
-            proposal is None
-            or proposal.action_type != "device_query"
-            or proposal.status != "EXECUTED"
-        ):
-            return None
+    """仅为已成功执行的 device_query 交付总结；失败不影响设备成功状态。
 
+    不用请求的 db 查提案：那会开启事务、借出连接，并一直占到总结模型返回（R5）。
+    检查放在同一引擎的短会话里，查完即还。
+    """
+    try:
         engine = db.bind
         if engine is None:
             raise RuntimeError("数据库会话未绑定 AsyncEngine")
@@ -86,6 +82,16 @@ async def _deliver_executed_query_summary(
             expire_on_commit=False,
             autoflush=False,
         )
+        async with session_factory() as lookup:
+            proposal = await hitl_proposal_crud.get(lookup, proposal_id)
+            executed_query = (
+                proposal is not None
+                and proposal.action_type == "device_query"
+                and proposal.status == "EXECUTED"
+            )
+        if not executed_query:
+            return None
+
         return await deliver_device_query_summary(
             session_factory=session_factory,
             proposal_id=proposal_id,

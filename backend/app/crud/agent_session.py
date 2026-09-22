@@ -238,6 +238,30 @@ class CRUDAgentSession(CRUDBase[AgentSession]):
             )
         return claimed
 
+    async def holds_turn(self, db: AsyncSession, session_id: int, token: str) -> bool:
+        """
+        锁住会话行并确认 token 仍是当前 turn 的租约。
+
+        在写入本轮消息的同一事务里调用：锁一直持有到提交，新一轮的 claim_turn 要更新
+        同一行，只能等本轮写完——不会出现「刚确认完还是自己的，紧接着被接管」的竞态。
+
+        Args:
+            db: 数据库会话
+            session_id: 会话主键
+            token: 本轮 turn 的令牌
+
+        Returns:
+            租约仍属于本轮返回 True；已被接管、已释放或会话不存在返回 False
+        """
+        current = (
+            await db.execute(
+                select(AgentSession.active_turn_token)
+                .where(AgentSession.id == session_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        return current == token
+
     async def release_turn(self, db: AsyncSession, session_id: int, token: str) -> bool:
         """
         释放 turn 租约（仅持有者可释放）。

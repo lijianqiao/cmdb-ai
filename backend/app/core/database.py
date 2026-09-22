@@ -1,6 +1,7 @@
 """Asynchronous SQLAlchemy engine and request-scoped session dependency."""
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -9,6 +10,39 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.config import settings
+
+# 需要短暂查库、中间又要等外部服务（模型、设备、子 Agent）的代码接受这两种来源：
+# 会话工厂 → 每段数据库操作开一个短会话、用完即还连接；现成的会话 → 直接借用，
+# 事务由调用方负责（测试夹具和已经处在一个短事务里的调用方）。
+type SessionSource = AsyncSession | async_sessionmaker[AsyncSession]
+
+
+@asynccontextmanager
+async def session_scope(
+    source: SessionSource, *, commit: bool = False
+) -> AsyncIterator[AsyncSession]:
+    """为一段数据库操作提供会话，离开时按来源收尾。
+
+    AsyncSession 从第一次查询起就占住一条连接，直到 commit / rollback / close 才归还——
+    await 不阻塞事件循环，不等于不占连接。所以等外部服务之前必须先离开这个作用域。
+
+    Args:
+        source: 会话工厂（新开短会话，离开时关闭）或现成的会话（借用，不关闭）
+        commit: 正常离开时是否落盘——新开的会话 commit，借用的会话只 flush，
+            由它的主人决定何时提交；异常离开时新开的会话随关闭回滚
+
+    Yields:
+        本段操作使用的会话
+    """
+    if isinstance(source, AsyncSession):
+        yield source
+        if commit:
+            await source.flush()
+        return
+    async with source() as session:
+        yield session
+        if commit:
+            await session.commit()
 
 
 def _to_async_database_url(url: str) -> str:

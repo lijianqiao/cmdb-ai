@@ -21,7 +21,7 @@ from app.agent.budget import Budget
 from app.agent.loop import ChatFn, ToolResult, run_loop
 from app.agent.permissions import load_permission_context, permitted_tool_schemas
 from app.agent.roles import get_role
-from app.agent.session import append_user_message
+from app.agent.session import append_user_message, persist_transcript
 from app.agent.spawn.admission import depth_from_path, path_depth, validate_child_budget
 from app.agent.spawn.receipts import _budget_payload, _to_receipt
 from app.agent.spawn.types import (
@@ -575,12 +575,18 @@ class SpawnManager:
         budget: Budget,
     ) -> ChildRunResult:
         definition = get_role(receipt.role)
+        # 等模型、等工具时不占连接（R5）：查权限、读历史、每个工具都用会话工厂开短会话。
+        # 传进来的 db 只在最后写本轮消息时用到，由 _execute_child 随后提交，
+        # 所以它的连接只在收尾那一刻才被借出。
         # 子 Agent 以会话所有者的业务权限为上限：角色白名单只说明这个角色能用哪些工具，
         # 替代不了登录用户的授权。工具清单按当时权限过滤，调度器每次调用再现查一次。
-        session = await db.get(AgentSession, receipt.session_id)
-        owner_id = session.user_id if session is not None else None
-        owner_context = await load_permission_context(db, owner_id)
-        dispatcher = build_tool_dispatcher(db, receipt.tools_allowlist, user_id=owner_id)
+        async with self._session_factory() as lookup:
+            session = await lookup.get(AgentSession, receipt.session_id)
+            owner_id = session.user_id if session is not None else None
+            owner_context = await load_permission_context(lookup, owner_id)
+        dispatcher = build_tool_dispatcher(
+            self._session_factory, receipt.tools_allowlist, user_id=owner_id
+        )
 
         async def dispatch_tool(
             name: str, arguments: dict[str, Any]
@@ -593,7 +599,7 @@ class SpawnManager:
                 raise _ChildToolRuntimeError from exc
 
         outcome = await run_loop(
-            db,
+            self._session_factory,
             session_id=receipt.session_id,
             model_key=receipt.model,
             dispatch_tool=dispatch_tool,
@@ -604,6 +610,9 @@ class SpawnManager:
             chat_fn=self._chat_fn,
             agent_id=receipt.child_id,
             system_prompt=definition.instructions,
+            persist_messages=partial(
+                persist_transcript, db, receipt.session_id, agent_id=receipt.child_id
+            ),
         )
         if outcome.reason == "final_answer":
             return ChildRunResult(

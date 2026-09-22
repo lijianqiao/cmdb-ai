@@ -16,8 +16,12 @@
    还没审批的提案随归档撤回，逐条写 hitl_withdrawn 审计。
 5. 消息历史优先用 list_for_agent(..., agent_id=None) 只返回根 transcript，按 id 升序。
 6. POST messages：归属校验后 claim turn 租约 → 落库用户消息 → run_chat_turn；
-   整轮结束后一次 commit；HITL 事件经 BufferedWsHitlEventPublisher 在 commit 之后再广播。
-   同会话并发请求返回 409；异常时仍尽量 commit 已写入的用户消息；finally 释放租约。
+   整轮对话拿会话工厂自己开短会话（等模型、等工具时不占连接，R5），本轮消息在结束时
+   一次写库并校验租约令牌；请求自己的会话在提交用户消息后就不再持有连接。
+   HITL 事件经 BufferedWsHitlEventPublisher 在提交之后再广播。同会话并发请求返回 409；
+   本轮租约被接管（旧轮次超时）也返回 409 且不保存结果；finally 释放租约。
+   认领租约之前先占并发准入名额（全局 / 单用户同时在跑的轮数），满了 503 / 429 +
+   Retry-After，请求结束时归还。
 7. 设备查询完整结果只经会话归属专用端点按需返回，且要求当前持有 cmdb:read；总结恢复
    只处理已保存正文，复用幂等总结服务且在消息提交后广播，不触发设备执行或再次使用动态凭据。
 8. 快照包含可恢复态提案及已执行查询，但只暴露 payload 中的预览；完整结果存在性
@@ -33,7 +37,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.agent.chat_turn import run_chat_turn
+from app.agent.chat_turn import TurnSupersededError, run_chat_turn
 from app.agent.device_result_summary import (
     SUMMARY_STALE_AFTER,
     DeviceQueryResultNotFoundError,
@@ -44,6 +48,7 @@ from app.agent.device_result_summary import (
 from app.agent.loop import LoopOutcome
 from app.agent.permissions import AUTO_EXECUTE, CMDB_READ
 from app.agent.session import append_user_message
+from app.agent.turn_admission import turn_admission
 from app.agent.turn_registry import turn_registry
 from app.agent.ws_hub import BufferedWsHitlEventPublisher, hub
 from app.core.database import get_db
@@ -381,6 +386,9 @@ async def patch_session_approval_mode(
     return success_response(AgentSessionResponse.model_validate(session))
 
 
+# 准入满时建议客户端多久后重试：普通一轮对话十几秒到一两分钟，给个短间隔让用户很快能再试
+_TURN_RETRY_AFTER_SECONDS = 10
+
 # 拒绝归档时告诉用户还差什么；聊天一收起就没人能继续核实这些事了
 _ARCHIVE_REFUSAL_MESSAGES: dict[str, str] = {
     "active_turn": "这个会话还有一轮对话正在进行，请等它结束或先停止后再归档",
@@ -602,8 +610,39 @@ async def post_session_message(
     发送用户消息并触发一轮 Agent turn。
 
     实时事件经 WebSocket 推送；本接口返回 turn 摘要。失败时尽量保留用户消息。
+    同时在跑的轮数超过并发准入上限时立即返回 429（本用户）/ 503（全局），不排队。
     """
     await _owned_session_or_404(db, session_id, current_user.id)
+    decision = turn_admission.try_acquire(current_user.id)
+    if decision != "ok":
+        user_limit = decision == "user_limit"
+        raise HTTPException(
+            status_code=(
+                status.HTTP_429_TOO_MANY_REQUESTS
+                if user_limit
+                else status.HTTP_503_SERVICE_UNAVAILABLE
+            ),
+            detail=(
+                "你同时进行的对话太多，请等其中一个结束后稍后再试"
+                if user_limit
+                else "运维助手当前繁忙，请稍后再试"
+            ),
+            headers={"Retry-After": str(_TURN_RETRY_AFTER_SECONDS)},
+        )
+    try:
+        return await _run_turn(db, session_id=session_id, body=body, current_user=current_user)
+    finally:
+        turn_admission.release(current_user.id)
+
+
+async def _run_turn(
+    db: AsyncSession,
+    *,
+    session_id: int,
+    body: AgentMessageCreate,
+    current_user: User,
+) -> ResponseEnvelope[AgentChatTurnResponse]:
+    """已占到准入名额后的一轮对话：认领租约 → 落库用户消息 → 跑 turn → 释放租约。"""
     turn_token = str(uuid4())
     if not await agent_session_crud.claim_turn(db, session_id, turn_token):
         raise HTTPException(
@@ -620,29 +659,28 @@ async def post_session_message(
         # 包成 task 才能被取消端点拿到句柄。await task 本身被取消时（客户端断开、
         # 进程关停）asyncio 会把取消传进 task，所以这层包装不改变断开时的既有行为。
         #
-        # **必须等用户消息提交之后再起 task**：create_task 之后的第一个 await 就会
-        # 把控制权交给它，提前起会让它和上面两行同时用同一个 db 会话，而 AsyncSession
-        # 不是并发安全的（症状是 "Session.add() ... within the execution stage of
-        # the flush process" 然后整轮 500）。
+        # 整轮对话不用请求的 db：它拿同一引擎的会话工厂，每段读写各开短会话，等模型、
+        # 等工具时不占连接（R5）；本轮消息在结束时由它自己一次提交。请求的 db 在上面
+        # 提交之后已经归还了连接，之后只在 finally 里释放租约时再用一下。
         turn_task = asyncio.create_task(
             run_chat_turn(
-                db,
+                async_sessionmaker(db.bind, expire_on_commit=False, autoflush=False),
                 session_id=session_id,
                 actor_user_id=current_user.id,
                 publisher=hitl_publisher,
+                turn_token=turn_token,
             ),
             name=f"turn:{session_id}",
         )
         turn_registry.register(session_id, turn_token, turn_task)
         outcome = await turn_task
-        await db.commit()
     except asyncio.CancelledError:
         # 只有用户主动点「停止」才转成正常响应；客户端断开或进程关停必须原样传播，
         # 吞掉那种取消会让关停挂住、或留下一个永远返回不了的请求。
         if not turn_registry.was_cancelled_by_user(session_id, turn_token):
             raise
-        # C2：本轮已产出的 assistant/tool 消息随 finally 的 rollback 一并丢弃，
-        # 不保留、不写取消标记（项目所有者决定，见 design-turn-cancellation.md §10）。
+        # C2：本轮已产出的 assistant/tool 消息只在被取消的 turn 任务内存里，随任务一起
+        # 丢弃，不保留、不写取消标记（项目所有者决定，见 design-turn-cancellation.md §10）。
         outcome = LoopOutcome(reason="cancelled", final_answer=None)
         # 先 flush 再播 turn_done：取消如果正好打断一次自动批准的执行，
         # execute_approved_proposal 会在它自己的短会话里把提案落成 UNKNOWN 并
@@ -655,6 +693,12 @@ async def post_session_message(
                 payload={"reason": "cancelled", "control": None},
             ),
         )
+    except TurnSupersededError as exc:
+        await hitl_publisher.flush()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="本轮对话耗时过长，已被后来的请求接管，结果没有保存",
+        ) from exc
     except Exception as exc:
         await db.rollback()
         await hitl_publisher.flush()
