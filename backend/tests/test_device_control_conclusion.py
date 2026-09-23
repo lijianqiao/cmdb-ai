@@ -47,6 +47,45 @@ async def test_executed_conclusion_lists_every_interface() -> None:
     )
 
 
+async def test_save_config_conclusion_does_not_tell_the_user_to_save_again() -> None:
+    """其它变更的结论末尾会提醒「不会自动保存」；保存配置本身再这么说就自相矛盾了。"""
+    content = build_device_control_conclusion(
+        _proposal("EXECUTED", {"command_name": "save_config"})
+    )
+
+    assert content is not None
+    assert content.startswith("已在 SW-01（10.0.30.1）上保存配置，设备已接受命令。")
+    assert "不会自动保存" not in content
+
+
+async def test_port_change_conclusion_points_to_save_config_where_supported() -> None:
+    """支持 save_config 的厂商，直接告诉用户用它保存；否则保留通用提醒。"""
+    proposal = HitlProposal(
+        session_id=1,
+        action_type="device_control",
+        action_payload={
+            "asset_id": 1,
+            "proposal_reason": "测试",
+            "command_name": "port_disable",
+            "interface_names": ["GigabitEthernet1/0/15"],
+        },
+        status="EXECUTED",
+        evidence_snapshot={
+            "asset": {
+                "id": 1,
+                "hostname": "SW-01",
+                "ip_address": "10.0.30.1",
+                "vendor": "hp_comware",
+            }
+        },
+    )
+
+    content = build_device_control_conclusion(proposal)
+
+    assert content is not None
+    assert "save_config" in content
+
+
 async def test_conclusion_still_reads_old_single_interface_payload() -> None:
     proposal = _proposal(
         "EXECUTED", {"command_name": "port_enable", "interface_name": "GigabitEthernet0/1"}

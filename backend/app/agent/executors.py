@@ -52,6 +52,7 @@ from app.agent.device_commands import (
     CONFIG_MODE_COMMANDS,
     CONFIG_SUCCESS_MARKERS,
     DEVICE_ERROR_PATTERNS,
+    SAVE_BEFORE_REBOOT_QUESTION,
     CommandArguments,
     UnknownDeviceCommandError,
     VendorName,
@@ -463,6 +464,13 @@ def _run_confirmation_flow(
         if error_line is not None:
             return _rejected(f"设备拒绝了命令：{error_line}")
         if not re.search(step.prompt_pattern, chunk):
+            if re.search(SAVE_BEFORE_REBOOT_QUESTION, chunk):
+                # D5：保存与否是人的决定。认出这个问题就把下一步说清楚，而不是只说「没登记」。
+                return _unconfirmed(
+                    "设备在重启前询问是否保存配置（说明有未保存的改动），已停止、没有替人回答。"
+                    "要保留这些改动，请先执行 save_config 保存配置再重启；确定不保存的话，"
+                    "请到设备上手动重启。请人工核实设备当前没有在重启"
+                )
             return _unconfirmed(
                 "未出现预期的确认提示（设备可能在问目录里没登记的问题），已停止、没有替人回答；"
                 "请人工核实设备状态"

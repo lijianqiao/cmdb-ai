@@ -39,6 +39,7 @@ from uuid import uuid4
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agent.device_commands import command_supports_vendor
 from app.agent.device_result_summary import SummaryDelivery, deliver_device_query_summary
 from app.agent.hitl import HitlResumeError, payload_interface_names
 from app.agent.hitl_execution import execute_approved_proposal
@@ -110,6 +111,7 @@ _CONTROL_COMMAND_LABELS: dict[str, str] = {
     "port_enable": "开启端口",
     "port_disable": "关闭端口",
     "reboot": "重启设备",
+    "save_config": "保存配置",
 }
 
 
@@ -164,8 +166,10 @@ def _conclusion_body(proposal: HitlProposal) -> str | None:
             lines.append("```")
             lines.append(excerpt.strip())
             lines.append("```")
-        lines.append("")
-        lines.append("这类变更不会自动保存配置，需要长期生效请另行保存。")
+        save_hint = _save_hint(proposal)
+        if save_hint:
+            lines.append("")
+            lines.append(save_hint)
         return "\n".join(lines)
     if proposal.status == "UNKNOWN":
         return (
@@ -177,6 +181,22 @@ def _conclusion_body(proposal: HitlProposal) -> str | None:
     if proposal.status == "REJECTED":
         return f"{target}的请求已被拒绝，没有在设备上执行。"
     return None
+
+
+def _save_hint(proposal: HitlProposal) -> str:
+    """变更执行成功后的「记得保存」提醒；保存配置本身不需要再提醒。
+
+    厂商支持 save_config 时直接告诉用户用它；厂商取自证据快照（提案当时的事实）。
+    """
+    payload = proposal.action_payload if isinstance(proposal.action_payload, dict) else {}
+    if payload.get("command_name") == "save_config":
+        return ""
+    snapshot = proposal.evidence_snapshot if isinstance(proposal.evidence_snapshot, dict) else {}
+    asset = snapshot.get("asset") if isinstance(snapshot.get("asset"), dict) else {}
+    vendor = asset.get("vendor") if isinstance(asset, dict) else None
+    if isinstance(vendor, str) and command_supports_vendor("save_config", vendor):
+        return "这类变更不会自动保存配置，需要长期生效请再执行一次保存配置（save_config）。"
+    return "这类变更不会自动保存配置，需要长期生效请另行保存。"
 
 
 async def _count_skipped_calls(db: AsyncSession, proposal: HitlProposal) -> int:

@@ -66,6 +66,13 @@ async def test_root_ops_system_prompt_steers_to_targeted_device_commands() -> No
     assert mentioned <= known, mentioned - known
 
 
+async def test_root_ops_system_prompt_says_to_save_before_reboot() -> None:
+    """D5：重启遇到「要不要保存」会停下、不替人回答；模型要知道改完配置先 save_config。"""
+    from app.agent.chat_turn import ROOT_OPS_SYSTEM_PROMPT
+
+    assert "save_config" in ROOT_OPS_SYSTEM_PROMPT
+
+
 async def test_root_ops_system_prompt_states_orchestration_policy() -> None:
     """提示词应说明两个编排工作流何时用，且不再教已收起的 Spawn 原语。
 

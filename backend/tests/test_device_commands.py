@@ -7,6 +7,7 @@ import pytest
 from app.agent.device_commands import (
     DEVICE_COMMAND_CATALOG_VERSION,
     DEVICE_ERROR_PATTERNS,
+    SAVE_BEFORE_REBOOT_QUESTION,
     UnknownDeviceCommandError,
     UnsupportedVendorError,
     command_supports_vendor,
@@ -34,9 +35,54 @@ def test_catalog_contains_expected_commands() -> None:
         "reboot",
         "port_enable",
         "port_disable",
+        "save_config",
         *TROUBLESHOOTING_COMMANDS,
         *BULK_COMMANDS,
     }
+
+
+def test_save_config_is_a_state_changing_command() -> None:
+    """保存配置会改变下次启动时的配置，按变更类走审批。Junos 的 commit 已经落盘，不登记。"""
+    definition = get_device_command("save_config")
+    assert definition.command_type == "state_changing"
+    assert dict(definition.templates) == {
+        "huawei_vrp": "save",
+        "hp_comware": "save force",
+        "cisco_iosxe": "write memory",
+    }
+    assert definition.verify_manually is False
+
+
+def test_huawei_save_answers_its_own_confirmation_question() -> None:
+    """华为 save 会先问「Are you sure to continue?」。这条确认正则单独登记，
+    不能复用重启那条——重启那条刻意排除了含 save 的行。"""
+    definition = get_device_command("save_config")
+    assert definition.confirmation is not None
+    (step,) = definition.confirmation["huawei_vrp"]
+    prompt = (
+        "The current configuration will be written to the device.\n"
+        "Are you sure to continue? [Y/N]:"
+    )
+    assert re.search(step.prompt_pattern, prompt)
+    assert step.response == "y"
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "System configuration has been modified. Save? [yes/no]:",
+        "Warning: The current configuration will be saved to the next startup "
+        "saved-configuration file. Continue? [Y/N]:",
+        "Current configuration may be lost after the reboot, save current configuration? [Y/N]:",
+    ],
+)
+def test_save_question_before_reboot_is_recognised(prompt: str) -> None:
+    """重启前「要不要保存」的询问要认得出来，才能告诉用户先执行 save_config。"""
+    assert re.search(SAVE_BEFORE_REBOOT_QUESTION, prompt)
+
+
+def test_plain_reboot_confirmation_is_not_a_save_question() -> None:
+    assert not re.search(SAVE_BEFORE_REBOOT_QUESTION, "Proceed with reload? [confirm]")
 
 
 # P2b-2a：输出有限、按对象定位的排查命令。只登记华为和 H3C（主力设备），思科等暂不支持。

@@ -829,13 +829,37 @@ async def test_reboot_rejected_by_device_never_sends_confirmation(
     assert connection.sent == ["reload"]
 
 
-async def test_reboot_with_unregistered_prompt_stops_without_answering(
+@pytest.mark.parametrize(
+    ("vendor", "question"),
+    [
+        ("cisco_iosxe", "SW#reload\nSystem configuration has been modified. Save? [yes/no]: "),
+        (
+            "hp_comware",
+            "<SW>reboot\nCurrent configuration may be lost after the reboot, "
+            "save current configuration? [Y/N]:",
+        ),
+    ],
+)
+async def test_reboot_stops_at_the_save_question_and_says_to_save_first(
+    monkeypatch: pytest.MonkeyPatch, vendor: str, question: str
+) -> None:
+    """设备先问「要不要保存配置」：保存与否是人的决定（D5），停下、不替人回答，
+    并直接告诉用户下一步——先执行 save_config 再重启。"""
+    connection = _FakeTimingConnection(question)
+
+    result = _run(monkeypatch, connection, vendor=vendor, command_name="reboot")
+
+    assert result.ok is False
+    assert result.dispatched is True
+    assert "save_config" in result.message
+    assert len(connection.sent) == 1  # 只发了重启命令，没有替人回答 Y/N
+
+
+async def test_reboot_with_another_unregistered_prompt_stops_without_answering(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """设备先问「要不要保存配置」这类目录里没登记的问题：停下，不替人回答，报告不确定。"""
-    connection = _FakeTimingConnection(
-        "SW#reload\nSystem configuration has been modified. Save? [yes/no]: "
-    )
+    """其它没登记的问题同样停下，报告不确定。"""
+    connection = _FakeTimingConnection("SW#reload\nEnter the boot image file name: ")
 
     result = _run(monkeypatch, connection, vendor="cisco_iosxe", command_name="reboot")
 
@@ -843,6 +867,36 @@ async def test_reboot_with_unregistered_prompt_stops_without_answering(
     assert result.dispatched is True
     assert "未出现预期的确认提示" in result.message
     assert connection.sent == ["reload"]
+
+
+async def test_huawei_save_config_answers_its_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _FakeTimingConnection(
+        "<SW>save\nThe current configuration will be written to the device.\n"
+        "Are you sure to continue? [Y/N]:",
+        "Now saving the current configuration to the slot 0.\n"
+        "Save the configuration successfully.",
+    )
+
+    result = _run(monkeypatch, connection, vendor="huawei_vrp", command_name="save_config")
+
+    assert result.ok is True
+    assert connection.sent == ["save", "y"]
+
+
+async def test_h3c_save_config_needs_no_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """H3C 的 save force 直接保存、不问问题，走普通命令路径。"""
+    connection = MagicMock()
+    connection.send_command.return_value = (
+        "Validating file. Please wait...\n"
+        "Saved the current configuration to mainboard device successfully."
+    )
+
+    result = _run(monkeypatch, connection, vendor="hp_comware", command_name="save_config")
+
+    assert result.ok is True
+    assert connection.send_command.call_args.args[0] == "save force"
 
 
 async def test_reboot_confirmation_sent_still_needs_manual_verification(

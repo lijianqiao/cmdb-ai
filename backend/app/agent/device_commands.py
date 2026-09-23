@@ -61,6 +61,7 @@ type CommandName = Literal[
     "reboot",
     "port_enable",
     "port_disable",
+    "save_config",
     # P2b-2a 排查命令：设备健康
     "show_cpu",
     "show_memory",
@@ -135,7 +136,8 @@ class CommandArguments(TypedDict, total=False):
 # t18：ping 的目标由调用方给（ip_address 参数），不再固定探 1.1.1.1；命令登记读超时档位。
 # t19：34 条排查用只读命令（只登记华为 / H3C），新增 mac_address、vlan_id 参数。
 # t20：整张表 / 日志类命令与 traceroute；整张表的输出截断到 FULL_TABLE_MAX_OUTPUT_LINES 行。
-DEVICE_COMMAND_CATALOG_VERSION = "t20-v1"
+# t21：新增变更命令 save_config（华为 / H3C / 思科 IOS-XE）。
+DEVICE_COMMAND_CATALOG_VERSION = "t21-v1"
 
 # 整张表（MAC / ARP / 路由 / ACL）最多交回这么多行。核心设备上这几张表可能上万行，
 # 全交给总结服务会按块多次调模型，又慢又贵；要找具体条目本来就该用 *_lookup 命令。
@@ -231,6 +233,18 @@ _REBOOT_CONFIRM_PROMPT = (
     r"(?im)^(?!.*\bsave).*\b(?:reboot|reload|reset)\b.*"
     r"(?:\[confirm\]|\[y/n\]|\(y/n\)|\[yes,no\])"
 )
+
+# 重启前设备问「要不要保存配置」（有未保存的改动时才会问）。D5：保存与否是人的决定，
+# 平台不替人回答；执行器认出这个问题后停下，并在报错里直接告诉用户先执行 save_config。
+# 例：思科「Save? [yes/no]」、华为「...will be saved to the next startup... Continue? [Y/N]」、
+# H3C「save current configuration? [Y/N]」。
+SAVE_BEFORE_REBOOT_QUESTION = (
+    r"(?im)^.*\bsave.*(?:\[y/n\]|\(y/n\)|\[yes/no\]|\[yes,no\])"
+)
+
+# 华为 save 的确认：「Are you sure to continue? [Y/N]」。独立登记，不复用重启那条——
+# 重启那条刻意排除了含 save 的行，这条问的也不是同一件事。
+_SAVE_CONFIRM_PROMPT = r"(?i)are you sure to continue\?\s*\[y/n\]"
 
 
 def validate_interface_name(value: str) -> bool:
@@ -794,6 +808,26 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
             "huawei_vrp": ("interface {interface}", "shutdown"),
             "hp_comware": ("interface {interface}", "shutdown"),
             "juniper_junos": ("set interfaces {interface} disable",),
+        },
+    ),
+    "save_config": DeviceCommandDefinition(
+        name="save_config",
+        version=DEVICE_COMMAND_CATALOG_VERSION,
+        description=(
+            "保存当前配置，下次启动时仍然生效（开关端口等改动默认不会自动保存）；"
+            "重启前如果设备有未保存的改动，要先执行它"
+        ),
+        command_type="state_changing",
+        templates={
+            "huawei_vrp": "save",
+            # force：不再询问是否覆盖，直接保存到当前的启动配置文件。
+            "hp_comware": "save force",
+            "cisco_iosxe": "write memory",
+            # Junos 的 commit 已经把配置落盘，不需要单独保存；SG350X 的 write 会问是否覆盖，
+            # 提示没在真机核对过，先不登记。
+        },
+        confirmation={
+            "huawei_vrp": (CommandConfirmation(prompt_pattern=_SAVE_CONFIRM_PROMPT, response="y"),),
         },
     ),
     **{definition.name: definition for definition in _TROUBLESHOOTING_COMMANDS},
