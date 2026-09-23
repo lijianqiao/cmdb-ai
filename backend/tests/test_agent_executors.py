@@ -303,6 +303,34 @@ async def test_huawei_arp_lookup_drops_lines_of_longer_ips(
     assert "GE0/0/1" in result.detail["output"]
 
 
+async def test_whole_table_output_is_capped_before_it_is_stored(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """核心设备的 ARP 表可能上万行：执行器交回去的结果就已经截断，存库和总结都只处理前面一段。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    ciphertext = encrypt_credential_password("whatever")
+    asset = await _make_asset(
+        db_session, vendor="huawei_vrp", credential_password_encrypted=ciphertext
+    )
+    connection = MagicMock()
+    connection.send_command.return_value = "\n".join(
+        f"10.9.{index // 256}.{index % 256}  aabb-ccdd-{index:04x}  20  D-0  GE0/0/1"
+        for index in range(1000)
+    )
+
+    with patch("app.agent.executors._open_netmiko_connection", return_value=connection):
+        result = await DeviceQueryExecutor().execute(
+            db_session, asset=asset, command_name="show_arp", dynamic_password=None
+        )
+
+    assert result.ok is True
+    assert result.detail["truncated"] is True
+    lines = result.detail["output"].splitlines()
+    assert len(lines) == get_device_command("show_arp").max_output_lines + 1
+    assert "共 1000 行" in lines[-1]
+
+
 async def test_mac_lookup_sends_the_vendors_own_mac_notation(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

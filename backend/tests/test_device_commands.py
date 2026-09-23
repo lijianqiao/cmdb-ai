@@ -19,6 +19,7 @@ from app.agent.device_commands import (
     normalize_command_arguments,
     normalize_interface_names,
     rendered_command_lines,
+    truncate_output_lines,
     validate_interface_name,
 )
 
@@ -34,6 +35,7 @@ def test_catalog_contains_expected_commands() -> None:
         "port_enable",
         "port_disable",
         *TROUBLESHOOTING_COMMANDS,
+        *BULK_COMMANDS,
     }
 
 
@@ -79,13 +81,24 @@ TROUBLESHOOTING_COMMANDS = {
     "show_dhcp_snooping_bindings",
 }
 
+# P2b-2b：整张表 / 日志类（输出可能成千上万行），以及要跑很久的 traceroute。
+BULK_COMMANDS = {
+    "show_mac_table",
+    "show_arp",
+    "show_routes",
+    "show_logs",
+    "show_alarms",
+    "show_acl",
+    "traceroute",
+}
+
 # 某个主力厂商确实没有等价命令的，在这里登记；其余排查命令两家都必须有模板。
 _KNOWN_VENDOR_GAPS = {"show_error_down": {"hp_comware"}}
 
 
 def test_troubleshooting_commands_cover_both_main_vendors() -> None:
     """排查命令是给华为 / H3C 现网用的：漏登记一家，模型在那家设备上就查不了。"""
-    for name in TROUBLESHOOTING_COMMANDS:
+    for name in TROUBLESHOOTING_COMMANDS | BULK_COMMANDS:
         definition = get_device_command(name)
         assert definition.command_type == "read_only", name
         missing = {"huawei_vrp", "hp_comware"} - set(definition.templates)
@@ -94,9 +107,45 @@ def test_troubleshooting_commands_cover_both_main_vendors() -> None:
 
 def test_troubleshooting_commands_are_not_registered_for_unverified_vendors() -> None:
     """没在真机上核对过的厂商不登记：写错的模板会在现网报错，还不如明确「不支持」。"""
-    for name in TROUBLESHOOTING_COMMANDS:
+    for name in TROUBLESHOOTING_COMMANDS | BULK_COMMANDS:
         vendors = set(get_device_command(name).templates)
         assert vendors <= {"huawei_vrp", "hp_comware"}, (name, vendors)
+
+
+def test_whole_table_commands_are_capped() -> None:
+    """整张 MAC / ARP / 路由 / ACL 表在核心设备上可能上万行：总结服务按行分块多次调模型，又慢又贵。
+
+    日志和告警不截：命令本身已经限了条数（size 200 / size 50 / 只看活动告警）。
+    """
+    capped = {item.name for item in list_device_commands() if item.max_output_lines is not None}
+    assert capped == {"show_mac_table", "show_arp", "show_routes", "show_acl"}
+
+
+def test_truncation_keeps_the_head_and_says_how_to_look_up_precisely() -> None:
+    output = "\n".join(f"10.1.{index // 256}.{index % 256}  aabb-ccdd-{index:04x}" for index in range(350))
+
+    kept, truncated = truncate_output_lines(output, 300)
+
+    lines = kept.splitlines()
+    assert truncated is True
+    assert lines[:300] == output.splitlines()[:300]
+    assert "共 350 行" in lines[-1]
+    assert "show_arp_lookup" in lines[-1]
+
+
+def test_truncation_leaves_short_output_alone() -> None:
+    assert truncate_output_lines("a\nb", 300) == ("a\nb", False)
+
+
+def test_traceroute_is_limited_to_15_hops_and_1_second_per_hop() -> None:
+    """默认 30 跳、每跳多次探测乘超时，最坏要跑几分钟：模板里限死跳数和超时。"""
+    arguments = {"ip_address": "10.1.2.3"}
+    assert rendered_command_lines("traceroute", "huawei_vrp", arguments=arguments) == (  # type: ignore[arg-type]
+        "tracert -m 15 -w 1000 10.1.2.3",
+    )
+    assert rendered_command_lines("traceroute", "hp_comware", arguments=arguments) == (  # type: ignore[arg-type]
+        "tracert -m 15 -w 1000 10.1.2.3",
+    )
 
 
 def test_host_vendors_and_power_off_command_are_retired() -> None:
@@ -536,9 +585,17 @@ def test_ip_address_argument_accepts_ipv6() -> None:
 
 def test_slow_commands_are_registered_in_the_long_read_timeout_class() -> None:
     """整份配置这类慢命令不能和 show_version 共用 60 秒读超时，否则大配置必超时。"""
-    assert get_device_command("show_running_config").read_timeout_class == "long"
-    assert get_device_command("show_version").read_timeout_class == "short"
-    assert get_device_command("ping").read_timeout_class == "short"
+    long_class = {
+        item.name for item in list_device_commands() if item.read_timeout_class == "long"
+    }
+    assert long_class == {
+        "show_running_config",
+        "show_mac_table",
+        "show_arp",
+        "show_routes",
+        "show_logs",
+        "traceroute",
+    }
 
 
 def test_only_commands_that_send_packets_to_a_target_are_marked_as_probing() -> None:
@@ -547,7 +604,7 @@ def test_only_commands_that_send_packets_to_a_target_are_marked_as_probing() -> 
     show_arp_lookup / show_route_lookup 也带 ip_address，但只查设备本地的表，不发包。
     """
     probing = {item.name for item in list_device_commands() if item.probes_target}
-    assert probing == {"ping"}
+    assert probing == {"ping", "traceroute"}
 
 
 @pytest.mark.parametrize(

@@ -1378,16 +1378,18 @@ async def _propose_ping_in_full_mode(
     user_id: int,
     target: str,
     subnet_cidr: str = "",
+    command_name: str = "ping",
+    vendor: str = "cisco_iosxe",
 ) -> ProposalSafeSummary:
-    """完全访问档、有自动执行权限、ping 已进白名单：只剩 D2 这一道判断。"""
+    """完全访问档、有自动执行权限、命令已进白名单：只剩 D2 这一道判断。"""
     session_id, _ = await _make_session_and_asset(db_session, user_id)
-    asset_id = await _make_query_asset(db_session, subnet_cidr=subnet_cidr)
+    asset_id = await _make_query_asset(db_session, subnet_cidr=subnet_cidr, vendor=vendor)
     await device_command_policy_crud.create(
         db_session,
         {
             "scope": "asset",
             "asset_id": asset_id,
-            "command_name": "ping",
+            "command_name": command_name,
             "decision": "whitelist",
         },
     )
@@ -1398,10 +1400,29 @@ async def _propose_ping_in_full_mode(
         proposed_by_agent_id=None,
         action_type="device_query",
         asset_id=asset_id,
-        payload={"command_name": "ping", "ip_address": target},
+        payload={"command_name": command_name, "ip_address": target},
         reason="连通性排查",
         actor_user_id=user_id,
     )
+
+
+async def test_traceroute_target_outside_cmdb_also_needs_manual_approval(
+    db_session: AsyncSession, test_user: User, grant_permissions
+) -> None:
+    """traceroute 和 ping 一样会真的向目标发包，D2 的规则同样适用。"""
+    await grant_permissions(test_user, "agent:auto_execute")
+
+    summary = await _propose_ping_in_full_mode(
+        db_session,
+        user_id=test_user.id,
+        target="8.8.8.8",
+        command_name="traceroute",
+        vendor="hp_comware",
+    )
+
+    assert summary.status == "PENDING"
+    assert summary.manual_approval_reason is not None
+    assert "8.8.8.8" in summary.manual_approval_reason
 
 
 async def test_ping_target_outside_cmdb_always_needs_manual_approval(

@@ -32,9 +32,11 @@
    - read_timeout_class：整份配置这类慢命令归 long（秒数见 executors 与配置项），
      和 show_version 共用 60 秒的话大配置必超时，而读超时算"连上之后失败"，
      只能落 UNKNOWN 等人工核实。
-   - probes_target：会真的向 ip_address 指定的目标发包（ping）。目标不在 CMDB
-     登记范围内时不论审批档位都要人批一次（D2），判断落在 hitl.gate_action，
+   - probes_target：会真的向 ip_address 指定的目标发包（ping、traceroute）。目标不在
+     CMDB 登记范围内时不论审批档位都要人批一次（D2），判断落在 hitl.gate_action，
      靠这个标记而不是在那里写死命令名。
+   - 输出怎么处理：exact_ip_filter（按 IP 查表只能子串匹配的厂商，再按完整地址过滤）、
+     max_output_lines（整张表截断，附一行说明让模型改用 *_lookup 命令），都由执行器执行。
 """
 
 import ipaddress
@@ -97,6 +99,14 @@ type CommandName = Literal[
     "show_ospf_neighbors",
     "show_bgp_summary",
     "show_dhcp_snooping_bindings",
+    # P2b-2b：整张表 / 日志类，以及 traceroute
+    "show_mac_table",
+    "show_arp",
+    "show_routes",
+    "show_logs",
+    "show_alarms",
+    "show_acl",
+    "traceroute",
 ]
 type CommandType = Literal["read_only", "state_changing"]
 # 读超时档位：整份配置这类慢命令和 show_version 不能共用一个读超时，否则大配置必超时，
@@ -124,7 +134,12 @@ class CommandArguments(TypedDict, total=False):
 # t17：端口启停一次接一组接口；Junos 进私有候选配置，commit 改为整批最后提交一次。
 # t18：ping 的目标由调用方给（ip_address 参数），不再固定探 1.1.1.1；命令登记读超时档位。
 # t19：34 条排查用只读命令（只登记华为 / H3C），新增 mac_address、vlan_id 参数。
-DEVICE_COMMAND_CATALOG_VERSION = "t19-v1"
+# t20：整张表 / 日志类命令与 traceroute；整张表的输出截断到 FULL_TABLE_MAX_OUTPUT_LINES 行。
+DEVICE_COMMAND_CATALOG_VERSION = "t20-v1"
+
+# 整张表（MAC / ARP / 路由 / ACL）最多交回这么多行。核心设备上这几张表可能上万行，
+# 全交给总结服务会按块多次调模型，又慢又贵；要找具体条目本来就该用 *_lookup 命令。
+FULL_TABLE_MAX_OUTPUT_LINES = 300
 
 # 一条提案最多带的接口数：一台接入交换机的口数，超过要求分两次。
 MAX_INTERFACES_PER_PROPOSAL = 48
@@ -266,6 +281,22 @@ def filter_exact_ip_lines(output: str, ip_address: str) -> str:
     )
 
 
+def truncate_output_lines(output: str, max_lines: int) -> tuple[str, bool]:
+    """只保留前 max_lines 行，超出时在末尾注明总行数和精确查询的办法。
+
+    保留开头：这几张表的表头在最前面，截掉后面的条目，模型仍然读得懂列含义。
+    返回 (截断后的输出, 是否截断)。
+    """
+    lines = output.splitlines()
+    if len(lines) <= max_lines:
+        return output, False
+    note = (
+        f"……（输出共 {len(lines)} 行，只保留前 {max_lines} 行。要找具体条目请用 "
+        "show_mac_lookup / show_arp_lookup / show_route_lookup 按条件精确查询）"
+    )
+    return "\n".join([*lines[:max_lines], note]), True
+
+
 def normalize_interface_names(values: Sequence[str]) -> tuple[str, ...]:
     """接口列表去重保序并逐个校验：1–48 个，每个都要过接口名白名单。
 
@@ -317,6 +348,8 @@ class DeviceCommandDefinition:
     # 某些厂商只能用「| include {ip}」按 IP 查（子串匹配）：执行器再按完整地址过滤一次，
     # 见 filter_exact_ip_lines。
     exact_ip_filter: bool = False
+    # 输出行数上限：超出的部分由执行器截掉并附一行说明，见 truncate_output_lines。
+    max_output_lines: int | None = None
 
 
 class UnknownDeviceCommandError(ValueError):
@@ -334,6 +367,9 @@ def _read_only(
     *,
     arguments: tuple[ArgName, ...] = (),
     exact_ip_filter: bool = False,
+    read_timeout_class: ReadTimeoutClass = "short",
+    max_output_lines: int | None = None,
+    probes_target: bool = False,
 ) -> DeviceCommandDefinition:
     """排查类只读命令的简写：风险分级、版本号都一样，只有名字、说明、模板和参数不同。"""
     return DeviceCommandDefinition(
@@ -344,6 +380,9 @@ def _read_only(
         templates=templates,
         arguments=arguments,
         exact_ip_filter=exact_ip_filter,
+        read_timeout_class=read_timeout_class,
+        max_output_lines=max_output_lines,
+        probes_target=probes_target,
     )
 
 
@@ -571,6 +610,68 @@ _TROUBLESHOOTING_COMMANDS: tuple[DeviceCommandDefinition, ...] = (
     ),
 )
 
+# P2b-2b：整张表 / 日志类，以及 traceroute。同样只登记华为 / H3C。
+# 整张表截断到 FULL_TABLE_MAX_OUTPUT_LINES 行；日志和告警不截——命令本身已经限了条数，
+# 而且华为日志的先后顺序没核对过，按行截断可能正好截掉最新的那几条。
+_BULK_COMMANDS: tuple[DeviceCommandDefinition, ...] = (
+    _read_only(
+        "show_mac_table",
+        "查看整张 MAC 地址表（输出很长，只保留前 300 行）；找某个 MAC 请用 show_mac_lookup，"
+        "看某个口请用 show_mac_on_interface",
+        {"huawei_vrp": "display mac-address", "hp_comware": "display mac-address"},
+        read_timeout_class="long",
+        max_output_lines=FULL_TABLE_MAX_OUTPUT_LINES,
+    ),
+    _read_only(
+        "show_arp",
+        "查看整张 ARP 表（输出很长，只保留前 300 行）；找某个 IP 请用 show_arp_lookup",
+        {"huawei_vrp": "display arp", "hp_comware": "display arp"},
+        read_timeout_class="long",
+        max_output_lines=FULL_TABLE_MAX_OUTPUT_LINES,
+    ),
+    _read_only(
+        "show_routes",
+        "查看整张路由表（输出很长，只保留前 300 行）；查到某个 IP 走哪条路由请用 show_route_lookup",
+        {"huawei_vrp": "display ip routing-table", "hp_comware": "display ip routing-table"},
+        read_timeout_class="long",
+        max_output_lines=FULL_TABLE_MAX_OUTPUT_LINES,
+    ),
+    _read_only(
+        "show_logs",
+        "查看设备最近 200 条日志（端口 up/down、环路告警、登录记录等，排查故障发生的时间点）",
+        {
+            "huawei_vrp": "display logbuffer size 200",
+            # reverse：最新的排在最前面。
+            "hp_comware": "display logbuffer reverse size 200",
+        },
+        read_timeout_class="long",
+    ),
+    _read_only(
+        "show_alarms",
+        "查看设备当前告警（华为）/ 最近 50 条告警（H3C）",
+        {"huawei_vrp": "display alarm active", "hp_comware": "display trapbuffer reverse size 50"},
+    ),
+    _read_only(
+        "show_acl",
+        "查看 ACL 规则和命中计数（输出可能很长，只保留前 300 行）",
+        {"huawei_vrp": "display acl all", "hp_comware": "display acl all"},
+        max_output_lines=FULL_TABLE_MAX_OUTPUT_LINES,
+    ),
+    _read_only(
+        "traceroute",
+        "从设备本机做路由跟踪（最多 15 跳、每跳 1 秒超时），目标放在 ip_address（只接受 IP）；"
+        "目标不在 CMDB 登记范围内时一律转人工审批",
+        {
+            "huawei_vrp": "tracert -m 15 -w 1000 {ip}",
+            "hp_comware": "tracert -m 15 -w 1000 {ip}",
+        },
+        arguments=("ip_address",),
+        read_timeout_class="long",
+        # 和 ping 一样会真的向目标发包（D2）。
+        probes_target=True,
+    ),
+)
+
 
 _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
     "show_version": DeviceCommandDefinition(
@@ -696,6 +797,7 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
         },
     ),
     **{definition.name: definition for definition in _TROUBLESHOOTING_COMMANDS},
+    **{definition.name: definition for definition in _BULK_COMMANDS},
 }
 
 

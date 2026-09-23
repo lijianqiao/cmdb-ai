@@ -164,8 +164,9 @@ class QueryDeviceCommandArgs(_Args):
         min_length=1,
         max_length=45,
         description=(
-            "ping 这类要指定目标的命令传目标地址，只接受 IP（IPv4/IPv6），不接受主机名；"
-            "其它命令不传。目标不在 CMDB 登记范围内时会转人工审批。"
+            "ping / traceroute 这类要指定目标的命令、按 IP 查表的命令传目标地址，"
+            "只接受 IP（IPv4/IPv6），不接受主机名；其它命令不传。"
+            "ping / traceroute 的目标不在 CMDB 登记范围内时会转人工审批。"
         ),
     )
     mac_address: str | None = Field(

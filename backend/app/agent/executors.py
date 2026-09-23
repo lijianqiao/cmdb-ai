@@ -61,6 +61,7 @@ from app.agent.device_commands import (
     get_device_command,
     normalize_command_arguments,
     rendered_command_lines,
+    truncate_output_lines,
 )
 from app.core.cmdb_credential import decrypt_credential_password
 from app.core.config import settings
@@ -496,6 +497,7 @@ def _run_device_command(
     """
     connection = None
     dispatched = False
+    truncated = False
     try:
         connection = _open_netmiko_connection(
             host=host,
@@ -552,6 +554,9 @@ def _run_device_command(
                 target_ip = (arguments or {}).get("ip_address")
                 if definition.exact_ip_filter and target_ip is not None:
                     output = filter_exact_ip_lines(output, target_ip)
+                # 整张表只交回前面一段：存库、预览、AI 总结都不必处理上万行。
+                if definition.max_output_lines is not None:
+                    output, truncated = truncate_output_lines(output, definition.max_output_lines)
     except Exception as exc:
         # 真实堆栈只进服务端日志：既能定位平台/认证/分页类故障，又不外泄异常文本。
         logger.exception(
@@ -587,7 +592,7 @@ def _run_device_command(
     return ExecutionResult(
         ok=True,
         message="命令执行完成",
-        detail={"output": str(output), "truncated": False},
+        detail={"output": str(output), "truncated": truncated},
         dispatched=True,
     )
 
