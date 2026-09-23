@@ -89,6 +89,22 @@ def shutdown_device_executor() -> None:
     _DEVICE_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
+def device_read_timeout_seconds(command_name: str) -> float:
+    """按命令登记的读超时档位返回秒数。
+
+    执行器用它决定单条命令等多久；hitl_execution 的「等别人跑完」窗口也按同一个值取，
+    否则一条长命令还在跑，另一个调用方已经判定等待超时了。
+    未知命令名按短档：未知命令会在执行前被拒，这里不该顺便放宽超时。
+    """
+    try:
+        definition = get_device_command(command_name)
+    except UnknownDeviceCommandError:
+        return settings.DEVICE_COMMAND_READ_TIMEOUT_SECONDS
+    if definition.read_timeout_class == "long":
+        return settings.DEVICE_COMMAND_LONG_READ_TIMEOUT_SECONDS
+    return settings.DEVICE_COMMAND_READ_TIMEOUT_SECONDS
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionResult:
     """HITL 执行器统一返回结构。
@@ -644,6 +660,6 @@ class DeviceQueryExecutor:
                 definition=definition,
                 arguments=normalized_arguments,
                 conn_timeout=settings.DEVICE_COMMAND_CONN_TIMEOUT_SECONDS,
-                read_timeout=settings.DEVICE_COMMAND_READ_TIMEOUT_SECONDS,
+                read_timeout=device_read_timeout_seconds(command_name),
             ),
         )

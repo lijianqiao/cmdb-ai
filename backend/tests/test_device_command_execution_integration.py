@@ -433,6 +433,8 @@ async def test_response_bodies_never_contain_plaintext_or_ciphertext_password(
             {
                 "asset_id": static_asset_id,
                 "command_name": "ping",
+                # ping 的目标是必填的；这里给一个不在 CMDB 内的地址，提案照旧停在待审批。
+                "ip_address": "203.0.113.9",
                 "reason": "未分类命令密码泄露回归",
             },
         )

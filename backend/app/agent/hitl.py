@@ -26,6 +26,7 @@ from app.agent.device_commands import (
     DEVICE_COMMAND_CATALOG_VERSION,
     MAX_INTERFACES_PER_PROPOSAL,
     CommandArguments,
+    command_probes_target,
     command_supports_vendor,
     command_type_of,
     get_device_command,
@@ -65,6 +66,8 @@ class DeviceCommandPayload(BaseModel):
     interface_names: list[str] | None = Field(
         default=None, min_length=1, max_length=MAX_INTERFACES_PER_PROPOSAL
     )
+    # ping 这类命令的目标地址；长度上限按 IPv6 字面量给。
+    ip_address: str | None = Field(default=None, min_length=1, max_length=45)
 
 
 def payload_interface_names(payload: Mapping[str, object]) -> list[str] | None:
@@ -110,12 +113,26 @@ def payload_command_arguments(command_name: str, payload: Mapping[str, object]) 
 AUTO_EXECUTE_MAX_INTERFACES = 8
 
 
-def _manual_approval_reason(interface_names: Sequence[str] | None) -> str | None:
-    """不论档位都必须人工审批时返回原因（写进证据快照，也带给模型）；否则返回 None。"""
+def _manual_approval_reason(
+    interface_names: Sequence[str] | None,
+    *,
+    probe_target_outside_cmdb: str | None = None,
+) -> str | None:
+    """不论档位都必须人工审批时返回原因（写进证据快照，也带给模型）；否则返回 None。
+
+    Args:
+        interface_names: 这次要操作的接口列表，超过自动执行上限就要人批（D11）。
+        probe_target_outside_cmdb: 会发包的命令的目标地址，且它不在 CMDB 登记范围内（D2）。
+    """
     if interface_names is not None and len(interface_names) > AUTO_EXECUTE_MAX_INTERFACES:
         return (
             f"共 {len(interface_names)} 个接口，超过自动执行上限 "
             f"{AUTO_EXECUTE_MAX_INTERFACES} 个，需要人工审批"
+        )
+    if probe_target_outside_cmdb is not None:
+        return (
+            f"目标 {probe_target_outside_cmdb} 不在 CMDB 登记范围内"
+            "（既不是登记设备的 IP，也不在任何设备登记的网段内），需要人工审批"
         )
     return None
 
@@ -398,7 +415,18 @@ async def gate_action(
         # 归一化后的参数写回载荷：一条提案覆盖整组接口时存去重后的完整列表，
         # 审批人一次看全、一次批，执行时用的也是同一份值。
         stored_payload.update(command_arguments)
-        manual_approval_reason = _manual_approval_reason(command_arguments.get("interface_names"))
+        # D2：会真的向目标发包的命令（ping），目标不在 CMDB 登记范围内时一律人工审批。
+        # 只在建提案时判一次：转人工的提案本来就是人批的，自动批准的提案在同一次门控调用里
+        # 立刻执行，之后的重试也要由有审批权限的人发起。
+        probe_target: str | None = None
+        if command_probes_target(command_name):
+            target = command_arguments.get("ip_address")
+            if target is not None and not await cmdb_asset_crud.covers_ip_address(db, target):
+                probe_target = target
+        manual_approval_reason = _manual_approval_reason(
+            command_arguments.get("interface_names"),
+            probe_target_outside_cmdb=probe_target,
+        )
 
         policy_decision = await device_command_policy_crud.resolve_policy(
             db, asset_id=asset.id, asset_type=asset.asset_type, command_name=command_name

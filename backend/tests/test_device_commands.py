@@ -94,12 +94,28 @@ def test_templates_have_no_angle_bracket_placeholders() -> None:
             )
 
 
-def test_network_vendor_ping_uses_fixed_probe_target() -> None:
-    ping = get_device_command("ping")
-    assert ping.templates["cisco_iosxe"] == "ping 1.1.1.1"
-    assert ping.templates["huawei_vrp"] == "ping 1.1.1.1"
-    assert ping.templates["hp_comware"] == "ping 1.1.1.1"
-    assert ping.templates["juniper_junos"] == "ping 1.1.1.1 count 4"
+def test_every_template_placeholder_is_a_registered_argument() -> None:
+    """模板里出现的占位符必须是这条命令登记过的参数，否则渲染时会抛 KeyError。
+
+    P2b 按厂商往目录里贴模板，最容易犯的错就是「模板写了 {vlan}、参数忘了登记」。
+    """
+    allowed = {
+        "interface_name": "interface",
+        "interface_names": "interface",
+        "ip_address": "ip",
+    }
+    for item in list_device_commands():
+        expected = {allowed[name] for name in item.arguments}
+        for vendor, template in [
+            *item.templates.items(),
+            *(
+                (vendor, line)
+                for vendor, lines in (item.config_templates or {}).items()
+                for line in lines
+            ),
+        ]:
+            used = set(re.findall(r"\{(\w+)\}", template))
+            assert used <= expected, f"{item.name}/{vendor} 用了没登记的占位符: {used - expected}"
 
 
 def test_get_command_template_returns_real_string_for_supported_vendor() -> None:
@@ -313,7 +329,10 @@ def test_cisco_small_business_uses_sg350x_commands() -> None:
         get_command_template("show_interfaces", "cisco_small_business")
         == "show interfaces status"
     )
-    assert get_command_template("ping", "cisco_small_business") == "ping ip 1.1.1.1"
+    # SG350X 的 ping 要带 ip 关键字，和 IOS-XE 不一样，所以单独核一遍渲染结果。
+    assert rendered_command_lines(
+        "ping", "cisco_small_business", arguments={"ip_address": "10.1.2.3"}
+    ) == ("ping ip 10.1.2.3",)
 
     reboot = get_device_command("reboot")
     assert reboot.templates["cisco_small_business"] == "reload"
@@ -405,3 +424,58 @@ def test_only_reboot_needs_manual_verification() -> None:
     """重启后连接会断：拿不到成功证据，结果只能交给人工核实。"""
     needs_manual = {item.name for item in list_device_commands() if item.verify_manually}
     assert needs_manual == {"reboot"}
+
+
+def test_ping_probes_a_caller_given_target_instead_of_a_fixed_address() -> None:
+    """ping 的目标由调用方给：固定探 1.1.1.1 查不了「这台设备能不能通业务网关」。"""
+    assert normalize_command_arguments("ping", {"ip_address": "10.1.2.3"}) == {
+        "ip_address": "10.1.2.3"
+    }
+    assert rendered_command_lines(
+        "ping", "cisco_iosxe", arguments={"ip_address": "10.1.2.3"}
+    ) == ("ping 10.1.2.3 repeat 4",)
+    assert rendered_command_lines(
+        "ping", "huawei_vrp", arguments={"ip_address": "10.1.2.3"}
+    ) == ("ping -c 4 10.1.2.3",)
+    # 目标是必填的：不给就不该拼出一条没有目标的命令发下去。
+    with pytest.raises(ValueError, match="目标 IP"):
+        normalize_command_arguments("ping", {})
+    with pytest.raises(ValueError, match="不接受 interface_name"):
+        normalize_command_arguments("ping", {"ip_address": "10.1.2.3", "interface_name": "Gi1/0/1"})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "10.1.2.3; reload",  # 命令拼接
+        "224.0.0.1",  # 组播
+        "255.255.255.255",  # 广播
+        "0.0.0.0",  # 未指定地址
+        "10.1.2.300",  # 不是合法 IP
+        "sw-01",  # 主机名不接受：目录只发 IP，域名解析交给人
+        "",
+    ],
+)
+def test_ip_address_argument_rejects_unusable_targets(value: str) -> None:
+    """目标地址进模板前必须是一个能真正探测的单播 IP。"""
+    with pytest.raises(ValueError, match="目标 IP"):
+        normalize_command_arguments("ping", {"ip_address": value})
+
+
+def test_ip_address_argument_accepts_ipv6() -> None:
+    assert normalize_command_arguments("ping", {"ip_address": "2001:db8::1"}) == {
+        "ip_address": "2001:db8::1"
+    }
+
+
+def test_slow_commands_are_registered_in_the_long_read_timeout_class() -> None:
+    """整份配置这类慢命令不能和 show_version 共用 60 秒读超时，否则大配置必超时。"""
+    assert get_device_command("show_running_config").read_timeout_class == "long"
+    assert get_device_command("show_version").read_timeout_class == "short"
+    assert get_device_command("ping").read_timeout_class == "short"
+
+
+def test_only_commands_that_send_packets_to_a_target_are_marked_as_probing() -> None:
+    """D2 靠这个标记决定「目标不在 CMDB 就转人工」，不在 hitl.py 里写死命令名。"""
+    probing = {item.name for item in list_device_commands() if item.probes_target}
+    assert probing == {"ping"}

@@ -272,6 +272,39 @@ async def test_read_only_command_renders_its_interface_argument(
     assert connection.send_command.call_args.args[0] == "show interfaces GigabitEthernet1/0/15"
 
 
+async def test_long_class_commands_get_the_long_read_timeout(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """整份配置这类慢命令要用长读超时：读超时是连上之后失败，只能落 UNKNOWN 等人工核实。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    monkeypatch.setattr(settings, "DEVICE_COMMAND_READ_TIMEOUT_SECONDS", 60.0)
+    monkeypatch.setattr(settings, "DEVICE_COMMAND_LONG_READ_TIMEOUT_SECONDS", 180.0)
+    ciphertext = encrypt_credential_password("whatever")
+    asset = await _make_asset(db_session, credential_password_encrypted=ciphertext)
+    connection = MagicMock()
+    connection.send_command.return_value = "hostname sw-01"
+    executor = DeviceQueryExecutor()
+
+    with patch("app.agent.executors._open_netmiko_connection", return_value=connection):
+        await executor.execute(
+            db_session,
+            asset=asset,
+            command_name="show_running_config",
+            dynamic_password=None,
+        )
+        long_timeout = connection.send_command.call_args.kwargs["read_timeout"]
+        await executor.execute(
+            db_session,
+            asset=asset,
+            command_name="show_version",
+            dynamic_password=None,
+        )
+        short_timeout = connection.send_command.call_args.kwargs["read_timeout"]
+
+    assert (long_timeout, short_timeout) == (180.0, 60.0)
+
+
 async def test_device_query_executor_refuses_vendor_without_netmiko_platform(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

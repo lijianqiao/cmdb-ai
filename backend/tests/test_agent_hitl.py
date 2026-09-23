@@ -124,6 +124,7 @@ async def _make_query_asset(
     credential_username: str = "admin",
     credential_password_encrypted: str | None = "placeholder",
     vendor: str = "cisco_iosxe",
+    subnet_cidr: str = "",
 ) -> int:
     """创建带厂商与凭据字段的交换机资产，供 device_query 策略测试使用。"""
     asset = await cmdb_asset_crud.create(
@@ -132,6 +133,7 @@ async def _make_query_asset(
             "asset_type": "switch",
             "hostname": "sw-hitl-01",
             "ip_address": "10.0.0.99",
+            "subnet_cidr": subnet_cidr,
             "vendor": vendor,
             "credential_type": credential_type,
             "credential_username": credential_username,
@@ -1368,6 +1370,115 @@ async def test_gate_tells_the_model_why_a_big_batch_waits_for_approval(
     assert decision.result is not None
     assert decision.result.control == "pending_approval"
     assert "超过自动执行上限" in decision.result.content
+
+
+async def _propose_ping_in_full_mode(
+    db_session: AsyncSession,
+    *,
+    user_id: int,
+    target: str,
+    subnet_cidr: str = "",
+) -> ProposalSafeSummary:
+    """完全访问档、有自动执行权限、ping 已进白名单：只剩 D2 这一道判断。"""
+    session_id, _ = await _make_session_and_asset(db_session, user_id)
+    asset_id = await _make_query_asset(db_session, subnet_cidr=subnet_cidr)
+    await device_command_policy_crud.create(
+        db_session,
+        {
+            "scope": "asset",
+            "asset_id": asset_id,
+            "command_name": "ping",
+            "decision": "whitelist",
+        },
+    )
+    await _set_session_approval_mode(db_session, session_id, "full")
+    return await gate_action(
+        db_session,
+        session_id=session_id,
+        proposed_by_agent_id=None,
+        action_type="device_query",
+        asset_id=asset_id,
+        payload={"command_name": "ping", "ip_address": target},
+        reason="连通性排查",
+        actor_user_id=user_id,
+    )
+
+
+async def test_ping_target_outside_cmdb_always_needs_manual_approval(
+    db_session: AsyncSession, test_user: User, grant_permissions
+) -> None:
+    """D2：目标不在 CMDB 登记范围内时不拒绝，但不论档位都要人批一次——防当探测跳板。"""
+    await grant_permissions(test_user, "agent:auto_execute")
+
+    summary = await _propose_ping_in_full_mode(
+        db_session, user_id=test_user.id, target="8.8.8.8"
+    )
+
+    assert summary.status == "PENDING"
+    assert summary.manual_approval_reason is not None
+    assert "8.8.8.8" in summary.manual_approval_reason
+    assert "CMDB" in summary.manual_approval_reason
+
+
+async def test_ping_target_that_is_a_registered_asset_auto_executes(
+    db_session: AsyncSession, test_user: User, grant_permissions
+) -> None:
+    """目标就是台账里的设备：按档位和策略走，不额外转人工。"""
+    await grant_permissions(test_user, "agent:auto_execute")
+
+    summary = await _propose_ping_in_full_mode(
+        db_session, user_id=test_user.id, target="10.0.0.99"
+    )
+
+    assert summary.status == "APPROVED"
+    assert summary.manual_approval_reason is None
+
+
+async def test_ping_target_inside_a_registered_subnet_auto_executes(
+    db_session: AsyncSession, test_user: User, grant_permissions
+) -> None:
+    """目标落在设备登记的网段里：ping 本网段终端是日常排查，不该每次都要人批。"""
+    await grant_permissions(test_user, "agent:auto_execute")
+
+    summary = await _propose_ping_in_full_mode(
+        db_session,
+        user_id=test_user.id,
+        target="10.30.0.5",
+        subnet_cidr="10.30.0.0/24",
+    )
+
+    assert summary.status == "APPROVED"
+    assert summary.manual_approval_reason is None
+
+
+async def test_gate_tells_the_model_the_ping_target_is_outside_cmdb(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    grant_permissions,
+) -> None:
+    """模型要能把「在等什么」说清楚，否则用户只看到一句没头没尾的等待审批。"""
+    await grant_permissions(test_user, "agent:auto_execute")
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    asset_id = await _make_query_asset(db_session)
+    await _set_session_approval_mode(db_session, session_id, "full")
+    await db_session.commit()
+    gate = _make_hitl_gate(db_engine, session_id=session_id, actor_user_id=test_user.id)
+
+    decision = await gate.before(
+        "query_device_command",
+        {
+            "asset_id": asset_id,
+            "command_name": "ping",
+            "ip_address": "8.8.8.8",
+            "reason": "连通性排查",
+        },
+    )
+
+    assert decision.result is not None
+    assert decision.result.control == "pending_approval"
+    assert "8.8.8.8" in decision.result.content
+    assert "CMDB" in decision.result.content
 
 
 async def test_list_for_session_filters_status(

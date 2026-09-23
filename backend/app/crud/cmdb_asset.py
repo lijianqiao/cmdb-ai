@@ -1,10 +1,17 @@
 """CRUD operations for CMDB assets."""
 
+import ipaddress
+from collections.abc import Mapping
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crud.base import CRUDBase, contains_pattern
 from app.models.cmdb_asset import CmdbAsset
+
+# 「算在 CMDB 范围内」的网段最短前缀。登记成 10.0.0.0/8、0.0.0.0/0 这种过宽的网段时
+# 不算命中：否则「ping 的目标不在 CMDB 内就转人工审批」（D2）会被一条登记彻底绕过。
+_MIN_SUBNET_PREFIX: Mapping[int, int] = {4: 16, 6: 48}
 
 
 class CRUDCmdbAsset(CRUDBase[CmdbAsset]):
@@ -17,6 +24,44 @@ class CRUDCmdbAsset(CRUDBase[CmdbAsset]):
         stmt = self._active_statement().where(CmdbAsset.ip_address == ip_address)
         result = await db.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def covers_ip_address(self, db: AsyncSession, value: str) -> bool:
+        """这个 IP 是否在 CMDB 登记范围内：等于某台资产的 IP，或落在某条 subnet_cidr 内。
+
+        给 D2 用：ping/traceroute 的目标不在范围内时不拒绝，但不论审批档位都要人批一次。
+
+        subnet_cidr 是自由文本（用户可能写「办公网」），解析不了的行直接跳过——一条脏
+        数据不能让整条设备命令链路抛错；判不出来时按「不在范围内」处理，最多多批一次。
+        """
+        try:
+            target = ipaddress.ip_address(value)
+        except ValueError:
+            return False
+        # 刻意不用 get_by_ip：ip_address 没有唯一约束，重复登记时它会抛 MultipleResultsFound。
+        # 这里只需要知道「有没有」，不需要那一行。
+        exists_stmt = (
+            select(CmdbAsset.id)
+            .where(CmdbAsset.is_deleted.is_(False), CmdbAsset.ip_address == value)
+            .limit(1)
+        )
+        if (await db.execute(exists_stmt)).first() is not None:
+            return True
+        stmt = select(CmdbAsset.subnet_cidr).where(
+            CmdbAsset.is_deleted.is_(False), CmdbAsset.subnet_cidr != ""
+        )
+        result = await db.execute(stmt)
+        for raw in result.scalars().all():
+            try:
+                network = ipaddress.ip_network(raw.strip(), strict=False)
+            except ValueError:
+                continue
+            if network.version != target.version:
+                continue
+            if network.prefixlen < _MIN_SUBNET_PREFIX[network.version]:
+                continue
+            if target in network:
+                return True
+        return False
 
     async def list_by_hostname(self, db: AsyncSession, hostname: str) -> list[CmdbAsset]:
         """Return active assets whose hostname matches, case-insensitively.

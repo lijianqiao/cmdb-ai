@@ -201,6 +201,8 @@ class HitlGateHook:
             payload = {"command_name": parsed.command_name}
             if parsed.interface_name is not None:
                 payload["interface_name"] = parsed.interface_name
+            if parsed.ip_address is not None:
+                payload["ip_address"] = parsed.ip_address
         else:
             return BeforeToolDecision(
                 block=True,

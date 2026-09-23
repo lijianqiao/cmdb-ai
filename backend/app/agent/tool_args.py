@@ -159,6 +159,15 @@ class QueryDeviceCommandArgs(_Args):
             "查整机的命令不传。接口全名从 show_interfaces 的输出取，不要猜前缀。"
         ),
     )
+    ip_address: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=45,
+        description=(
+            "ping 这类要指定目标的命令传目标地址，只接受 IP（IPv4/IPv6），不接受主机名；"
+            "其它命令不传。目标不在 CMDB 登记范围内时会转人工审批。"
+        ),
+    )
     reason: str = Field(min_length=1, max_length=2000)
 
 

@@ -321,6 +321,8 @@ def root_tool_schemas() -> list[dict[str, Any]]:
                     f"与工具返回为准）。command_name 必须是 {_command_names('read_only')} "
                     "之一——这是命令目录里的语义 key，不是某个厂商的原始 CLI 语法，"
                     "真实命令字符串由平台按资产厂商自动转换。"
+                    "ping 必须用 ip_address 传目标 IP（不接受主机名）；"
+                    "目标不在 CMDB 登记范围内时不论审批档位都会转人工审批。"
                     "不确定这台设备支持哪些命令、命令需不需要审批时先调用 list_device_commands。"
                 ),
                 "parameters": query_parameters,
@@ -426,6 +428,7 @@ def build_root_tool_dispatcher(
                     asset_id=args.asset_id,
                     command_name=args.command_name,
                     interface_name=args.interface_name,
+                    ip_address=args.ip_address,
                     reason=args.reason,
                     session_id=session_id,
                     actor_user_id=actor_user_id,

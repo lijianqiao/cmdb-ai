@@ -585,6 +585,7 @@ async def test_query_device_command_thin_tool_fails_closed_without_executor(
         asset_id=asset_id,
         command_name="show_version",
         interface_name=None,
+        ip_address=None,
         reason="排查交换机",
         gate_hook=None,
     )
@@ -665,6 +666,7 @@ async def test_query_device_command_thin_tool_never_calls_executor_on_failure_pa
         asset_id=asset_id,
         command_name="show_version",
         interface_name=None,
+        ip_address=None,
         reason="排查交换机",
         gate_hook=None,
     )

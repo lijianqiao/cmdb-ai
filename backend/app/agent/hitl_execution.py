@@ -30,7 +30,12 @@ from app.agent.device_commands import (
     command_supports_vendor,
     command_type_of,
 )
-from app.agent.executors import DeviceQueryExecutor, ExecutionResult, NotifyExecutor
+from app.agent.executors import (
+    DeviceQueryExecutor,
+    ExecutionResult,
+    NotifyExecutor,
+    device_read_timeout_seconds,
+)
 from app.agent.hitl import (
     ActionType,
     HitlEventPublisher,
@@ -124,15 +129,26 @@ def _detach_asset(asset: CmdbAsset) -> CmdbAsset:
     return asset
 
 
+def _poll_wait_seconds(proposal: HitlProposal) -> float:
+    """等别人跑完的窗口：按这条命令的读超时档位取，长命令不能按 60 秒判超时。"""
+    command_name = proposal.action_payload.get("command_name")
+    if isinstance(command_name, str):
+        return device_read_timeout_seconds(command_name)
+    return settings.DEVICE_COMMAND_READ_TIMEOUT_SECONDS
+
+
 async def _poll_executing_terminal(
     db: AsyncSession,
     proposal_id: int,
+    *,
+    wait_seconds: float,
 ) -> HitlProposal | ProposalSafeSummary:
     """轮询 EXECUTING 直至终态；APPROVED 时返回提案行供重试认领。
 
     Args:
         db: 当前短事务会话。
         proposal_id: 待轮询提案 ID。
+        wait_seconds: 等待窗口秒数，由调用方按命令的读超时档位算出。
 
     Returns:
         EXECUTED 时返回安全摘要；APPROVED 时返回提案行；其它终态抛错。
@@ -141,7 +157,7 @@ async def _poll_executing_terminal(
         HitlResumeError: 提案不存在、UNKNOWN 或等待超时。
     """
     # 等待窗口对齐设备命令读超时：另一个执行者跑的可能正是一条慢命令。
-    deadline = time.monotonic() + settings.DEVICE_COMMAND_READ_TIMEOUT_SECONDS
+    deadline = time.monotonic() + wait_seconds
     delay = _POLL_INITIAL_DELAY_SECONDS
     while time.monotonic() < deadline:
         await asyncio.sleep(delay)
@@ -186,7 +202,9 @@ async def _handle_claim_conflict(
     if refreshed.status == "UNKNOWN":
         raise HitlResumeError("状态 UNKNOWN 的 HITL 提案不可恢复执行")
     if refreshed.status == "EXECUTING":
-        return await _poll_executing_terminal(db, proposal_id)
+        return await _poll_executing_terminal(
+            db, proposal_id, wait_seconds=_poll_wait_seconds(refreshed)
+        )
     if refreshed.status == "APPROVED":
         return refreshed
     raise HitlResumeError(f"状态 {refreshed.status} 的 HITL 提案不可恢复执行")
@@ -246,7 +264,9 @@ async def _preflight_and_claim(
         if proposal.status == "EXECUTED":
             return await _summary_with_persisted_result(db, proposal)
         if proposal.status == "EXECUTING":
-            polled = await _poll_executing_terminal(db, proposal_id)
+            polled = await _poll_executing_terminal(
+                db, proposal_id, wait_seconds=_poll_wait_seconds(proposal)
+            )
             if isinstance(polled, ProposalSafeSummary):
                 return polled
             proposal = polled

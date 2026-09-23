@@ -28,8 +28,16 @@
    和提交命令（CONFIG_COMMIT_COMMANDS）是厂商级规则：Junos 进私有候选配置
    configure private，中途失败时改动随会话丢弃，不会留在所有人共享的候选配置里；
    整批只在最后 commit 一次。
+6. 命令还登记两件和"怎么跑"有关的事：
+   - read_timeout_class：整份配置这类慢命令归 long（秒数见 executors 与配置项），
+     和 show_version 共用 60 秒的话大配置必超时，而读超时算"连上之后失败"，
+     只能落 UNKNOWN 等人工核实。
+   - probes_target：会真的向 ip_address 指定的目标发包（ping）。目标不在 CMDB
+     登记范围内时不论审批档位都要人批一次（D2），判断落在 hitl.gate_action，
+     靠这个标记而不是在那里写死命令名。
 """
 
+import ipaddress
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -53,9 +61,12 @@ type CommandName = Literal[
     "port_disable",
 ]
 type CommandType = Literal["read_only", "state_changing"]
+# 读超时档位：整份配置这类慢命令和 show_version 不能共用一个读超时，否则大配置必超时，
+# 而读超时是「连上之后失败」，只能落 UNKNOWN 等人工核实。秒数由配置项决定，见 executors。
+type ReadTimeoutClass = Literal["short", "long"]
 # 命令可以登记的参数名。interface_name 给需要单个接口的只读命令用（4.2 的
 # show_interface_detail 等），interface_names 只给端口启停用，两者不混用。
-type ArgName = Literal["interface_name", "interface_names"]
+type ArgName = Literal["interface_name", "interface_names", "ip_address"]
 
 
 class CommandArguments(TypedDict, total=False):
@@ -63,23 +74,32 @@ class CommandArguments(TypedDict, total=False):
 
     interface_name: str
     interface_names: list[str]
+    ip_address: str
 
 # t15：H3C Comware 补上端口启停。配置在 system-view 里立即生效，和华为一样不自动保存。
 # t16：只面向网络设备——下线 linux/generic 厂商和只对主机有意义的 shutdown，新增占位厂商 other。
 # t17：端口启停一次接一组接口；Junos 进私有候选配置，commit 改为整批最后提交一次。
-DEVICE_COMMAND_CATALOG_VERSION = "t17-v1"
+# t18：ping 的目标由调用方给（ip_address 参数），不再固定探 1.1.1.1；命令登记读超时档位。
+DEVICE_COMMAND_CATALOG_VERSION = "t18-v1"
 
 # 一条提案最多带的接口数：一台接入交换机的口数，超过要求分两次。
 MAX_INTERFACES_PER_PROPOSAL = 48
 
 # 校验参数时按这个顺序检查，报错信息也按这个顺序给，输出稳定好测。
-_ARG_NAMES: tuple[ArgName, ...] = ("interface_name", "interface_names")
-_ARG_HINTS: Mapping[ArgName, str] = {"interface_name": "", "interface_names": "列表"}
+_ARG_NAMES: tuple[ArgName, ...] = ("interface_name", "interface_names", "ip_address")
+# 缺参数时说「需要合法的 X」，X 用人看得懂的说法：报错会直接转给模型让它自己改。
+_ARG_MISSING_HINTS: Mapping[ArgName, str] = {
+    "interface_name": "接口名",
+    "interface_names": "接口名列表",
+    "ip_address": "目标 IP 地址",
+}
 _INTERFACE_NAME_HINT = "接口名只能包含字母、数字、/、.、-，且不超过 64 个字符"
+_IP_ADDRESS_HINT = "目标 IP 地址必须是可探测的单播地址，不接受主机名、组播或广播地址"
 
 # 命令级正则、按厂商 CLI 语法书写；只用于 send_interactive 匹配确认提示，
 # 不接受任何运行时输入，跟 templates 一样是代码层常量。
 _INTERFACE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9/.\-]{1,64}$")
+_IPV4_BROADCAST = ipaddress.IPv4Address("255.255.255.255")
 
 # 各厂商 CLI 拒绝命令时的明确报错句式。行首锚定、只认具体短语：
 # 这些正则会被 Netmiko 以 re.M 逐条检查配置命令的回显，也会被执行器用来检查
@@ -131,6 +151,22 @@ def validate_interface_name(value: str) -> bool:
     return bool(_INTERFACE_NAME_PATTERN.fullmatch(value))
 
 
+def validate_ip_address(value: str) -> bool:
+    """目标地址必须是能真正探测的单播 IP。
+
+    只接受 ipaddress 能解析的字面量：主机名交给人先解析——设备上的 DNS 未必可用，
+    而且「ping 的目标到底是哪个 IP」要在审批卡片上一眼可见。组播、广播、未指定地址
+    发出去也没有意义，一并拒掉。
+    """
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    if address.is_multicast or address.is_unspecified:
+        return False
+    return address != _IPV4_BROADCAST
+
+
 def normalize_interface_names(values: Sequence[str]) -> tuple[str, ...]:
     """接口列表去重保序并逐个校验：1–48 个，每个都要过接口名白名单。
 
@@ -174,6 +210,11 @@ class DeviceCommandDefinition:
     confirmation: Mapping[VendorName, tuple[CommandConfirmation, ...]] | None = None
     # 发出后拿不到成功证据（重启会断开连接）：结果交给人工核实，不标成已执行。
     verify_manually: bool = False
+    # 读超时档位：输出可能很大、或者命令本身要跑很久的登记 long。
+    read_timeout_class: ReadTimeoutClass = "short"
+    # 会向 ip_address 指定的目标发包（ping/traceroute）。只查设备本地表的命令不算，
+    # 哪怕它也带 ip_address。D2 据此决定「目标不在 CMDB 就一律转人工审批」。
+    probes_target: bool = False
 
 
 class UnknownDeviceCommandError(ValueError):
@@ -203,6 +244,8 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
         version=DEVICE_COMMAND_CATALOG_VERSION,
         description="查看当前生效配置（可能包含敏感信息，建议默认不进白名单）",
         command_type="read_only",
+        # 大配置几千行，60 秒读不完；读超时属于「连上之后失败」，会落 UNKNOWN 等人工核实。
+        read_timeout_class="long",
         templates={
             "cisco_iosxe": "show running-config",
             "cisco_small_business": "show running-config",
@@ -227,17 +270,21 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
     "ping": DeviceCommandDefinition(
         name="ping",
         version=DEVICE_COMMAND_CATALOG_VERSION,
-        description="从设备本机发起连通性测试：固定探测 1.1.1.1（非用户参数，避免被当探测跳板）",
+        description=(
+            "从设备本机发起连通性测试，目标放在 ip_address 里（只接受 IP，不接受主机名）；"
+            "目标不在 CMDB 登记范围内时一律转人工审批"
+        ),
         command_type="read_only",
+        arguments=("ip_address",),
+        # 会真的向目标发包：目标不在 CMDB 内时不论档位都要人批一次（D2）。
+        probes_target=True,
         templates={
-            # 网络设备 CLI 无法在单条命令里可靠解析默认网关；v1 用固定公网探测地址，
-            # 禁止 <placeholder> 原样下发（见 test_templates_have_no_angle_bracket_placeholders）。
-            "cisco_iosxe": "ping 1.1.1.1",
-            "cisco_small_business": "ping ip 1.1.1.1",
-            "huawei_vrp": "ping 1.1.1.1",
-            "hp_comware": "ping 1.1.1.1",
-            # Junos ping 默认不停止，必须显式 count。
-            "juniper_junos": "ping 1.1.1.1 count 4",
+            # 各厂商都显式限制次数：默认次数各不相同，Junos 默认根本不停。
+            "cisco_iosxe": "ping {ip} repeat 4",
+            "cisco_small_business": "ping ip {ip}",
+            "huawei_vrp": "ping -c 4 {ip}",
+            "hp_comware": "ping -c 4 {ip}",
+            "juniper_junos": "ping {ip} count 4",
         },
     ),
     "reboot": DeviceCommandDefinition(
@@ -359,6 +406,15 @@ def list_commands_for_vendor(vendor: str) -> tuple[DeviceCommandDefinition, ...]
     )
 
 
+def command_probes_target(command_name: str) -> bool:
+    """这条命令会不会真的向 ip_address 指定的目标发包（D2 据此决定是否强制人工审批）。
+
+    命令名未知时返回 False：未知命令会在别处被拒，这里不该顺便改变审批结论。
+    """
+    definition = _DEVICE_COMMAND_CATALOG.get(command_name)  # type: ignore[call-overload]
+    return bool(definition and definition.probes_target)
+
+
 def command_type_of(command_name: str) -> CommandType | None:
     """返回命令的风险分级；命令名未知时返回 None（调用方自行决定如何处理）。"""
     definition = _DEVICE_COMMAND_CATALOG.get(command_name)  # type: ignore[call-overload]
@@ -383,11 +439,15 @@ def normalize_command_arguments(
                 raise ValueError(f"命令 {command_name} 不接受 {name} 参数")
             continue
         if value is None:
-            raise ValueError(f"命令 {command_name} 需要合法的接口名{_ARG_HINTS[name]} {name}")
+            raise ValueError(f"命令 {command_name} 需要合法的{_ARG_MISSING_HINTS[name]} {name}")
         if name == "interface_names":
             if not isinstance(value, list):
                 raise ValueError("interface_names 必须是接口全名列表")
             normalized["interface_names"] = list(normalize_interface_names(value))
+        elif name == "ip_address":
+            if not isinstance(value, str) or not validate_ip_address(value):
+                raise ValueError(_IP_ADDRESS_HINT)
+            normalized["ip_address"] = value
         else:
             if not isinstance(value, str) or not validate_interface_name(value):
                 raise ValueError(_INTERFACE_NAME_HINT)
@@ -443,6 +503,9 @@ def _template_placeholders(arguments: CommandArguments) -> dict[str, str]:
     interface_name = arguments.get("interface_name")
     if interface_name is not None:
         placeholders["interface"] = interface_name
+    ip_address = arguments.get("ip_address")
+    if ip_address is not None:
+        placeholders["ip"] = ip_address
     return placeholders
 
 

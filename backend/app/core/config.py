@@ -102,10 +102,13 @@ class Settings(BaseSettings):
     MONITOR_PURGE_MIN_INTERVAL_SECONDS: float = Field(default=3600.0, ge=0, le=86_400)
     # Netmiko 的两个超时量纲不同，分开配：
     # - CONN：建立 TCP 连接、认证、读 banner 的上限（Netmiko 默认 10）
-    # - READ：单条命令等待提示符出现的上限（Netmiko 默认 10）；show running-config
-    #   这类大输出靠它兜底，所以放宽到 60
+    # - READ：单条命令等待提示符出现的上限（Netmiko 默认 10），放宽到 60
+    # - LONG_READ：目录里登记 read_timeout_class="long" 的命令用这个（整份配置、
+    #   全表查询、traceroute）。不给这类命令单独放宽的话大配置必定读超时，而读超时
+    #   属于「连上之后失败」，只能落 UNKNOWN 等人工核实。
     DEVICE_COMMAND_CONN_TIMEOUT_SECONDS: float = Field(default=15.0, gt=0, le=120)
     DEVICE_COMMAND_READ_TIMEOUT_SECONDS: float = Field(default=60.0, gt=0, le=600)
+    DEVICE_COMMAND_LONG_READ_TIMEOUT_SECONDS: float = Field(default=180.0, gt=0, le=1800)
     # 设备命令专用线程池容量，决定「同时能有多少台设备在跑命令」。
     # 必须与 asyncio 默认线程池隔离：默认池同时承载密码哈希（core/security.py），
     # 单条设备命令最长占用 CONN+READ 秒，占满默认池会让登录接口直接 503，
