@@ -1,12 +1,15 @@
 """API tests for the knowledge base upload endpoints."""
 
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.llm import LlmRequestError
+from app.models.knowledge_document import KnowledgeDocument
 from app.models.permission import Permission
 from app.models.user import User, user_roles
 
@@ -94,6 +97,49 @@ async def test_upload_document_succeeds(
     payload = response.json()["data"]
     assert payload["status"] == "ready"
     assert payload["file_path"].startswith("sop/")
+
+
+def _files_under(root: Path) -> list[Path]:
+    return [path for path in root.rglob("*") if path.is_file()]
+
+
+async def test_upload_document_embedding_unreachable_returns_503(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user: User,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """向量模型连不上时给出能照着改的提示，文档和文件都不留下。"""
+    await _grant_knowledge_permissions(db_session, test_user)
+    monkeypatch.setattr("app.services.knowledge_storage.KNOWLEDGE_ROOT", tmp_path)
+
+    async def unreachable_embed(model_key: str, inputs: list[str], **kwargs: object) -> object:
+        raise LlmRequestError(f"model {model_key!r} 网络请求失败")
+
+    monkeypatch.setattr("app.services.knowledge_ingestion.embed", unreachable_embed)
+
+    await client.post(
+        "/api/v1/knowledge/categories",
+        json={"code": "sop", "name": "SOP", "description": ""},
+        headers=auth_headers,
+    )
+
+    response = await client.post(
+        "/api/v1/knowledge/documents",
+        data={"category_code": "sop", "title": "重启流程"},
+        files={"file": ("reboot.md", b"switch reboot: step one, step two", "text/markdown")},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 503, response.text
+    message = response.json()["message"]
+    assert "Embedding" in message
+    assert "127.0.0.1" in message
+    remaining = (await db_session.execute(select(KnowledgeDocument))).scalars().all()
+    assert remaining == []
+    assert _files_under(tmp_path) == []
 
 
 async def test_upload_document_without_permission_returns_403(

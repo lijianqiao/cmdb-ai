@@ -79,6 +79,11 @@ services:
       # **改下面 frontend 的 ports 时，这一行必须跟着改。**
       # .env 里的默认值 5173/3000 是给本地 vite dev 用的，容器里用不上。
       BACKEND_CORS_ORIGINS: "http://localhost:8090,http://127.0.0.1:8090"
+      # 本地向量模型跑在宿主机上。容器里的 127.0.0.1 是容器自己，.env 里的
+      # 127.0.0.1:8080 连不上，知识库上传会失败；host.docker.internal 才指向宿主机
+      # （Docker Desktop 自带；Linux 上要另加 extra_hosts: host-gateway）。
+      # 注意：「系统配置」页保存过 Embedding 地址后，库里的值优先于这里。
+      LLM_EMBEDDING_BASE_URL: http://host.docker.internal:8080/v1
     volumes:
       # 知识库正文与回收站是运行时数据，必须落在卷上，
       # 否则重建镜像会把已上传的文档全部丢掉

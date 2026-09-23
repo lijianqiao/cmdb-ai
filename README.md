@@ -107,6 +107,10 @@ Deliberate choices:
   Changing this port means changing `BACKEND_CORS_ORIGINS` in the same file: `/auth/login` matches the
   browser's `Origin` against that list and answers `403 请求来源不受信任` on a mismatch, which the login
   form reports as a wrong password.
+- **Embedding URL uses `host.docker.internal`** — inside the container `127.0.0.1` is the container itself,
+  so the host's embedding server is unreachable and knowledge uploads fail with 503. Compose sets
+  `LLM_EMBEDDING_BASE_URL` to `http://host.docker.internal:8080/v1`, but an Embedding URL saved on the
+  System Config page takes precedence — change it there too if it says `127.0.0.1`.
 - **The backend publishes no host port** — reachable only through nginx, so there is never a second API origin.
 - **ripgrep is installed in the image** — `kb_grep` shells out to `rg`; without it knowledge-base search fails at runtime.
 - **Exactly one worker** — the agent spawn runtime keeps in-process state, so `WEB_CONCURRENCY` must be 1.

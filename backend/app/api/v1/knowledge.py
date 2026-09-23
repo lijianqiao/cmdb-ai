@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.deps import get_client_ip, require_permission
+from app.core.llm import LlmRequestError
 from app.crud.knowledge_category import knowledge_category_crud
 from app.crud.knowledge_document import knowledge_document_crud
 from app.models.knowledge_category import UNCATEGORIZED_CODE, UNCATEGORIZED_NAME
@@ -162,6 +163,18 @@ async def upload_document(
                 f"这份内容已存在：《{exc.title}》(ID {exc.document_id})。"
                 "知识库按正文去重，同一份内容换个分类重传也会命中；"
                 "如果确实要替换，请先删除原文档。"
+            ),
+        ) from exc
+    except LlmRequestError as exc:
+        # 向量模型连不上、报错或返回格式不对：文档和文件已由 ingest_document 清理，
+        # 这里只把 500 换成能照着改的提示。异常消息在 embed() 里已截断脱敏。
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"向量模型调用失败，文档没有入库（{exc}）。"
+                "请检查「系统配置」里的 Embedding 地址和模型名；"
+                "后端跑在 docker 里时地址不能填 127.0.0.1 或 localhost，"
+                "要填 host.docker.internal 或宿主机 IP。"
             ),
         ) from exc
 

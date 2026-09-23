@@ -105,6 +105,10 @@ docker compose down -v           # 连同数据一起删除，慎用
 几个刻意的选择：
 
 - **端口 8090 而不是 8080**：`LLM_CHAT_BASE_URL` 默认指向 `127.0.0.1:8080` 的本地模型服务，避开它。
+- **向量模型地址用 `host.docker.internal`**：容器里的 `127.0.0.1` 是容器自己，连不到宿主机上的
+  embedding 服务，知识库上传会报「向量模型调用失败」。compose 已把 `LLM_EMBEDDING_BASE_URL` 改成
+  `http://host.docker.internal:8080/v1`；但「系统配置」页保存过的 Embedding 地址优先，那里填的是
+  `127.0.0.1` 时要一并改掉。
 - **后端不映射宿主端口**：只经 nginx 同源访问，避免出现"两个后端地址"的困惑。
 - **镜像里装了 ripgrep**：`kb_grep` 工具直接调 `rg`，缺了它知识库全文检索会在运行时失败。
 - **只跑单个 worker**：Agent 的 Spawn 运行时是进程内状态，`WEB_CONCURRENCY` 只能是 1。
