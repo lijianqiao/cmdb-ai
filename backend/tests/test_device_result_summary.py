@@ -44,6 +44,7 @@ async def _create_executed_device_result(
     content: str,
     action_type: str = "device_query",
     command_name: str = "show_running_config",
+    evidence_snapshot: dict[str, Any] | None = None,
 ) -> tuple[int, int]:
     session = await agent_session_crud.create(
         db,
@@ -76,6 +77,8 @@ async def _create_executed_device_result(
         },
     )
     proposal.status = "EXECUTED"
+    if evidence_snapshot is not None:
+        proposal.evidence_snapshot = evidence_snapshot
     await hitl_execution_result_crud.create_for_proposal(
         db,
         proposal_id=proposal.id,
@@ -158,6 +161,97 @@ async def test_summary_of_a_retired_command_still_works(
     assert delivery.summary_status == "completed"
     assert "命令名：shutdown" in calls[0][1].content
     assert "命令用途：" not in calls[0][1].content
+
+
+_H3C_ARP_LOOKUP_OUTPUT = """  Type: S-Static   D-Dynamic   O-Openflow   R-Rule   M-Multiport  I-Invalid
+IP address      MAC address    VLAN/VSI name Interface                Aging Type
+10.1.1.1        aabb-ccdd-0001 10            GE1/0/1                  1156  D
+"""
+
+
+async def _summary_prompt_for(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+    *,
+    command_name: str,
+    content: str,
+    evidence_snapshot: dict[str, Any] | None,
+) -> str:
+    proposal_id, _ = await _create_executed_device_result(
+        db_session,
+        test_user,
+        content=content,
+        command_name=command_name,
+        evidence_snapshot=evidence_snapshot,
+    )
+    calls: list[list[ChatMessage]] = []
+
+    async def fake_chat(model_key: str, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        calls.append(messages)
+        return _chat_result("已总结。可在审批卡片查看原文。")
+
+    await deliver_device_query_summary(
+        session_factory=async_sessionmaker(db_engine, expire_on_commit=False),
+        proposal_id=proposal_id,
+        chat_fn=fake_chat,
+    )
+    return calls[0][1].content
+
+
+async def test_summary_gets_structured_rows_when_a_template_matches(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """P4：输出能按 TextFSM 模板解析时，把逐条字段一起交给总结模型，结论能直接说出
+    「10.1.1.1 在 GE1/0/1」。解析用证据快照里记下的真正下发的那一行命令和当时的厂商。"""
+    prompt = await _summary_prompt_for(
+        db_engine,
+        db_session,
+        test_user,
+        command_name="show_arp_lookup",
+        content=_H3C_ARP_LOOKUP_OUTPUT,
+        evidence_snapshot={
+            "asset": {"id": 1, "vendor": "hp_comware"},
+            "command": {"name": "show_arp_lookup", "rendered": ["display arp 10.1.1.1"]},
+        },
+    )
+
+    assert "<structured_rows>" in prompt
+    assert '"interface": "GE1/0/1"' in prompt
+    # 原文照样给：结构化结果便于逐条核对，冲突时以原文为准。
+    assert "aabb-ccdd-0001 10" in prompt
+
+
+async def test_summary_without_a_template_or_snapshot_uses_only_the_raw_output(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """没有模板的命令、以及 P4 之前没有证据快照的旧提案：照旧只给原文，不报错。"""
+    no_template = await _summary_prompt_for(
+        db_engine,
+        db_session,
+        test_user,
+        command_name="show_ntp",
+        content="clock status: synchronized\n",
+        evidence_snapshot={
+            "asset": {"id": 1, "vendor": "huawei_vrp"},
+            "command": {"name": "show_ntp", "rendered": ["display ntp-service status"]},
+        },
+    )
+    legacy = await _summary_prompt_for(
+        db_engine,
+        db_session,
+        test_user,
+        command_name="show_arp_lookup",
+        content=_H3C_ARP_LOOKUP_OUTPUT,
+        evidence_snapshot=None,
+    )
+
+    assert "<structured_rows>" not in no_template
+    assert "<structured_rows>" not in legacy
 
 
 def test_fallback_message_does_not_assume_the_output_is_a_config() -> None:
