@@ -57,6 +57,7 @@ from app.agent.device_commands import (
     VendorName,
     command_supports_vendor,
     config_command_blocks,
+    filter_exact_ip_lines,
     get_device_command,
     normalize_command_arguments,
     rendered_command_lines,
@@ -547,6 +548,10 @@ def _run_device_command(
                 error_line = _device_error_line(vendor, output, head_only=True)
                 if error_line is not None:
                     return _rejected(f"设备拒绝了命令：{error_line}")
+                # 按 IP 查表的命令在有的厂商上只能子串匹配：交回去之前按完整地址再滤一遍。
+                target_ip = (arguments or {}).get("ip_address")
+                if definition.exact_ip_filter and target_ip is not None:
+                    output = filter_exact_ip_lines(output, target_ip)
     except Exception as exc:
         # 真实堆栈只进服务端日志：既能定位平台/认证/分页类故障，又不外泄异常文本。
         logger.exception(

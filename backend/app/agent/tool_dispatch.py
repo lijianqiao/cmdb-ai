@@ -429,6 +429,8 @@ def build_root_tool_dispatcher(
                     command_name=args.command_name,
                     interface_name=args.interface_name,
                     ip_address=args.ip_address,
+                    mac_address=args.mac_address,
+                    vlan_id=args.vlan_id,
                     reason=args.reason,
                     session_id=session_id,
                     actor_user_id=actor_user_id,

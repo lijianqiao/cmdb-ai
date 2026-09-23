@@ -1481,6 +1481,54 @@ async def test_gate_tells_the_model_the_ping_target_is_outside_cmdb(
     assert "CMDB" in decision.result.content
 
 
+async def test_gate_carries_mac_and_vlan_arguments_into_the_proposal(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+    test_user: User,
+) -> None:
+    """新参数要一路走到提案：载荷存厂商无关的规范形式，证据快照存真正下发的那一行。"""
+    session_id, _ = await _make_session_and_asset(db_session, test_user.id)
+    asset_id = await _make_query_asset(db_session, vendor="hp_comware")
+    await db_session.commit()
+    gate = _make_hitl_gate(db_engine, session_id=session_id, actor_user_id=test_user.id)
+
+    mac_decision = await gate.before(
+        "query_device_command",
+        {
+            "asset_id": asset_id,
+            "command_name": "show_mac_lookup",
+            "mac_address": "AA:BB:CC:DD:EE:FF",
+            "reason": "定位终端接在哪个口",
+        },
+    )
+    vlan_decision = await gate.before(
+        "query_device_command",
+        {
+            "asset_id": asset_id,
+            "command_name": "show_vlan_detail",
+            "vlan_id": 10,
+            "reason": "看 VLAN 10 包含哪些口",
+        },
+    )
+
+    assert mac_decision.result is not None and mac_decision.result.control == "pending_approval"
+    assert vlan_decision.result is not None and vlan_decision.result.control == "pending_approval"
+    db_session.expire_all()
+    rows = (
+        await db_session.execute(
+            select(HitlProposal)
+            .where(HitlProposal.session_id == session_id)
+            .order_by(HitlProposal.id)
+        )
+    ).scalars().all()
+    assert rows[0].action_payload["mac_address"] == "aabbccddeeff"
+    assert rows[0].evidence_snapshot["command"]["rendered"] == [
+        "display mac-address aabb-ccdd-eeff"
+    ]
+    assert rows[1].action_payload["vlan_id"] == 10
+    assert rows[1].evidence_snapshot["command"]["rendered"] == ["display vlan 10"]
+
+
 async def test_list_for_session_filters_status(
     db_session: AsyncSession,
     test_user: User,

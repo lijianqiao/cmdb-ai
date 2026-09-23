@@ -272,6 +272,62 @@ async def test_read_only_command_renders_its_interface_argument(
     assert connection.send_command.call_args.args[0] == "show interfaces GigabitEthernet1/0/15"
 
 
+async def test_huawei_arp_lookup_drops_lines_of_longer_ips(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """发给设备的是子串匹配，交回去的结果里只能有被查的那一个 IP。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    ciphertext = encrypt_credential_password("whatever")
+    asset = await _make_asset(
+        db_session, vendor="huawei_vrp", credential_password_encrypted=ciphertext
+    )
+    connection = MagicMock()
+    connection.send_command.return_value = (
+        "10.1.1.1        aabb-ccdd-0001  20   D-0  GE0/0/1  10\n"
+        "10.1.1.10       aabb-ccdd-0010  20   D-0  GE0/0/2  10"
+    )
+
+    with patch("app.agent.executors._open_netmiko_connection", return_value=connection):
+        result = await DeviceQueryExecutor().execute(
+            db_session,
+            asset=asset,
+            command_name="show_arp_lookup",
+            dynamic_password=None,
+            arguments={"ip_address": "10.1.1.1"},
+        )
+
+    assert connection.send_command.call_args.args[0] == "display arp | include 10.1.1.1"
+    assert result.ok is True
+    assert "10.1.1.10" not in result.detail["output"]
+    assert "GE0/0/1" in result.detail["output"]
+
+
+async def test_mac_lookup_sends_the_vendors_own_mac_notation(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    ciphertext = encrypt_credential_password("whatever")
+    asset = await _make_asset(
+        db_session, vendor="hp_comware", credential_password_encrypted=ciphertext
+    )
+    connection = MagicMock()
+    connection.send_command.return_value = "aabb-ccdd-eeff  10  Learned  GE1/0/3  Y"
+
+    with patch("app.agent.executors._open_netmiko_connection", return_value=connection):
+        result = await DeviceQueryExecutor().execute(
+            db_session,
+            asset=asset,
+            command_name="show_mac_lookup",
+            dynamic_password=None,
+            arguments={"mac_address": "aa:bb:cc:dd:ee:ff"},
+        )
+
+    assert result.ok is True
+    assert connection.send_command.call_args.args[0] == "display mac-address aabb-ccdd-eeff"
+
+
 async def test_long_class_commands_get_the_long_read_timeout(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

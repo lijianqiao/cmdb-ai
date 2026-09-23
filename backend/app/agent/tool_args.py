@@ -168,6 +168,21 @@ class QueryDeviceCommandArgs(_Args):
             "其它命令不传。目标不在 CMDB 登记范围内时会转人工审批。"
         ),
     )
+    mac_address: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=17,
+        description=(
+            "按 MAC 查表的命令（如 show_mac_lookup）传 MAC 地址，"
+            "aabb.ccdd.eeff / aabb-ccdd-eeff / aa:bb:cc:dd:ee:ff 都可以，平台按厂商转换；其它命令不传。"
+        ),
+    )
+    vlan_id: int | None = Field(
+        default=None,
+        ge=1,
+        le=4094,
+        description="按 VLAN 查的命令（如 show_vlan_detail）传 VLAN 号；其它命令不传。",
+    )
     reason: str = Field(min_length=1, max_length=2000)
 
 

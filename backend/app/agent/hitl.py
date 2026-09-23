@@ -68,6 +68,9 @@ class DeviceCommandPayload(BaseModel):
     )
     # ping 这类命令的目标地址；长度上限按 IPv6 字面量给。
     ip_address: str | None = Field(default=None, min_length=1, max_length=45)
+    # 按 MAC / VLAN 查表的命令用；写法与取值范围由目录校验。
+    mac_address: str | None = Field(default=None, min_length=1, max_length=17)
+    vlan_id: int | None = Field(default=None, ge=1, le=4094)
 
 
 def payload_interface_names(payload: Mapping[str, object]) -> list[str] | None:

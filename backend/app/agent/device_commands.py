@@ -59,6 +59,44 @@ type CommandName = Literal[
     "reboot",
     "port_enable",
     "port_disable",
+    # P2b-2a 排查命令：设备健康
+    "show_cpu",
+    "show_memory",
+    "show_environment",
+    "show_stack",
+    "show_clock",
+    "show_ntp",
+    # 接口与链路
+    "show_interfaces_description",
+    "show_interface_detail",
+    "show_interface_config",
+    "show_down_interfaces",
+    "show_error_down",
+    "show_interface_errors",
+    "show_interface_traffic",
+    "show_transceiver",
+    "show_port_channel",
+    "show_poe",
+    # 二层
+    "show_vlan",
+    "show_vlan_detail",
+    "show_mac_lookup",
+    "show_mac_on_interface",
+    "show_mac_in_vlan",
+    "show_mac_flapping",
+    "show_stp",
+    "show_stp_root",
+    "show_stp_tc",
+    "show_lldp_neighbors",
+    # 三层与连通性
+    "show_ip_interfaces",
+    "show_arp_lookup",
+    "show_route_lookup",
+    "show_default_route",
+    "show_vrrp",
+    "show_ospf_neighbors",
+    "show_bgp_summary",
+    "show_dhcp_snooping_bindings",
 ]
 type CommandType = Literal["read_only", "state_changing"]
 # 读超时档位：整份配置这类慢命令和 show_version 不能共用一个读超时，否则大配置必超时，
@@ -66,7 +104,9 @@ type CommandType = Literal["read_only", "state_changing"]
 type ReadTimeoutClass = Literal["short", "long"]
 # 命令可以登记的参数名。interface_name 给需要单个接口的只读命令用（4.2 的
 # show_interface_detail 等），interface_names 只给端口启停用，两者不混用。
-type ArgName = Literal["interface_name", "interface_names", "ip_address"]
+type ArgName = Literal[
+    "interface_name", "interface_names", "ip_address", "mac_address", "vlan_id"
+]
 
 
 class CommandArguments(TypedDict, total=False):
@@ -75,31 +115,63 @@ class CommandArguments(TypedDict, total=False):
     interface_name: str
     interface_names: list[str]
     ip_address: str
+    # 12 位小写十六进制、不带分隔符；渲染时再按厂商写法加分隔符。
+    mac_address: str
+    vlan_id: int
 
 # t15：H3C Comware 补上端口启停。配置在 system-view 里立即生效，和华为一样不自动保存。
 # t16：只面向网络设备——下线 linux/generic 厂商和只对主机有意义的 shutdown，新增占位厂商 other。
 # t17：端口启停一次接一组接口；Junos 进私有候选配置，commit 改为整批最后提交一次。
 # t18：ping 的目标由调用方给（ip_address 参数），不再固定探 1.1.1.1；命令登记读超时档位。
-DEVICE_COMMAND_CATALOG_VERSION = "t18-v1"
+# t19：34 条排查用只读命令（只登记华为 / H3C），新增 mac_address、vlan_id 参数。
+DEVICE_COMMAND_CATALOG_VERSION = "t19-v1"
 
 # 一条提案最多带的接口数：一台接入交换机的口数，超过要求分两次。
 MAX_INTERFACES_PER_PROPOSAL = 48
 
 # 校验参数时按这个顺序检查，报错信息也按这个顺序给，输出稳定好测。
-_ARG_NAMES: tuple[ArgName, ...] = ("interface_name", "interface_names", "ip_address")
+_ARG_NAMES: tuple[ArgName, ...] = (
+    "interface_name",
+    "interface_names",
+    "ip_address",
+    "mac_address",
+    "vlan_id",
+)
 # 缺参数时说「需要合法的 X」，X 用人看得懂的说法：报错会直接转给模型让它自己改。
 _ARG_MISSING_HINTS: Mapping[ArgName, str] = {
     "interface_name": "接口名",
     "interface_names": "接口名列表",
     "ip_address": "目标 IP 地址",
+    "mac_address": "MAC 地址",
+    "vlan_id": "VLAN 号",
 }
 _INTERFACE_NAME_HINT = "接口名只能包含字母、数字、/、.、-，且不超过 64 个字符"
 _IP_ADDRESS_HINT = "目标 IP 地址必须是可探测的单播地址，不接受主机名、组播或广播地址"
+_MAC_ADDRESS_HINT = (
+    "MAC 地址写成 aabb.ccdd.eeff、aabb-ccdd-eeff 或 aa:bb:cc:dd:ee:ff 这几种格式之一"
+)
+_VLAN_ID_HINT = "VLAN 号必须是 1–4094 的整数"
+_VLAN_ID_RANGE = range(1, 4095)
 
 # 命令级正则、按厂商 CLI 语法书写；只用于 send_interactive 匹配确认提示，
 # 不接受任何运行时输入，跟 templates 一样是代码层常量。
 _INTERFACE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9/.\-]{1,64}$")
 _IPV4_BROADCAST = ipaddress.IPv4Address("255.255.255.255")
+# 三种常见写法：思科的 aabb.ccdd.eeff、华为 / H3C 的 aabb-ccdd-eeff、通用的 aa:bb:cc:dd:ee:ff
+# （以及 aa-bb-cc-dd-ee-ff）。两位一组时分隔符必须前后一致，不接受混着写。
+_HEX4 = r"[0-9A-Fa-f]{4}"
+_HEX2 = r"[0-9A-Fa-f]{2}"
+_MAC_ADDRESS_PATTERN = re.compile(
+    rf"^(?:{_HEX4}\.{_HEX4}\.{_HEX4}|{_HEX4}-{_HEX4}-{_HEX4}|{_HEX2}([:-]){_HEX2}(?:\1{_HEX2}){{4}})$"
+)
+# 模板里 {mac} 按厂商 CLI 的写法填：四位一组，中间用这个分隔符。
+# 给新厂商登记带 {mac} 的模板时要在这里补一行（test_every_vendor_with_a_mac_template_...）。
+_MAC_GROUP_SEPARATORS: Mapping[VendorName, str] = {
+    "huawei_vrp": "-",
+    "hp_comware": "-",
+}
+# 「IP 地址还没完」的字符：查 10.1.1.1 时，10.1.1.10、110.1.1.1 都要算作别的地址。
+_ADDRESS_CONTINUATION = r"[0-9A-Fa-f:.]"
 
 # 各厂商 CLI 拒绝命令时的明确报错句式。行首锚定、只认具体短语：
 # 这些正则会被 Netmiko 以 re.M 逐条检查配置命令的回显，也会被执行器用来检查
@@ -167,6 +239,33 @@ def validate_ip_address(value: str) -> bool:
     return address != _IPV4_BROADCAST
 
 
+def normalize_mac_address(value: str) -> str:
+    """把几种常见 MAC 写法统一成 12 位小写十六进制（不带分隔符）。
+
+    载荷里存这种与厂商无关的形式，渲染时再按厂商加分隔符：资产换了厂商之后重试也对。
+    不合法时抛 ValueError；原因里不带输入值。
+    """
+    if not _MAC_ADDRESS_PATTERN.fullmatch(value):
+        raise ValueError(_MAC_ADDRESS_HINT)
+    return re.sub(r"[.:-]", "", value).lower()
+
+
+def filter_exact_ip_lines(output: str, ip_address: str) -> str:
+    """只留下「被查的 IP 完整出现」或「根本没出现这个 IP」的行。
+
+    华为按 IP 查 ARP 只能用 display arp | include，是子串匹配：查 10.1.1.1 会带出
+    10.1.1.10～19、110.1.1.1。回答「这个 IP 接在哪个口」时混进别的地址就是错答。
+    没出现 IP 的行（表头、命令回显以外的说明）原样保留，方便模型读懂列含义。
+    """
+    escaped = re.escape(ip_address)
+    exact = re.compile(rf"(?<!{_ADDRESS_CONTINUATION}){escaped}(?!{_ADDRESS_CONTINUATION})")
+    return "\n".join(
+        line
+        for line in output.splitlines()
+        if ip_address not in line or exact.search(line)
+    )
+
+
 def normalize_interface_names(values: Sequence[str]) -> tuple[str, ...]:
     """接口列表去重保序并逐个校验：1–48 个，每个都要过接口名白名单。
 
@@ -215,6 +314,9 @@ class DeviceCommandDefinition:
     # 会向 ip_address 指定的目标发包（ping/traceroute）。只查设备本地表的命令不算，
     # 哪怕它也带 ip_address。D2 据此决定「目标不在 CMDB 就一律转人工审批」。
     probes_target: bool = False
+    # 某些厂商只能用「| include {ip}」按 IP 查（子串匹配）：执行器再按完整地址过滤一次，
+    # 见 filter_exact_ip_lines。
+    exact_ip_filter: bool = False
 
 
 class UnknownDeviceCommandError(ValueError):
@@ -223,6 +325,251 @@ class UnknownDeviceCommandError(ValueError):
 
 class UnsupportedVendorError(ValueError):
     """命令存在，但目录里没有为这个厂商登记模板——跟"未知命令名"是两种不同原因。"""
+
+
+def _read_only(
+    name: CommandName,
+    description: str,
+    templates: Mapping[VendorName, str],
+    *,
+    arguments: tuple[ArgName, ...] = (),
+    exact_ip_filter: bool = False,
+) -> DeviceCommandDefinition:
+    """排查类只读命令的简写：风险分级、版本号都一样，只有名字、说明、模板和参数不同。"""
+    return DeviceCommandDefinition(
+        name=name,
+        version=DEVICE_COMMAND_CATALOG_VERSION,
+        description=description,
+        command_type="read_only",
+        templates=templates,
+        arguments=arguments,
+        exact_ip_filter=exact_ip_filter,
+    )
+
+
+# P2b-2a：输出有限、按对象定位的排查命令。只登记华为 / H3C（现网主力设备）；
+# 其它厂商没在真机上核对过，暂不登记 = 不支持。说明文字会原样给模型和前端看，
+# 所以写「查什么、什么时候用」，而不是复述命令本身。
+_TROUBLESHOOTING_COMMANDS: tuple[DeviceCommandDefinition, ...] = (
+    # ---- 设备健康 ----
+    _read_only(
+        "show_cpu",
+        "查看 CPU 使用率（设备卡顿、管理响应慢、怀疑环路时先看）",
+        {"huawei_vrp": "display cpu-usage", "hp_comware": "display cpu-usage"},
+    ),
+    _read_only(
+        "show_memory",
+        "查看内存使用率",
+        {"huawei_vrp": "display memory-usage", "hp_comware": "display memory"},
+    ),
+    _read_only(
+        "show_environment",
+        "查看板卡、风扇、电源等硬件状态（告警灯亮、设备异常重启时看）",
+        {"huawei_vrp": "display device", "hp_comware": "display device"},
+    ),
+    _read_only(
+        "show_stack",
+        "查看堆叠 / IRF 状态：成员、主备、有没有分裂",
+        {"huawei_vrp": "display stack", "hp_comware": "display irf"},
+    ),
+    _read_only(
+        "show_clock",
+        "查看设备当前时间（对日志时间、排查证书问题时用）",
+        {"huawei_vrp": "display clock", "hp_comware": "display clock"},
+    ),
+    _read_only(
+        "show_ntp",
+        "查看 NTP 时间同步状态",
+        {"huawei_vrp": "display ntp-service status", "hp_comware": "display ntp-service status"},
+    ),
+    # ---- 接口与链路 ----
+    _read_only(
+        "show_interfaces_description",
+        "查看所有接口的描述（接口接的是什么设备、给哪个业务用）",
+        {
+            "huawei_vrp": "display interface description",
+            "hp_comware": "display interface brief description",
+        },
+    ),
+    _read_only(
+        "show_interface_detail",
+        "查看单个接口的详情：up/down、速率双工、错包计数、收发速率；接口全名放在 interface_name",
+        {"huawei_vrp": "display interface {interface}", "hp_comware": "display interface {interface}"},
+        arguments=("interface_name",),
+    ),
+    _read_only(
+        "show_interface_config",
+        "查看单个接口的配置（VLAN、描述、是否 shutdown 等）；比取整份配置快得多",
+        {
+            "huawei_vrp": "display current-configuration interface {interface}",
+            "hp_comware": "display current-configuration interface {interface}",
+        },
+        arguments=("interface_name",),
+    ),
+    _read_only(
+        "show_down_interfaces",
+        "列出处于 down 状态的接口（H3C 会带出 down 的原因）",
+        {
+            "huawei_vrp": "display interface brief | include down",
+            "hp_comware": "display interface brief down",
+        },
+    ),
+    _read_only(
+        "show_error_down",
+        "查看被环路检测、端口安全等保护机制自动关掉的接口（error-down）",
+        {"huawei_vrp": "display error-down recovery"},
+    ),
+    _read_only(
+        "show_interface_errors",
+        "查看各接口的错包统计，找出哪个口有 CRC 等错包（华为简表的 inErrors/outErrors 列）",
+        {"huawei_vrp": "display interface brief", "hp_comware": "display counters inbound interface"},
+    ),
+    _read_only(
+        "show_interface_traffic",
+        "查看各接口的流量 / 利用率，找出哪个口被打满（H3C 只有入方向）",
+        {
+            "huawei_vrp": "display interface brief",
+            "hp_comware": "display counters rate inbound interface",
+        },
+    ),
+    _read_only(
+        "show_transceiver",
+        "查看单个光口的光模块信息与收发光功率（光口不通、时通时断时看）",
+        {
+            "huawei_vrp": "display transceiver interface {interface} verbose",
+            "hp_comware": "display transceiver diagnosis interface {interface}",
+        },
+        arguments=("interface_name",),
+    ),
+    _read_only(
+        "show_port_channel",
+        "查看链路聚合（Eth-Trunk / 聚合组）及成员口状态",
+        {"huawei_vrp": "display eth-trunk", "hp_comware": "display link-aggregation summary"},
+    ),
+    _read_only(
+        "show_poe",
+        "查看 PoE 供电状态（AP、IP 电话不亮时看）",
+        {"huawei_vrp": "display poe power-state", "hp_comware": "display poe interface"},
+    ),
+    # ---- 二层：VLAN、MAC、生成树、邻居 ----
+    _read_only(
+        "show_vlan",
+        "查看 VLAN 列表",
+        {"huawei_vrp": "display vlan", "hp_comware": "display vlan brief"},
+    ),
+    _read_only(
+        "show_vlan_detail",
+        "查看单个 VLAN 包含哪些接口；VLAN 号放在 vlan_id",
+        {"huawei_vrp": "display vlan {vlan}", "hp_comware": "display vlan {vlan}"},
+        arguments=("vlan_id",),
+    ),
+    _read_only(
+        "show_mac_lookup",
+        "按 MAC 地址查它接在哪个接口、哪个 VLAN；MAC 放在 mac_address（常见写法都行）",
+        {"huawei_vrp": "display mac-address {mac}", "hp_comware": "display mac-address {mac}"},
+        arguments=("mac_address",),
+    ),
+    _read_only(
+        "show_mac_on_interface",
+        "查看某个接口上学到了哪些 MAC（这个口下面接了哪些终端）；接口全名放在 interface_name",
+        {
+            "huawei_vrp": "display mac-address {interface}",
+            "hp_comware": "display mac-address interface {interface}",
+        },
+        arguments=("interface_name",),
+    ),
+    _read_only(
+        "show_mac_in_vlan",
+        "查看某个 VLAN 里学到了哪些 MAC；VLAN 号放在 vlan_id",
+        {
+            "huawei_vrp": "display mac-address vlan {vlan}",
+            "hp_comware": "display mac-address vlan {vlan}",
+        },
+        arguments=("vlan_id",),
+    ),
+    _read_only(
+        "show_mac_flapping",
+        "查看 MAC 漂移记录：同一个 MAC 在多个口之间来回跳，是环路的典型症状",
+        {"huawei_vrp": "display mac-address flapping", "hp_comware": "display mac-address mac-move"},
+    ),
+    _read_only(
+        "show_stp",
+        "查看生成树概况：各接口的角色和转发状态",
+        {"huawei_vrp": "display stp brief", "hp_comware": "display stp brief"},
+    ),
+    _read_only(
+        "show_stp_root",
+        "查看生成树根桥是谁（根桥跑偏会导致流量绕路）",
+        {"huawei_vrp": "display stp | include Root", "hp_comware": "display stp root"},
+    ),
+    _read_only(
+        "show_stp_tc",
+        "查看生成树拓扑变化统计：拓扑频繁变化会导致网络时断时续",
+        {"huawei_vrp": "display stp tc-bpdu statistics", "hp_comware": "display stp tc"},
+    ),
+    _read_only(
+        "show_lldp_neighbors",
+        "查看 LLDP 邻居：每个接口对端连的是哪台设备、哪个口",
+        {
+            "huawei_vrp": "display lldp neighbor brief",
+            "hp_comware": "display lldp neighbor-information list",
+        },
+    ),
+    # ---- 三层与连通性 ----
+    _read_only(
+        "show_ip_interfaces",
+        "查看三层接口（VLANIF / Vlan-interface 等）的 IP 与 up/down 简表",
+        {"huawei_vrp": "display ip interface brief", "hp_comware": "display ip interface brief"},
+    ),
+    _read_only(
+        "show_arp_lookup",
+        "按 IP 查 ARP：这个 IP 对应哪个 MAC、从哪个接口学到（定位终端第一步）；IP 放在 ip_address",
+        {"huawei_vrp": "display arp | include {ip}", "hp_comware": "display arp {ip}"},
+        arguments=("ip_address",),
+        # 华为只能子串匹配，查 10.1.1.1 会带出 10.1.1.10：执行器按完整地址再过滤一次。
+        exact_ip_filter=True,
+    ),
+    _read_only(
+        "show_route_lookup",
+        "查到某个 IP 走哪条路由（下一跳、出接口）；IP 放在 ip_address",
+        {
+            "huawei_vrp": "display ip routing-table {ip}",
+            "hp_comware": "display ip routing-table {ip}",
+        },
+        arguments=("ip_address",),
+    ),
+    _read_only(
+        "show_default_route",
+        "查看默认路由（出口不通时先看它在不在、下一跳对不对）",
+        {
+            "huawei_vrp": "display ip routing-table 0.0.0.0",
+            "hp_comware": "display ip routing-table 0.0.0.0",
+        },
+    ),
+    _read_only(
+        "show_vrrp",
+        "查看 VRRP 网关冗余状态：谁是 Master、有没有双主",
+        {"huawei_vrp": "display vrrp brief", "hp_comware": "display vrrp"},
+    ),
+    _read_only(
+        "show_ospf_neighbors",
+        "查看 OSPF 邻居状态（没到 Full 说明邻居有问题）",
+        {"huawei_vrp": "display ospf peer brief", "hp_comware": "display ospf peer"},
+    ),
+    _read_only(
+        "show_bgp_summary",
+        "查看 BGP 邻居概况（状态、收到的路由数）",
+        {"huawei_vrp": "display bgp peer", "hp_comware": "display bgp peer ipv4"},
+    ),
+    _read_only(
+        "show_dhcp_snooping_bindings",
+        "查看 DHCP Snooping 绑定表：终端 IP、MAC、接口、VLAN 的对应关系（终端拿不到地址时看）",
+        {
+            "huawei_vrp": "display dhcp snooping user-bind all",
+            "hp_comware": "display dhcp snooping binding",
+        },
+    ),
+)
 
 
 _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
@@ -242,7 +589,10 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
     "show_running_config": DeviceCommandDefinition(
         name="show_running_config",
         version=DEVICE_COMMAND_CATALOG_VERSION,
-        description="查看当前生效配置（可能包含敏感信息，建议默认不进白名单）",
+        description=(
+            "查看整份当前生效配置（输出长、可能包含敏感信息，建议默认不进白名单）；"
+            "只看某个接口时用 show_interface_config，只在需要全局审阅配置时再取整份"
+        ),
         command_type="read_only",
         # 大配置几千行，60 秒读不完；读超时属于「连上之后失败」，会落 UNKNOWN 等人工核实。
         read_timeout_class="long",
@@ -345,6 +695,7 @@ _DEVICE_COMMAND_CATALOG: dict[CommandName, DeviceCommandDefinition] = {
             "juniper_junos": ("set interfaces {interface} disable",),
         },
     ),
+    **{definition.name: definition for definition in _TROUBLESHOOTING_COMMANDS},
 }
 
 
@@ -448,6 +799,15 @@ def normalize_command_arguments(
             if not isinstance(value, str) or not validate_ip_address(value):
                 raise ValueError(_IP_ADDRESS_HINT)
             normalized["ip_address"] = value
+        elif name == "mac_address":
+            if not isinstance(value, str):
+                raise ValueError(_MAC_ADDRESS_HINT)
+            normalized["mac_address"] = normalize_mac_address(value)
+        elif name == "vlan_id":
+            # bool 是 int 的子类：不单独拦的话 True 会被渲染成 display vlan True。
+            if isinstance(value, bool) or not isinstance(value, int) or value not in _VLAN_ID_RANGE:
+                raise ValueError(_VLAN_ID_HINT)
+            normalized["vlan_id"] = value
         else:
             if not isinstance(value, str) or not validate_interface_name(value):
                 raise ValueError(_INTERFACE_NAME_HINT)
@@ -494,11 +854,14 @@ def rendered_command_lines(
     template = get_command_template(command_name, vendor)
     if "{" not in template:
         return (template,)
-    return (template.format(**_template_placeholders(args)),)
+    return (template.format(**_template_placeholders(args, vendor)),)
 
 
-def _template_placeholders(arguments: CommandArguments) -> dict[str, str]:
-    """把参数值映射成模板里的占位符；加新参数时只改这里和模板。"""
+def _template_placeholders(arguments: CommandArguments, vendor: str) -> dict[str, str]:
+    """把参数值映射成模板里的占位符；加新参数时只改这里和模板。
+
+    MAC 要按厂商写法格式化，所以这里需要 vendor。
+    """
     placeholders: dict[str, str] = {}
     interface_name = arguments.get("interface_name")
     if interface_name is not None:
@@ -506,6 +869,15 @@ def _template_placeholders(arguments: CommandArguments) -> dict[str, str]:
     ip_address = arguments.get("ip_address")
     if ip_address is not None:
         placeholders["ip"] = ip_address
+    mac_address = arguments.get("mac_address")
+    if mac_address is not None:
+        separator = _MAC_GROUP_SEPARATORS[vendor]  # type: ignore[index]
+        placeholders["mac"] = separator.join(
+            mac_address[index : index + 4] for index in range(0, 12, 4)
+        )
+    vlan_id = arguments.get("vlan_id")
+    if vlan_id is not None:
+        placeholders["vlan"] = str(vlan_id)
     return placeholders
 
 

@@ -107,6 +107,8 @@ async def query_device_command(
     command_name: str,
     interface_name: str | None,
     ip_address: str | None,
+    mac_address: str | None,
+    vlan_id: int | None,
     reason: str,
     publisher: HitlEventPublisher | None = None,
     gate_hook: HitlGateHook | None = None,
@@ -122,6 +124,8 @@ async def query_device_command(
         command_name: 白名单内的只读诊断命令名。
         interface_name: 只查单个接口的命令所需的接口全名。
         ip_address: ping 这类要指定目标的命令所需的目标 IP。
+        mac_address: 按 MAC 查表的命令所需的 MAC 地址。
+        vlan_id: 按 VLAN 查的命令所需的 VLAN 号。
         reason: 发起查询的原因。
         publisher: 可选的 HITL 安全事件发布器。
         gate_hook: 门控钩子（薄工具路径不使用）。

@@ -322,14 +322,9 @@ def test_root_schema_has_notify_and_device_control_without_propose() -> None:
     control_params = control["parameters"]
     assert control_params["additionalProperties"] is False
     assert set(control_params["required"]) == {"asset_id", "command_name", "reason"}
+    # 参数枚举跟着目录走（命令已经四十多条，这里不再逐条手抄）。
     assert set(control_params["properties"]["command_name"]["enum"]) == {
-        "show_version",
-        "show_running_config",
-        "show_interfaces",
-        "ping",
-        "reboot",
-        "port_enable",
-        "port_disable",
+        item.name for item in list_catalog_commands()
     }
     # 一组接口放在同一次调用里；旧的单数 interface_name 已经取消。
     assert "interface_name" not in control_params["properties"]
@@ -339,6 +334,14 @@ def test_root_schema_has_notify_and_device_control_without_propose() -> None:
     assert array_schema["maxItems"] == 48
     assert "interface_names" in control["description"]
     assert "reboot/port_enable/port_disable" in control["description"]
+
+    # 只读查询的参数：MAC 和 VLAN 是 P2b-2 新加的，没有它们 show_mac_lookup 这类命令没法用。
+    query_properties = functions["query_device_command"]["parameters"]["properties"]
+    assert {"interface_name", "ip_address", "mac_address", "vlan_id"} <= set(query_properties)
+    vlan_schema = next(
+        item for item in query_properties["vlan_id"]["anyOf"] if item.get("type") == "integer"
+    )
+    assert (vlan_schema["minimum"], vlan_schema["maximum"]) == (1, 4094)
 
 
 async def test_tool_descriptions_are_generated_from_the_catalog(
@@ -586,6 +589,8 @@ async def test_query_device_command_thin_tool_fails_closed_without_executor(
         command_name="show_version",
         interface_name=None,
         ip_address=None,
+        mac_address=None,
+        vlan_id=None,
         reason="排查交换机",
         gate_hook=None,
     )
@@ -667,6 +672,8 @@ async def test_query_device_command_thin_tool_never_calls_executor_on_failure_pa
         command_name="show_version",
         interface_name=None,
         ip_address=None,
+        mac_address=None,
+        vlan_id=None,
         reason="排查交换机",
         gate_hook=None,
     )

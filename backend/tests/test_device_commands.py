@@ -11,6 +11,7 @@ from app.agent.device_commands import (
     UnsupportedVendorError,
     command_supports_vendor,
     command_type_of,
+    filter_exact_ip_lines,
     get_command_template,
     get_device_command,
     list_commands_for_vendor,
@@ -32,7 +33,70 @@ def test_catalog_contains_expected_commands() -> None:
         "reboot",
         "port_enable",
         "port_disable",
+        *TROUBLESHOOTING_COMMANDS,
     }
+
+
+# P2b-2a：输出有限、按对象定位的排查命令。只登记华为和 H3C（主力设备），思科等暂不支持。
+TROUBLESHOOTING_COMMANDS = {
+    # 设备健康
+    "show_cpu",
+    "show_memory",
+    "show_environment",
+    "show_stack",
+    "show_clock",
+    "show_ntp",
+    # 接口与链路
+    "show_interfaces_description",
+    "show_interface_detail",
+    "show_interface_config",
+    "show_down_interfaces",
+    "show_error_down",
+    "show_interface_errors",
+    "show_interface_traffic",
+    "show_transceiver",
+    "show_port_channel",
+    "show_poe",
+    # 二层
+    "show_vlan",
+    "show_vlan_detail",
+    "show_mac_lookup",
+    "show_mac_on_interface",
+    "show_mac_in_vlan",
+    "show_mac_flapping",
+    "show_stp",
+    "show_stp_root",
+    "show_stp_tc",
+    "show_lldp_neighbors",
+    # 三层与连通性
+    "show_ip_interfaces",
+    "show_arp_lookup",
+    "show_route_lookup",
+    "show_default_route",
+    "show_vrrp",
+    "show_ospf_neighbors",
+    "show_bgp_summary",
+    "show_dhcp_snooping_bindings",
+}
+
+# 某个主力厂商确实没有等价命令的，在这里登记；其余排查命令两家都必须有模板。
+_KNOWN_VENDOR_GAPS = {"show_error_down": {"hp_comware"}}
+
+
+def test_troubleshooting_commands_cover_both_main_vendors() -> None:
+    """排查命令是给华为 / H3C 现网用的：漏登记一家，模型在那家设备上就查不了。"""
+    for name in TROUBLESHOOTING_COMMANDS:
+        definition = get_device_command(name)
+        assert definition.command_type == "read_only", name
+        missing = {"huawei_vrp", "hp_comware"} - set(definition.templates)
+        assert missing == _KNOWN_VENDOR_GAPS.get(name, set()), (name, missing)
+
+
+def test_troubleshooting_commands_are_not_registered_for_unverified_vendors() -> None:
+    """没在真机上核对过的厂商不登记：写错的模板会在现网报错，还不如明确「不支持」。"""
+    for name in TROUBLESHOOTING_COMMANDS:
+        vendors = set(get_device_command(name).templates)
+        assert vendors <= {"huawei_vrp", "hp_comware"}, (name, vendors)
 
 
 def test_host_vendors_and_power_off_command_are_retired() -> None:
@@ -103,6 +167,8 @@ def test_every_template_placeholder_is_a_registered_argument() -> None:
         "interface_name": "interface",
         "interface_names": "interface",
         "ip_address": "ip",
+        "mac_address": "mac",
+        "vlan_id": "vlan",
     }
     for item in list_device_commands():
         expected = {allowed[name] for name in item.arguments}
@@ -476,6 +542,98 @@ def test_slow_commands_are_registered_in_the_long_read_timeout_class() -> None:
 
 
 def test_only_commands_that_send_packets_to_a_target_are_marked_as_probing() -> None:
-    """D2 靠这个标记决定「目标不在 CMDB 就转人工」，不在 hitl.py 里写死命令名。"""
+    """D2 靠这个标记决定「目标不在 CMDB 就转人工」，不在 hitl.py 里写死命令名。
+
+    show_arp_lookup / show_route_lookup 也带 ip_address，但只查设备本地的表，不发包。
+    """
     probing = {item.name for item in list_device_commands() if item.probes_target}
     assert probing == {"ping"}
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["aabb.ccdd.eeff", "AABB-CCDD-EEFF", "aa:bb:cc:dd:ee:ff", "aa-bb-cc-dd-ee-ff"],
+)
+def test_mac_address_accepts_common_notations_and_stores_one_canonical_form(value: str) -> None:
+    """用户和模型会用各种写法：统一存成 12 位小写十六进制，渲染时再按厂商格式化。
+
+    载荷里存厂商无关的形式，资产换了厂商之后重试也能渲染对。
+    """
+    assert normalize_command_arguments("show_mac_lookup", {"mac_address": value}) == {
+        "mac_address": "aabbccddeeff"
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["aabb.ccdd.eef", "gg:bb:cc:dd:ee:ff", "aa:bb-cc:dd-ee:ff", "aabbccddeeff; reboot", ""],
+)
+def test_mac_address_rejects_malformed_values(value: str) -> None:
+    with pytest.raises(ValueError, match="MAC"):
+        normalize_command_arguments("show_mac_lookup", {"mac_address": value})
+
+
+def test_mac_address_is_rendered_in_each_vendors_own_notation() -> None:
+    """华为 / H3C 的 CLI 只认 aabb-ccdd-eeff，写成冒号格式会直接报参数错。"""
+    arguments = normalize_command_arguments("show_mac_lookup", {"mac_address": "aa:bb:cc:dd:ee:ff"})
+    assert rendered_command_lines("show_mac_lookup", "huawei_vrp", arguments=arguments) == (
+        "display mac-address aabb-ccdd-eeff",
+    )
+    assert rendered_command_lines("show_mac_lookup", "hp_comware", arguments=arguments) == (
+        "display mac-address aabb-ccdd-eeff",
+    )
+
+
+def test_every_vendor_with_a_mac_template_has_a_mac_notation() -> None:
+    """给新厂商登记带 {mac} 的模板时，必须同时登记这个厂商的 MAC 写法，否则渲染时才报错。"""
+    arguments = {"mac_address": "aabbccddeeff"}
+    for item in list_device_commands():
+        for vendor, template in item.templates.items():
+            if "{mac}" in template:
+                rendered_command_lines(item.name, vendor, arguments=arguments)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", [1, 10, 4094])
+def test_vlan_id_accepts_the_usable_range(value: int) -> None:
+    assert normalize_command_arguments("show_vlan_detail", {"vlan_id": value}) == {
+        "vlan_id": value
+    }
+    assert rendered_command_lines(
+        "show_vlan_detail", "hp_comware", arguments={"vlan_id": value}
+    ) == (f"display vlan {value}",)
+
+
+@pytest.mark.parametrize("value", [0, 4095, -1, "10", True, 10.0])
+def test_vlan_id_rejects_values_outside_1_to_4094(value: object) -> None:
+    """True 也是 int 的子类，不拦的话会渲染成 display vlan True。"""
+    with pytest.raises(ValueError, match="VLAN"):
+        normalize_command_arguments("show_vlan_detail", {"vlan_id": value})
+
+
+def test_arp_lookup_output_keeps_only_the_exact_ip() -> None:
+    """华为的 display arp | include 10.1.1.1 是子串匹配，会带出 10.1.1.10～19。
+
+    回答「这个 IP 接在哪个口」时混进别的 IP 就是错答，所以执行器要再按整个地址过滤一次。
+    """
+    output = "\n".join(
+        [
+            "display arp | include 10.1.1.1",
+            "10.1.1.1        aabb-ccdd-0001  20   D-0  GE0/0/1  10",
+            "10.1.1.10       aabb-ccdd-0010  20   D-0  GE0/0/2  10",
+            "10.1.1.100      aabb-ccdd-0100  20   D-0  GE0/0/3  10",
+            "110.1.1.1       aabb-ccdd-0111  20   D-0  GE0/0/4  10",
+        ]
+    )
+
+    filtered = filter_exact_ip_lines(output, "10.1.1.1")
+
+    assert filtered.splitlines() == [
+        "display arp | include 10.1.1.1",
+        "10.1.1.1        aabb-ccdd-0001  20   D-0  GE0/0/1  10",
+    ]
+
+
+def test_arp_lookup_is_the_only_command_that_filters_by_exact_ip() -> None:
+    assert {item.name for item in list_device_commands() if item.exact_ip_filter} == {
+        "show_arp_lookup"
+    }
