@@ -117,6 +117,38 @@ async def test_create_dynamic_credential_stores_username_only(
     assert body["credential_password_set"] is False
 
 
+async def test_ssh_port_defaults_to_22_and_can_be_changed_alone(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user,
+    auth_headers: Headers,
+) -> None:
+    """不填端口按 22 登记；单独改端口不需要连带提交凭据。"""
+    await _grant_cmdb_permissions(db_session, test_user)
+    create_resp = await client.post(
+        "/api/v1/cmdb/assets",
+        json={
+            "asset_type": "switch",
+            "hostname": "sw-api-port",
+            "ip_address": "10.0.9.30",
+            "vendor": "hp_comware",
+        },
+        headers=auth_headers,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    assert create_resp.json()["data"]["ssh_port"] == 22
+    asset_id = create_resp.json()["data"]["id"]
+
+    update_resp = await client.patch(
+        f"/api/v1/cmdb/assets/{asset_id}",
+        json={"ssh_port": 2222},
+        headers=auth_headers,
+    )
+
+    assert update_resp.status_code == 200, update_resp.text
+    assert update_resp.json()["data"]["ssh_port"] == 2222
+
+
 async def test_update_without_password_keeps_existing_secret(
     client: AsyncClient,
     db_session: AsyncSession,

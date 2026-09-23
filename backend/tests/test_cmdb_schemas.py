@@ -140,6 +140,30 @@ def test_update_rejects_non_network_asset_type() -> None:
         CmdbAssetUpdate.model_validate({"asset_type": "server"})
 
 
+def test_create_defaults_ssh_port_to_22() -> None:
+    """不填端口就是 22：已有的登记方式和连接行为都不变。"""
+    assert CmdbAssetCreate.model_validate(_base_create_kwargs()).ssh_port == 22
+
+
+@pytest.mark.parametrize("port", [0, 65536, -1, True])
+def test_create_rejects_invalid_ssh_port(port: object) -> None:
+    with pytest.raises(ValidationError):
+        CmdbAssetCreate.model_validate(_base_create_kwargs(ssh_port=port))
+
+
+def test_update_can_change_only_the_ssh_port() -> None:
+    """改端口不用连带提交凭据：端口和凭据是两件事。"""
+    payload = CmdbAssetUpdate.model_validate({"ssh_port": 2222})
+    assert payload.ssh_port == 2222
+    assert payload.model_fields_set == {"ssh_port"}
+
+
+def test_update_rejects_explicit_null_ssh_port() -> None:
+    """编辑时不传端口就保留原值；显式传 null 会往非空列里写空值，直接拒绝。"""
+    with pytest.raises(ValidationError, match="ssh_port"):
+        CmdbAssetUpdate.model_validate({"ssh_port": None})
+
+
 def test_response_still_reads_legacy_asset_type_and_vendor() -> None:
     """清理前的旧数据（服务器、linux）还在库里时，列表和详情必须照样能返回。"""
     response = CmdbAssetResponse.model_validate(
@@ -157,6 +181,7 @@ def test_response_still_reads_legacy_asset_type_and_vendor() -> None:
             "credential_type": "none",
             "credential_username": "",
             "credential_password_set": False,
+            "ssh_port": 22,
             "created_at": "2026-09-01T00:00:00Z",
             "updated_at": "2026-09-01T00:00:00Z",
         }

@@ -80,6 +80,7 @@ describe("CmdbAssetFormDialog 凭据校验规则", () => {
       credential_type: "static",
       credential_username: "test-admin",
       credential_password_set: true,
+      ssh_port: 2222,
       created_at: "2026-08-14T00:00:00Z",
       updated_at: "2026-08-14T00:00:00Z",
     }
@@ -100,6 +101,48 @@ describe("CmdbAssetFormDialog 凭据校验规则", () => {
     const payload = onSubmit.mock.calls[0]?.[0]
     expect(payload).toHaveProperty("vendor", "cisco_small_business")
     expect(payload).not.toHaveProperty("credential_password")
+    // 编辑时原样带回登记的端口，而且是数字，不是输入框里的字符串。
+    expect(payload).toHaveProperty("ssh_port", 2222)
+  })
+
+  it("新增资产不填端口时按 22 提交", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(true)
+
+    render(
+      <CmdbAssetFormDialog
+        open
+        onOpenChange={vi.fn()}
+        asset={null}
+        onSubmit={onSubmit}
+      />
+    )
+    fireEvent.change(screen.getByLabelText("主机名"), {
+      target: { value: "sw-port" },
+    })
+    fireEvent.change(screen.getByLabelText("IP 地址"), {
+      target: { value: "10.0.0.9" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: "确定" }))
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce())
+    expect(onSubmit.mock.calls[0]?.[0]).toHaveProperty("ssh_port", 22)
+  })
+
+  it("SSH 端口只接受 1–65535 的整数", () => {
+    const schema = createFormSchema(null)
+    const withPort = (ssh_port: string) =>
+      schema.safeParse({
+        ...baseAssetFields,
+        ssh_port,
+        credential_type: "none",
+        ...clearedCredentialFields(),
+      }).success
+
+    expect(withPort("2222")).toBe(true)
+    expect(withPort("0")).toBe(false)
+    expect(withPort("65536")).toBe(false)
+    expect(withPort("22a")).toBe(false)
+    expect(withPort("")).toBe(false)
   })
 
   it("厂商下拉项来自目录返回的厂商值，标签只在前端补", () => {

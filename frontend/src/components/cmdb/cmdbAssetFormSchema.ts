@@ -6,6 +6,12 @@ import type { CredentialType } from "@/types/cmdb"
 
 import { isAssetTypeName } from "./cmdbAssetTypes"
 
+function isValidSshPort(value: string): boolean {
+  if (!/^\d{1,5}$/.test(value)) return false
+  const port = Number(value)
+  return port >= 1 && port <= 65535
+}
+
 /** 切换凭据类型时返回应写入 RHF 的空凭据字段，避免隐藏字段残留导致 zod 失败 */
 export function clearedCredentialFields(): {
   credential_username: string
@@ -46,6 +52,12 @@ export function createFormSchema(
       business_system: z.string().max(100).optional().default(""),
       subnet_cidr: z.string().max(45).optional().default(""),
       notes: z.string().max(2000).optional().default(""),
+      // 输入框拿到的是字符串，提交时再转成数字；不填按 22。
+      ssh_port: z
+        .string()
+        .refine(isValidSshPort, "SSH 端口必须是 1–65535 的整数")
+        .optional()
+        .default("22"),
       credential_type: z.enum(["none", "static", "dynamic"]),
       credential_username: z.string().max(100).optional().default(""),
       credential_password: z.string().max(256).optional().default(""),

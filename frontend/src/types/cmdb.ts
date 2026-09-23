@@ -20,6 +20,8 @@ export interface CmdbAsset {
   credential_type: CredentialType
   credential_username: string
   credential_password_set: boolean
+  /** 管理口 SSH 端口，默认 22 */
+  ssh_port: number
   created_at: string
   updated_at: string
 }
@@ -35,6 +37,7 @@ export interface CmdbAssetCreate {
   business_system?: string
   subnet_cidr?: string
   notes?: string
+  ssh_port?: number
   credential_type?: CredentialType
   credential_username?: string
   credential_password?: string | null
@@ -51,6 +54,7 @@ export interface CmdbAssetUpdate {
   business_system?: string
   subnet_cidr?: string
   notes?: string
+  ssh_port?: number
   credential_type?: CredentialType
   credential_username?: string
   credential_password?: string | null

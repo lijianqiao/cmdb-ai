@@ -160,6 +160,7 @@ function defaultValues(asset?: CmdbAsset | null): CmdbAssetFormValues {
     business_system: asset?.business_system ?? "",
     subnet_cidr: asset?.subnet_cidr ?? "",
     notes: asset?.notes ?? "",
+    ssh_port: String(asset?.ssh_port ?? 22),
     credential_type: asset?.credential_type ?? "none",
     credential_username: asset?.credential_username ?? "",
     credential_password: "",
@@ -255,6 +256,7 @@ export function CmdbAssetFormDialog({
       business_system: data.business_system,
       subnet_cidr: data.subnet_cidr,
       notes: data.notes,
+      ssh_port: Number(data.ssh_port),
       credential_type: data.credential_type,
       credential_username:
         data.credential_type === "none" ? "" : data.credential_username,
@@ -364,6 +366,22 @@ export function CmdbAssetFormDialog({
                   <Field data-invalid={fieldState.invalid}>
                     <FieldLabel htmlFor="asset-ip">IP 地址</FieldLabel>
                     <Input id="asset-ip" placeholder="如 10.0.0.1" {...field} />
+                    <FieldError errors={[fieldState.error]} />
+                  </Field>
+                )}
+              />
+              <Controller
+                control={form.control}
+                name="ssh_port"
+                render={({ field, fieldState }) => (
+                  <Field data-invalid={fieldState.invalid}>
+                    <FieldLabel htmlFor="asset-ssh-port">SSH 端口</FieldLabel>
+                    <Input
+                      id="asset-ssh-port"
+                      inputMode="numeric"
+                      placeholder="默认 22"
+                      {...field}
+                    />
                     <FieldError errors={[fieldState.error]} />
                   </Field>
                 )}

@@ -33,6 +33,8 @@ class CmdbAsset(Base, TimestampMixin):
     credential_type: Mapped[str] = mapped_column(String(20), nullable=False, default="none")
     credential_username: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     credential_password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 管理口的 SSH 端口；改过端口的设备不填对就连不上。
+    ssh_port: Mapped[int] = mapped_column(Integer, nullable=False, default=22, server_default="22")
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
 
     def __repr__(self) -> str:

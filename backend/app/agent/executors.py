@@ -187,6 +187,7 @@ def _netmiko_device_type_for_vendor(vendor: str) -> str:
 def _open_netmiko_connection(
     *,
     host: str,
+    port: int,
     vendor: str,
     username: str,
     password: str,
@@ -204,6 +205,8 @@ def _open_netmiko_connection(
     kwargs: dict[str, Any] = {
         "device_type": _netmiko_device_type_for_vendor(vendor),
         "host": host,
+        # 资产登记的 SSH 端口：管理口改过端口的设备写死 22 就连不上。
+        "port": port,
         "username": username,
         "password": password,
         "conn_timeout": conn_timeout,
@@ -488,6 +491,7 @@ def _run_confirmation_flow(
 def _run_device_command(
     *,
     host: str,
+    port: int,
     vendor: VendorName,
     username: str,
     password: str,
@@ -509,6 +513,7 @@ def _run_device_command(
     try:
         connection = _open_netmiko_connection(
             host=host,
+            port=port,
             vendor=vendor,
             username=username,
             password=password,
@@ -671,6 +676,7 @@ class DeviceQueryExecutor:
             functools.partial(
                 _run_device_command,
                 host=asset.ip_address,
+                port=asset.ssh_port,
                 vendor=vendor,
                 username=asset.credential_username,
                 password=password,

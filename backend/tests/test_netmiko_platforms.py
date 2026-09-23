@@ -33,6 +33,7 @@ def test_open_small_business_connection_uses_cisco_s300_driver() -> None:
     with patch("app.agent.executors.ConnectHandler", return_value=connection) as connect:
         result = _open_netmiko_connection(
             host="10.0.0.67",
+            port=22,
             vendor="cisco_small_business",
             username="admin",
             password="test-only",
@@ -43,9 +44,25 @@ def test_open_small_business_connection_uses_cisco_s300_driver() -> None:
     connect.assert_called_once_with(
         device_type="cisco_s300",
         host="10.0.0.67",
+        port=22,
         username="admin",
         password="test-only",
         conn_timeout=11.0,
         auth_timeout=11.0,
         banner_timeout=11.0,
     )
+
+
+def test_open_connection_uses_the_registered_ssh_port() -> None:
+    """管理口改过 SSH 端口的设备（比如 2222）：连接时必须用登记的端口，不能写死 22。"""
+    with patch("app.agent.executors.ConnectHandler", return_value=MagicMock()) as connect:
+        _open_netmiko_connection(
+            host="10.0.0.68",
+            port=2222,
+            vendor="hp_comware",
+            username="admin",
+            password="test-only",
+            conn_timeout=11.0,
+        )
+
+    assert connect.call_args.kwargs["port"] == 2222

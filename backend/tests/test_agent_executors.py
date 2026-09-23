@@ -71,6 +71,7 @@ async def test_run_device_command_returns_full_output(
 
     result = executors._run_device_command(
         host="10.11.210.67",
+        port=22,
         vendor="hp_comware",
         username="admin",
         password="one-use-password",
@@ -356,6 +357,27 @@ async def test_mac_lookup_sends_the_vendors_own_mac_notation(
     assert connection.send_command.call_args.args[0] == "display mac-address aabb-ccdd-eeff"
 
 
+async def test_executor_connects_on_the_assets_ssh_port(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    ciphertext = encrypt_credential_password("whatever")
+    asset = await _make_asset(db_session, credential_password_encrypted=ciphertext)
+    asset.ssh_port = 2222  # type: ignore[attr-defined]
+    connection = MagicMock()
+    connection.send_command.return_value = "Cisco IOS XE Software"
+
+    with patch(
+        "app.agent.executors._open_netmiko_connection", return_value=connection
+    ) as open_connection:
+        await DeviceQueryExecutor().execute(
+            db_session, asset=asset, command_name="show_version", dynamic_password=None
+        )
+
+    assert open_connection.call_args.kwargs["port"] == 2222
+
+
 async def test_long_class_commands_get_the_long_read_timeout(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -590,6 +612,7 @@ def _run(
     monkeypatch.setattr(executors, "_open_netmiko_connection", lambda **_: connection)
     return executors._run_device_command(
         host="10.0.0.1",
+        port=22,
         vendor=vendor,  # type: ignore[arg-type]
         username="admin",
         password="one-use-password",

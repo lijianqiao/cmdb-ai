@@ -28,6 +28,8 @@ class CmdbAssetCreate(ApiModel):
     business_system: str = Field(default="", max_length=100)
     subnet_cidr: str = Field(default="", max_length=45)
     notes: str = Field(default="", max_length=2000)
+    # strict：不让 True 这类值被当成 1 混进来。
+    ssh_port: int = Field(default=22, ge=1, le=65535, strict=True)
     credential_type: CredentialType = "none"
     credential_username: str = Field(default="", max_length=100)
     credential_password: str | None = Field(default=None, min_length=1, max_length=256)
@@ -62,6 +64,7 @@ class CmdbAssetUpdate(ApiModel):
     business_system: str | None = Field(default=None, max_length=100)
     subnet_cidr: str | None = Field(default=None, max_length=45)
     notes: str | None = Field(default=None, max_length=2000)
+    ssh_port: int | None = Field(default=None, ge=1, le=65535, strict=True)
     credential_type: CredentialType | None = None
     credential_username: str | None = Field(default=None, max_length=100)
     credential_password: str | None = Field(default=None, min_length=1, max_length=256)
@@ -94,6 +97,13 @@ class CmdbAssetUpdate(ApiModel):
             raise ValueError("至少提供一个要更新的字段")
         return self
 
+    @model_validator(mode="after")
+    def reject_null_ssh_port(self) -> Self:
+        # 不传端口就保留原值；显式传 null 会往非空列里写空值。
+        if "ssh_port" in self.model_fields_set and self.ssh_port is None:
+            raise ValueError("ssh_port 不能为空；不修改端口时不要传这个字段")
+        return self
+
 
 class CmdbAssetResponse(ApiModel):
     """Public asset representation — ciphertext and plaintext password never appear here."""
@@ -111,6 +121,7 @@ class CmdbAssetResponse(ApiModel):
     credential_type: CredentialType
     credential_username: str
     credential_password_set: bool
+    ssh_port: int
     created_at: datetime
     updated_at: datetime
 

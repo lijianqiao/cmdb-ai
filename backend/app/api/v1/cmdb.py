@@ -61,6 +61,7 @@ def _to_response(asset: CmdbAsset) -> CmdbAssetResponse:
         credential_type=asset.credential_type,
         credential_username=asset.credential_username,
         credential_password_set=bool(asset.credential_password_encrypted),
+        ssh_port=asset.ssh_port,
         created_at=asset.created_at,
         updated_at=asset.updated_at,
     )
