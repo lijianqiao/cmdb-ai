@@ -66,6 +66,18 @@ async def test_root_ops_system_prompt_steers_to_targeted_device_commands() -> No
     assert mentioned <= known, mentioned - known
 
 
+async def test_root_ops_system_prompt_uses_full_interface_names_given_by_the_user() -> None:
+    """评测发现（port-batch-single-call 5/5 失败）：用户已经给了接口全名，模型仍先调
+    show_interfaces「核对全名」。默认档位下这次查询也要审批，关口操作就一直发不出去。
+    提示词要说清：给了全名直接用，只有简写拿不准前缀时才先查。
+    """
+    from app.agent.chat_turn import ROOT_OPS_SYSTEM_PROMPT
+
+    assert "直接使用" in ROOT_OPS_SYSTEM_PROMPT
+    assert "简写" in ROOT_OPS_SYSTEM_PROMPT
+    assert "接口全名从 show_interfaces 的输出取，不要猜前缀" not in ROOT_OPS_SYSTEM_PROMPT
+
+
 async def test_root_ops_system_prompt_says_to_save_before_reboot() -> None:
     """D5：重启遇到「要不要保存」会停下、不替人回答；模型要知道改完配置先 save_config。"""
     from app.agent.chat_turn import ROOT_OPS_SYSTEM_PROMPT

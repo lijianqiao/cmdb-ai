@@ -135,7 +135,8 @@ class DeviceControlArgs(_Args):
         description=(
             "port_enable/port_disable 要操作的接口全名列表，如 "
             '["GigabitEthernet1/0/15", "GigabitEthernet1/0/16"]。'
-            "用户点名多个接口时全部放进这一次调用，不要拆成多次；reboot 不传。"
+            "用户点名多个接口时全部放进这一次调用，不要拆成多次；用户给了接口全名就直接用，"
+            "不必先查。reboot / save_config 不传。"
         ),
     )
     reason: str = Field(min_length=1, max_length=2000)
@@ -156,7 +157,8 @@ class QueryDeviceCommandArgs(_Args):
         max_length=64,
         description=(
             "只查某一个接口的命令要传接口全名，如 GigabitEthernet1/0/15；"
-            "查整机的命令不传。接口全名从 show_interfaces 的输出取，不要猜前缀。"
+            "查整机的命令不传。用户给了全名就直接用；只有简写拿不准前缀时才先用 "
+            "show_interfaces 查全名。"
         ),
     )
     ip_address: str | None = Field(
