@@ -48,6 +48,7 @@ from netmiko.exceptions import ConfigInvalidException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.device_commands import (
+    CONFIG_COMMIT_CHECKS,
     CONFIG_COMMIT_COMMANDS,
     CONFIG_MODE_COMMANDS,
     CONFIG_SUCCESS_MARKERS,
@@ -408,6 +409,50 @@ def _run_config_batch(
                 not_sent=not_sent,
             )
         applied.append(interface_name)
+
+    commit_check = CONFIG_COMMIT_CHECKS.get(vendor)
+    if commit_check is not None:
+        # 提交前先检查：不通过就不提交。私有候选配置在退出时丢弃，这一批一个口都没生效，
+        # 而且能把设备给出的错误原因带回来，比 commit 失败后再猜原因清楚得多。
+        check_command, success_marker = commit_check
+        try:
+            check_output = str(
+                connection.send_config_set(
+                    [check_command],
+                    read_timeout=read_timeout,
+                    error_pattern=error_pattern,
+                    enter_config_mode=False,
+                    exit_config_mode=False,
+                )
+            )
+        except ConfigInvalidException as exc:
+            error_line = _config_error_line(exc)
+            reason = f"（{error_line}）" if error_line else ""
+            return _batch_failure(
+                f"提交前检查没通过{reason}，没有提交；这一批接口都没有生效",
+                error_class="CommitCheckFailed",
+                applied=[],
+                failed=check_command,
+                not_sent=[],
+            )
+        except Exception as exc:
+            logger.exception("提交前检查中断 vendor=%s command=%s", vendor, command_name)
+            return _batch_failure(
+                "提交前检查中断，没有提交；这一批接口都没有生效",
+                error_class=type(exc).__name__,
+                applied=[],
+                failed=check_command,
+                not_sent=[],
+            )
+        outputs.append(check_output)
+        if not re.search(success_marker, check_output):
+            return _batch_failure(
+                "提交前检查没有返回通过的确认，为安全起见没有提交；这一批接口都没有生效",
+                error_class="CommitCheckUnconfirmed",
+                applied=[],
+                failed=check_command,
+                not_sent=[],
+            )
 
     if commit_lines:
         try:

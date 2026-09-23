@@ -27,7 +27,8 @@
    range 里某个口报错时也分不清是哪一个。进配置模式的命令（CONFIG_MODE_COMMANDS）
    和提交命令（CONFIG_COMMIT_COMMANDS）是厂商级规则：Junos 进私有候选配置
    configure private，中途失败时改动随会话丢弃，不会留在所有人共享的候选配置里；
-   整批只在最后 commit 一次。
+   整批只在最后 commit 一次，提交前先 commit check（CONFIG_COMMIT_CHECKS），
+   检查不通过就不提交。
 6. 命令还登记两件和"怎么跑"有关的事：
    - read_timeout_class：整份配置这类慢命令归 long（秒数见 executors 与配置项），
      和 show_version 共用 60 秒的话大配置必超时，而读超时算"连上之后失败"，
@@ -137,7 +138,8 @@ class CommandArguments(TypedDict, total=False):
 # t19：34 条排查用只读命令（只登记华为 / H3C），新增 mac_address、vlan_id 参数。
 # t20：整张表 / 日志类命令与 traceroute；整张表的输出截断到 FULL_TABLE_MAX_OUTPUT_LINES 行。
 # t21：新增变更命令 save_config（华为 / H3C / 思科 IOS-XE）。
-DEVICE_COMMAND_CATALOG_VERSION = "t21-v1"
+# t22：Junos 提交前先 commit check。
+DEVICE_COMMAND_CATALOG_VERSION = "t22-v1"
 
 # 整张表（MAC / ARP / 路由 / ACL）最多交回这么多行。核心设备上这几张表可能上万行，
 # 全交给总结服务会按块多次调模型，又慢又贵；要找具体条目本来就该用 *_lookup 命令。
@@ -225,6 +227,13 @@ CONFIG_MODE_COMMANDS: Mapping[VendorName, str] = {
 # 整批配置发完后追加一次的提交命令：Junos 的配置要 commit 才生效。
 CONFIG_COMMIT_COMMANDS: Mapping[VendorName, tuple[str, ...]] = {
     "juniper_junos": ("commit",),
+}
+
+# 提交前的检查（P4）：(检查命令, 通过时的回显)。Junos 先 commit check，看到
+# configuration check succeeds 才 commit；检查报错或没看到这句就不提交——私有候选配置
+# 在退出时丢弃，设备配置不变，而且提交前就能拿到设备给出的错误原因。
+CONFIG_COMMIT_CHECKS: Mapping[VendorName, tuple[str, str]] = {
+    "juniper_junos": ("commit check", r"configuration check succeeds"),
 }
 
 # 登录后要执行 enable 才能进特权模式的厂商（D6）。只有资产登记了 enable 口令时才提权；
@@ -990,8 +999,10 @@ def rendered_command_lines(
     if definition.config_templates is not None and vendor in definition.config_templates:
         blocks = config_command_blocks(command_name, vendor, args.get("interface_names", ()))
         lines = tuple(line for _, block in blocks for line in block)
+        commit_check = CONFIG_COMMIT_CHECKS.get(vendor)  # type: ignore[call-overload]
+        check_lines: tuple[str, ...] = (commit_check[0],) if commit_check else ()
         commit_lines: tuple[str, ...] = CONFIG_COMMIT_COMMANDS.get(vendor, ())  # type: ignore[call-overload]
-        return lines + commit_lines
+        return lines + check_lines + commit_lines
 
     template = get_command_template(command_name, vendor)
     if "{" not in template:

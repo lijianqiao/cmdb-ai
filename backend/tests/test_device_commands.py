@@ -342,8 +342,11 @@ def test_batch_expands_config_template_for_each_interface() -> None:
     )
 
 
-def test_junos_batch_commits_once_at_the_end() -> None:
-    """Junos 是 set/delete + commit：一批接口只在最后提交一次。"""
+def test_junos_batch_checks_then_commits_once_at_the_end() -> None:
+    """Junos 是 set/delete + commit：一批接口只在最后提交一次，提交前先 commit check。
+
+    证据快照记的就是这几行：审批人能看到提交前会先做一次检查。
+    """
     lines = rendered_command_lines(
         "port_disable",
         "juniper_junos",
@@ -353,6 +356,7 @@ def test_junos_batch_commits_once_at_the_end() -> None:
         "set interfaces ge-0/0/1 disable",
         "set interfaces ge-0/0/2 disable",
         "set interfaces ge-0/0/3 disable",
+        "commit check",
         "commit",
     )
 
@@ -422,7 +426,7 @@ def test_junos_port_enable_deletes_disable_and_commits() -> None:
     """Junos 的开端口是删掉 disable 再提交，commit 由厂商级规则追加一次。"""
     assert rendered_command_lines(
         "port_enable", "juniper_junos", arguments={"interface_names": ["ge-0/0/1"]}
-    ) == ("delete interfaces ge-0/0/1 disable", "commit")
+    ) == ("delete interfaces ge-0/0/1 disable", "commit check", "commit")
 
 
 def test_normalize_command_arguments_enforces_what_the_catalog_registered() -> None:

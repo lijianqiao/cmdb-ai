@@ -778,14 +778,16 @@ async def test_junos_config_needs_commit_complete_as_success_evidence(
     """Junos 的配置只有 commit 成功才生效：没看到 commit complete 就不能算成功。"""
     no_commit = _run(
         monkeypatch,
-        _FakeConfigConnection({"commit": "commit\n"}),
+        _FakeConfigConnection({"commit check": _JUNOS_CHECK_OK, "commit": "commit\n"}),
         vendor="juniper_junos",
         command_name="port_disable",
         interface_names=("ge-0/0/1",),
     )
     committed = _run(
         monkeypatch,
-        _FakeConfigConnection({"commit": "commit\ncommit complete\n"}),
+        _FakeConfigConnection(
+            {"commit check": _JUNOS_CHECK_OK, "commit": "commit\ncommit complete\n"}
+        ),
         vendor="juniper_junos",
         command_name="port_disable",
         interface_names=("ge-0/0/1",),
@@ -807,7 +809,9 @@ async def test_junos_uses_private_configuration_and_commits_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Junos 进私有候选配置：中途失败时改动随会话丢弃，不会留在所有人共享的候选库里。"""
-    connection = _FakeConfigConnection({"commit": "commit complete\n"})
+    connection = _FakeConfigConnection(
+        {"commit check": _JUNOS_CHECK_OK, "commit": "commit complete\n"}
+    )
 
     result = _run(
         monkeypatch,
@@ -823,8 +827,60 @@ async def test_junos_uses_private_configuration_and_commits_once(
         ["set interfaces ge-0/0/1 disable"],
         ["set interfaces ge-0/0/2 disable"],
         ["set interfaces ge-0/0/3 disable"],
+        ["commit check"],
         ["commit"],
     ]
+
+
+_JUNOS_CHECK_OK = "commit check\nconfiguration check succeeds\n"
+
+
+async def test_junos_does_not_commit_when_the_commit_check_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P4：提交前先 commit check。检查报错就不提交，并把设备给的原因带回来。"""
+    connection = _FakeConfigConnection(
+        {
+            "commit check": (
+                "commit check\n"
+                "[edit interfaces ge-0/0/1]\n"
+                "error: configuration check-out failed\n"
+            )
+        }
+    )
+
+    result = _run(
+        monkeypatch,
+        connection,
+        vendor="juniper_junos",
+        command_name="port_disable",
+        interface_names=("ge-0/0/1",),
+    )
+
+    assert result.ok is False
+    assert ["commit"] not in connection.batches
+    assert "提交前检查" in result.message
+    assert "configuration check-out failed" in result.message
+    assert "没有提交" in result.message
+
+
+async def test_junos_does_not_commit_without_the_check_success_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没报错、但也没看到 configuration check succeeds：拿不到明确的通过证据，同样不提交。"""
+    connection = _FakeConfigConnection({"commit check": "commit check\n"})
+
+    result = _run(
+        monkeypatch,
+        connection,
+        vendor="juniper_junos",
+        command_name="port_disable",
+        interface_names=("ge-0/0/1",),
+    )
+
+    assert result.ok is False
+    assert ["commit"] not in connection.batches
+    assert "没有提交" in result.message
 
 
 async def test_batch_partial_failure_names_each_interface(
