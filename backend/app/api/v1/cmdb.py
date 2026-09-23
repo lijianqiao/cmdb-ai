@@ -62,6 +62,8 @@ def _to_response(asset: CmdbAsset) -> CmdbAssetResponse:
         credential_username=asset.credential_username,
         credential_password_set=bool(asset.credential_password_encrypted),
         ssh_port=asset.ssh_port,
+        enable_credential_type=asset.enable_credential_type,
+        enable_password_set=bool(asset.enable_password_encrypted),
         created_at=asset.created_at,
         updated_at=asset.updated_at,
     )
@@ -79,6 +81,7 @@ def _prepare_persist_data(
     这个安全约束的落地方式。
     """
     data = dict(payload)
+    _prepare_enable_password(data, existing=existing)
     if "credential_type" not in data:
         return data
 
@@ -116,8 +119,52 @@ def _prepare_persist_data(
     return data
 
 
+def _prepare_enable_password(data: dict[str, object], *, existing: CmdbAsset | None) -> None:
+    """把 enable 口令明文换成密文（就地改 data），规则和登录密码一致。
+
+    没提 enable_credential_type 就什么都不动（保留原值）；static 不带新口令时保留原密文，
+    但原来没有可保留的密文就拒绝；none 清掉密文。明文口令绝不进入待持久化的数据。
+    """
+    plain_password = data.pop("enable_password", None)
+    if "enable_credential_type" not in data:
+        return
+    if data["enable_credential_type"] == "static":
+        if isinstance(plain_password, str):
+            try:
+                data["enable_password_encrypted"] = encrypt_credential_password(plain_password)
+            except CmdbCredentialKeyMissingError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="未配置 CMDB_CREDENTIAL_KEY，无法保存 enable 口令，请联系管理员配置",
+                ) from exc
+        elif (
+            existing is None
+            or existing.enable_credential_type != "static"
+            or not existing.enable_password_encrypted
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="切换为静态 enable 口令时必须提供 enable_password",
+            )
+    else:
+        data["enable_password_encrypted"] = None
+
+
 def _credential_changed(existing: CmdbAsset, persist_data: dict[str, object]) -> bool:
-    """判断本次更新是否实际改动了凭据字段（用于审计详情，不记录密码明文）。"""
+    """判断本次更新是否实际改动了凭据字段（用于审计详情，不记录密码明文）。
+
+    enable 口令也算凭据：改了它同样记「凭据已变更」。
+    """
+    if (
+        "enable_credential_type" in persist_data
+        and persist_data["enable_credential_type"] != existing.enable_credential_type
+    ):
+        return True
+    if (
+        "enable_password_encrypted" in persist_data
+        and persist_data["enable_password_encrypted"] != existing.enable_password_encrypted
+    ):
+        return True
     if "credential_type" in persist_data and persist_data["credential_type"] != existing.credential_type:
         return True
     if (

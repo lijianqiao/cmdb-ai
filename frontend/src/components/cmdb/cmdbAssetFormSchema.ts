@@ -2,7 +2,7 @@
 
 import { z } from "zod"
 
-import type { CredentialType } from "@/types/cmdb"
+import type { CredentialType, EnableCredentialType } from "@/types/cmdb"
 
 import { isAssetTypeName } from "./cmdbAssetTypes"
 
@@ -31,10 +31,13 @@ export function clearedCredentialFields(): {
  *   vendorValues: 后端命令目录给出的厂商值。目录还没加载回来时传空数组：
  *     只要求非空，不校验取值——否则表单会因为「目录还没到」而拦下合法的提交，
  *     取值本身后端还会再校验一次。
+ *   existingEnableType: 资产当前的 enable 口令类型；新建传 null。规则和登录密码
+ *     一样：只有本来就是静态时，口令才允许留空（保留原密文）。
  */
 export function createFormSchema(
   existingCredentialType: CredentialType | null,
-  vendorValues: readonly string[] = []
+  vendorValues: readonly string[] = [],
+  existingEnableType: EnableCredentialType | null = null
 ) {
   const vendor =
     vendorValues.length > 0
@@ -61,8 +64,31 @@ export function createFormSchema(
       credential_type: z.enum(["none", "static", "dynamic"]),
       credential_username: z.string().max(100).optional().default(""),
       credential_password: z.string().max(256).optional().default(""),
+      enable_credential_type: z
+        .enum(["none", "static"])
+        .optional()
+        .default("none"),
+      enable_password: z.string().max(256).optional().default(""),
     })
     .superRefine((data, ctx) => {
+      if (data.enable_credential_type === "none" && data.enable_password) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["enable_password"],
+          message: "enable 口令类型为「无」时不能填写口令",
+        })
+      }
+      if (
+        data.enable_credential_type === "static" &&
+        !data.enable_password &&
+        existingEnableType !== "static"
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["enable_password"],
+          message: "新登记静态 enable 口令时必须填写口令",
+        })
+      }
       if (data.credential_type === "none") {
         if (data.credential_username || data.credential_password) {
           ctx.addIssue({
@@ -110,3 +136,36 @@ export function createFormSchema(
 }
 
 export type CmdbAssetFormValues = z.infer<ReturnType<typeof createFormSchema>>
+
+/**
+ * 提交时 enable 口令相关字段怎么带。
+ *
+ * Args:
+ *   data: 表单里的厂商与 enable 字段。
+ *   enableVendors: 目录给出的「要 enable 的厂商」；目录还没加载回来时传 null。
+ *
+ * Returns:
+ *   - 目录没加载完：一个字段都不带。此时不知道这个厂商要不要 enable，
+ *     贸然按「无」提交会把思科设备已登记的口令清掉；不带字段后端就保留原值。
+ *   - 厂商不需要 enable：按「无」提交，顺手清掉换厂商之前留下的口令。
+ *   - 需要 enable：带上类型；静态且填了新口令才带口令，留空表示保留原口令。
+ */
+export function enablePayloadFields(
+  data: Pick<
+    CmdbAssetFormValues,
+    "vendor" | "enable_credential_type" | "enable_password"
+  >,
+  enableVendors: readonly string[] | null
+): { enable_credential_type?: EnableCredentialType; enable_password?: string } {
+  if (enableVendors === null) return {}
+  if (!enableVendors.includes(data.vendor)) {
+    return { enable_credential_type: "none" }
+  }
+  if (data.enable_credential_type === "static" && data.enable_password) {
+    return {
+      enable_credential_type: "static",
+      enable_password: data.enable_password,
+    }
+  }
+  return { enable_credential_type: data.enable_credential_type }
+}

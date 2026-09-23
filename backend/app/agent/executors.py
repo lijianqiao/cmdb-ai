@@ -52,6 +52,7 @@ from app.agent.device_commands import (
     CONFIG_MODE_COMMANDS,
     CONFIG_SUCCESS_MARKERS,
     DEVICE_ERROR_PATTERNS,
+    ENABLE_PASSWORD_VENDORS,
     SAVE_BEFORE_REBOOT_QUESTION,
     CommandArguments,
     UnknownDeviceCommandError,
@@ -192,8 +193,12 @@ def _open_netmiko_connection(
     username: str,
     password: str,
     conn_timeout: float,
+    enable_password: str | None = None,
 ) -> Any:
     """建立一个已认证的 Netmiko 连接；同步阻塞，抽成独立函数方便测试打桩。
+
+    enable_password 不为空时作为 Netmiko 的 secret 传入，供之后的 enable() 提权使用；
+    没登记 enable 口令时不传，连接参数和原来完全一样。
 
     ConnectHandler 构造过程里就完成了 TCP 连接、认证和 session_preparation
     （含按 device_type 关闭分页），所以它一返回就意味着"已经跟设备说过话了"。
@@ -213,6 +218,8 @@ def _open_netmiko_connection(
         "auth_timeout": conn_timeout,
         "banner_timeout": conn_timeout,
     }
+    if enable_password is not None:
+        kwargs["secret"] = enable_password
     if settings.DEVICE_SSH_STRICT_HOST_KEY:
         kwargs["ssh_strict"] = True
         kwargs["system_host_keys"] = True
@@ -500,12 +507,13 @@ def _run_device_command(
     arguments: CommandArguments | None,
     conn_timeout: float,
     read_timeout: float,
+    enable_password: str | None = None,
 ) -> ExecutionResult:
-    """在工作线程里跑完整条 Netmiko 会话：连接 → 按类型分派 → 判定结果 → 断开。
+    """在工作线程里跑完整条 Netmiko 会话：连接 →（思科）提权 → 按类型分派 → 判定结果 → 断开。
 
     全程同步阻塞，由 DeviceQueryExecutor.execute 用 asyncio.to_thread 调用。
-    普通命令在连接建立后就置 dispatched=True；配置命令要等进了配置模式才置位——
-    进不去配置模式时一条配置都没发，可以直接重试。
+    普通命令在连接建立（并提权成功）后才置 dispatched=True；配置命令要等进了配置模式
+    才置位——进不去配置模式、或者 enable 提权失败时一条命令都没发，可以直接重试。
     """
     connection = None
     dispatched = False
@@ -518,7 +526,27 @@ def _run_device_command(
             username=username,
             password=password,
             conn_timeout=conn_timeout,
+            enable_password=enable_password,
         )
+
+        if enable_password is not None:
+            # 提权之前一条命令都没发：enable 失败（口令错、账号不允许提权）按未下发处理，
+            # 提案退回「已批准」可以直接重试，而不是落 UNKNOWN 等人工核实。
+            try:
+                connection.enable()
+            except Exception as exc:
+                logger.warning(
+                    "enable 提权失败 host=%s vendor=%s error_class=%s",
+                    host,
+                    vendor,
+                    type(exc).__name__,
+                )
+                return ExecutionResult(
+                    ok=False,
+                    message="进入特权模式（enable）失败，请检查 CMDB 里登记的 enable 口令；命令未下发",
+                    detail={"error_class": type(exc).__name__},
+                    dispatched=False,
+                )
 
         if definition.config_templates is not None and vendor in definition.config_templates:
             # 进配置模式之前一条配置都没发：进不去就按未下发处理（例如 Junos 的共享候选库里
@@ -647,6 +675,13 @@ class DeviceQueryExecutor:
         else:
             return ExecutionResult(ok=False, message="资产未配置登录凭据")
 
+        # 只有要 enable 的厂商才用 enable 口令：华为 / H3C 登记了也不解密、不发给设备。
+        enable_password: str | None = None
+        if asset.vendor in ENABLE_PASSWORD_VENDORS and asset.enable_credential_type == "static":
+            if not asset.enable_password_encrypted:
+                return ExecutionResult(ok=False, message="资产未配置 enable 口令")
+            enable_password = decrypt_credential_password(asset.enable_password_encrypted)
+
         try:
             definition = get_device_command(command_name)
         except UnknownDeviceCommandError:
@@ -685,5 +720,6 @@ class DeviceQueryExecutor:
                 arguments=normalized_arguments,
                 conn_timeout=settings.DEVICE_COMMAND_CONN_TIMEOUT_SECONDS,
                 read_timeout=device_read_timeout_seconds(command_name),
+                enable_password=enable_password,
             ),
         )

@@ -21,6 +21,7 @@ import type { CmdbAsset } from "@/types/cmdb"
 import {
   clearedCredentialFields,
   createFormSchema,
+  enablePayloadFields,
 } from "./cmdbAssetFormSchema"
 import { CmdbAssetFormDialog } from "./CmdbAssetFormDialog"
 import { vendorItems, vendorLabel } from "./cmdbVendors"
@@ -34,6 +35,32 @@ const CATALOG_VENDORS = [
   "juniper_junos",
   "other",
 ]
+
+const ENABLE_VENDORS = ["cisco_iosxe", "cisco_small_business"]
+
+function ciscoAsset(overrides: Partial<CmdbAsset> = {}): CmdbAsset {
+  return {
+    id: 7,
+    asset_type: "switch",
+    vendor: "cisco_iosxe",
+    hostname: "core-sw",
+    ip_address: "192.0.2.20",
+    location: "",
+    owner_user_id: null,
+    business_system: "",
+    subnet_cidr: "",
+    notes: "",
+    credential_type: "static",
+    credential_username: "admin",
+    credential_password_set: true,
+    ssh_port: 22,
+    enable_credential_type: "static",
+    enable_password_set: true,
+    created_at: "2026-09-23T00:00:00Z",
+    updated_at: "2026-09-23T00:00:00Z",
+    ...overrides,
+  }
+}
 
 const baseAssetFields = {
   asset_type: "switch",
@@ -59,6 +86,7 @@ beforeEach(() => {
         catalog_version: "t17-v1",
         commands: [],
         vendors: CATALOG_VENDORS,
+        enable_password_vendors: ENABLE_VENDORS,
       },
     },
   })
@@ -81,6 +109,8 @@ describe("CmdbAssetFormDialog 凭据校验规则", () => {
       credential_username: "test-admin",
       credential_password_set: true,
       ssh_port: 2222,
+      enable_credential_type: "none",
+      enable_password_set: false,
       created_at: "2026-08-14T00:00:00Z",
       updated_at: "2026-08-14T00:00:00Z",
     }
@@ -126,6 +156,97 @@ describe("CmdbAssetFormDialog 凭据校验规则", () => {
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce())
     expect(onSubmit.mock.calls[0]?.[0]).toHaveProperty("ssh_port", 22)
+  })
+
+  it("只有需要 enable 的厂商（思科）才显示 enable 口令", async () => {
+    render(
+      <CmdbAssetFormDialog
+        open
+        onOpenChange={vi.fn()}
+        asset={ciscoAsset()}
+        onSubmit={vi.fn()}
+      />
+    )
+    expect(await screen.findByLabelText("enable 口令类型")).toBeInTheDocument()
+    cleanup()
+
+    render(
+      <CmdbAssetFormDialog
+        open
+        onOpenChange={vi.fn()}
+        asset={ciscoAsset({ vendor: "hp_comware" })}
+        onSubmit={vi.fn()}
+      />
+    )
+    await waitFor(() => expect(api.get).toHaveBeenCalled())
+    expect(screen.queryByLabelText("enable 口令类型")).not.toBeInTheDocument()
+  })
+
+  it("编辑思科资产不改 enable 口令时，不提交口令（后端保留原密文）", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(true)
+
+    render(
+      <CmdbAssetFormDialog
+        open
+        onOpenChange={vi.fn()}
+        asset={ciscoAsset()}
+        onSubmit={onSubmit}
+      />
+    )
+    await screen.findByLabelText("enable 口令类型")
+    fireEvent.click(screen.getByRole("button", { name: "确定" }))
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce())
+    const payload = onSubmit.mock.calls[0]?.[0]
+    expect(payload).toHaveProperty("enable_credential_type", "static")
+    expect(payload).not.toHaveProperty("enable_password")
+  })
+
+  it("enable 口令的校验规则和登录密码一致", () => {
+    const withEnable = (
+      existingEnableType: "none" | "static" | null,
+      enable_credential_type: string,
+      enable_password: string
+    ) =>
+      createFormSchema(null, [], existingEnableType).safeParse({
+        ...baseAssetFields,
+        credential_type: "none",
+        ...clearedCredentialFields(),
+        enable_credential_type,
+        enable_password,
+      }).success
+
+    // 新登记静态口令必须填口令；「无」不能带口令。
+    expect(withEnable(null, "static", "")).toBe(false)
+    expect(withEnable(null, "static", "en-secret")).toBe(true)
+    expect(withEnable(null, "none", "en-secret")).toBe(false)
+    // 本来就是静态：留空表示保留原口令。
+    expect(withEnable("static", "static", "")).toBe(true)
+    // 从「无」切到静态：没有可保留的旧口令，必须填。
+    expect(withEnable("none", "static", "")).toBe(false)
+  })
+
+  it("提交时 enable 字段怎么带：目录没加载完就一个都不带", () => {
+    const cisco = {
+      vendor: "cisco_iosxe",
+      enable_credential_type: "static" as const,
+      enable_password: "",
+    }
+
+    // 目录还没回来：不知道要不要 enable，不带任何字段，后端保留原值。
+    expect(enablePayloadFields(cisco, null)).toEqual({})
+    // 思科、静态、留空：只带类型，保留原口令。
+    expect(enablePayloadFields(cisco, ENABLE_VENDORS)).toEqual({
+      enable_credential_type: "static",
+    })
+    // 思科、静态、填了新口令：带上口令。
+    expect(
+      enablePayloadFields({ ...cisco, enable_password: "new" }, ENABLE_VENDORS)
+    ).toEqual({ enable_credential_type: "static", enable_password: "new" })
+    // 换成不需要 enable 的厂商：按「无」提交，清掉之前登记的口令。
+    expect(
+      enablePayloadFields({ ...cisco, vendor: "hp_comware" }, ENABLE_VENDORS)
+    ).toEqual({ enable_credential_type: "none" })
   })
 
   it("SSH 端口只接受 1–65535 的整数", () => {

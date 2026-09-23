@@ -52,6 +52,18 @@ async def test_catalog_returns_the_vendor_list_for_the_cmdb_form(
     assert "generic" not in vendors
 
 
+async def test_catalog_says_which_vendors_use_an_enable_password(
+    client: AsyncClient, auth_headers: Headers
+) -> None:
+    """CMDB 表单只在这些厂商下显示 enable 口令：前端不再自己抄一份厂商清单。"""
+    response = await client.get(_CATALOG_URL, headers=auth_headers)
+
+    assert set(response.json()["data"]["enable_password_vendors"]) == {
+        "cisco_iosxe",
+        "cisco_small_business",
+    }
+
+
 async def test_catalog_reflects_a_newly_registered_command(
     client: AsyncClient, auth_headers: Headers, single_interface_read_only_command: str
 ) -> None:

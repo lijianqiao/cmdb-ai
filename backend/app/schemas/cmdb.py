@@ -9,11 +9,14 @@ from app.agent.device_commands import VendorName
 from app.schemas.common import ApiModel
 
 type CredentialType = Literal["none", "static", "dynamic"]
+# 思科 enable 口令（D6）：这一版只做「无 / 静态」；动态的要改审批流程，等真正需要时再做。
+type EnableCredentialType = Literal["none", "static"]
 # CMDB 只登记网络设备；服务器、负载均衡、存储不在这里登记。只在创建/编辑时校验：
 # 响应模型的 asset_type 仍是普通字符串，清理之前的旧数据照样能读出来。
 type AssetTypeName = Literal["switch", "router", "firewall", "wireless_controller", "other"]
 
 _CREDENTIAL_FIELDS = {"credential_type", "credential_username", "credential_password"}
+_ENABLE_FIELDS = {"enable_credential_type", "enable_password"}
 
 
 class CmdbAssetCreate(ApiModel):
@@ -33,6 +36,16 @@ class CmdbAssetCreate(ApiModel):
     credential_type: CredentialType = "none"
     credential_username: str = Field(default="", max_length=100)
     credential_password: str | None = Field(default=None, min_length=1, max_length=256)
+    enable_credential_type: EnableCredentialType = "none"
+    enable_password: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_enable_password(self) -> Self:
+        if self.enable_credential_type == "none" and self.enable_password is not None:
+            raise ValueError("enable_credential_type 为 none 时不能填写 enable 口令")
+        if self.enable_credential_type == "static" and self.enable_password is None:
+            raise ValueError("静态 enable 口令必须填写 enable_password")
+        return self
 
     @model_validator(mode="after")
     def validate_credential(self) -> Self:
@@ -68,6 +81,19 @@ class CmdbAssetUpdate(ApiModel):
     credential_type: CredentialType | None = None
     credential_username: str | None = Field(default=None, max_length=100)
     credential_password: str | None = Field(default=None, min_length=1, max_length=256)
+    enable_credential_type: EnableCredentialType | None = None
+    enable_password: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_enable_password(self) -> Self:
+        if not _ENABLE_FIELDS & self.model_fields_set:
+            return self
+        if self.enable_credential_type is None:
+            raise ValueError("修改 enable 口令时必须同时提供 enable_credential_type")
+        if self.enable_credential_type == "none" and self.enable_password is not None:
+            raise ValueError("enable_credential_type 为 none 时不能填写 enable 口令")
+        # static 且不带口令：保留原密文；原来确实有没有密文由接口层检查。
+        return self
 
     @model_validator(mode="after")
     def validate_credential(self) -> Self:
@@ -122,6 +148,8 @@ class CmdbAssetResponse(ApiModel):
     credential_username: str
     credential_password_set: bool
     ssh_port: int
+    enable_credential_type: EnableCredentialType
+    enable_password_set: bool
     created_at: datetime
     updated_at: datetime
 

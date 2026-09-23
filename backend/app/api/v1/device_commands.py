@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends
 
 from app.agent.device_commands import (
     DEVICE_COMMAND_CATALOG_VERSION,
+    ENABLE_PASSWORD_VENDORS,
     command_vendors,
     list_device_commands,
     list_vendor_names,
@@ -55,5 +56,6 @@ async def get_device_command_catalog(
             catalog_version=DEVICE_COMMAND_CATALOG_VERSION,
             commands=commands,
             vendors=list(list_vendor_names()),
+            enable_password_vendors=sorted(ENABLE_PASSWORD_VENDORS),
         )
     )

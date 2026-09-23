@@ -66,3 +66,19 @@ def test_open_connection_uses_the_registered_ssh_port() -> None:
         )
 
     assert connect.call_args.kwargs["port"] == 2222
+
+
+def test_open_connection_passes_the_enable_secret_when_registered() -> None:
+    """Netmiko 的 enable() 用连接上的 secret；没登记口令时不传（上一条测试的参数全集里没有它）。"""
+    with patch("app.agent.executors.ConnectHandler", return_value=MagicMock()) as connect:
+        _open_netmiko_connection(
+            host="10.0.0.69",
+            port=22,
+            vendor="cisco_iosxe",
+            username="admin",
+            password="test-only",
+            conn_timeout=11.0,
+            enable_password="en-secret",
+        )
+
+    assert connect.call_args.kwargs["secret"] == "en-secret"

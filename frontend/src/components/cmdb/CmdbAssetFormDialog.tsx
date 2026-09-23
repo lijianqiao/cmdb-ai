@@ -54,11 +54,13 @@ import type {
   CmdbAssetCreate,
   CmdbAssetUpdate,
   CredentialType,
+  EnableCredentialType,
 } from "@/types/cmdb"
 
 import {
   clearedCredentialFields,
   createFormSchema,
+  enablePayloadFields,
   type CmdbAssetFormValues,
 } from "./cmdbAssetFormSchema"
 import { ASSET_TYPE_ITEMS } from "./cmdbAssetTypes"
@@ -68,6 +70,11 @@ const CREDENTIAL_TYPE_ITEMS: { label: string; value: CredentialType }[] = [
   { label: "无", value: "none" },
   { label: "静态密码", value: "static" },
   { label: "动态密码（仅记账号）", value: "dynamic" },
+]
+
+const ENABLE_TYPE_ITEMS: { label: string; value: EnableCredentialType }[] = [
+  { label: "无（登录后就是特权级）", value: "none" },
+  { label: "静态口令", value: "static" },
 ]
 
 interface CmdbCredentialRevealDialogProps {
@@ -164,6 +171,8 @@ function defaultValues(asset?: CmdbAsset | null): CmdbAssetFormValues {
     credential_type: asset?.credential_type ?? "none",
     credential_username: asset?.credential_username ?? "",
     credential_password: "",
+    enable_credential_type: asset?.enable_credential_type ?? "none",
+    enable_password: "",
   }
 }
 
@@ -183,7 +192,11 @@ export function CmdbAssetFormDialog({
   const form = useForm<CmdbAssetFormValues>({
     resolver: (data, context, options) =>
       zodResolver(
-        createFormSchema(asset?.credential_type ?? null, catalog.vendors)
+        createFormSchema(
+          asset?.credential_type ?? null,
+          catalog.vendors,
+          asset?.enable_credential_type ?? null
+        )
       )(data, context, options),
     defaultValues: defaultValues(asset),
   })
@@ -198,6 +211,14 @@ export function CmdbAssetFormDialog({
     control: form.control,
     name: "credential_type",
   })
+  const vendor = useWatch({ control: form.control, name: "vendor" })
+  const enableType = useWatch({
+    control: form.control,
+    name: "enable_credential_type",
+  })
+  // 目录没加载回来之前不知道哪些厂商要 enable：这段时间既不显示、也不提交 enable 字段。
+  const catalogReady = catalog.catalog_version !== ""
+  const usesEnable = catalog.enable_password_vendors.includes(vendor)
 
   const canViewCredential =
     isEdit &&
@@ -267,6 +288,10 @@ export function CmdbAssetFormDialog({
         : data.credential_type === "dynamic"
           ? { credential_password: null }
           : {}),
+      ...enablePayloadFields(
+        data,
+        catalogReady ? catalog.enable_password_vendors : null
+      ),
     }
     const ok = await onSubmit(payload)
     if (ok) onOpenChange(false)
@@ -327,9 +352,19 @@ export function CmdbAssetFormDialog({
                     <Select
                       items={vendorOptions}
                       value={field.value}
-                      onValueChange={(value) =>
-                        field.onChange(value ?? "other")
-                      }
+                      onValueChange={(value) => {
+                        const next = value ?? "other"
+                        field.onChange(next)
+                        // 换成不需要 enable 的厂商：清掉隐藏起来的 enable 字段，
+                        // 免得看不见的字段挡住提交。
+                        if (
+                          catalogReady &&
+                          !catalog.enable_password_vendors.includes(next)
+                        ) {
+                          form.setValue("enable_credential_type", "none")
+                          form.setValue("enable_password", "")
+                        }
+                      }}
                     >
                       <SelectTrigger id="asset-vendor">
                         <SelectValue placeholder="选择厂商" />
@@ -530,6 +565,74 @@ export function CmdbAssetFormDialog({
                         autoComplete="new-password"
                         placeholder={
                           isEdit ? "留空则不修改已设置的密码" : "请输入密码"
+                        }
+                        {...field}
+                      />
+                      <FieldError errors={[fieldState.error]} />
+                    </Field>
+                  )}
+                />
+              )}
+              {usesEnable && (
+                <Controller
+                  control={form.control}
+                  name="enable_credential_type"
+                  render={({ field }) => (
+                    <Field
+                      className={
+                        enableType === "none" ? "sm:col-span-2" : undefined
+                      }
+                    >
+                      <FieldLabel htmlFor="asset-enable-type">
+                        enable 口令类型
+                      </FieldLabel>
+                      <Select
+                        items={ENABLE_TYPE_ITEMS}
+                        value={field.value}
+                        onValueChange={(value) => {
+                          field.onChange(value ?? "none")
+                          form.setValue("enable_password", "")
+                        }}
+                      >
+                        <SelectTrigger id="asset-enable-type">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectGroup>
+                            {ENABLE_TYPE_ITEMS.map((item) => (
+                              <SelectItem key={item.value} value={item.value}>
+                                {item.label}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                  )}
+                />
+              )}
+              {usesEnable && enableType === "static" && (
+                <Controller
+                  control={form.control}
+                  name="enable_password"
+                  render={({ field, fieldState }) => (
+                    <Field data-invalid={fieldState.invalid}>
+                      <FieldLabel htmlFor="asset-enable-password">
+                        enable 口令
+                        {isEdit && asset?.enable_password_set && (
+                          <span className="ml-2 text-xs font-normal text-muted-foreground">
+                            已设置
+                          </span>
+                        )}
+                      </FieldLabel>
+                      <Input
+                        id="asset-enable-password"
+                        type="password"
+                        autoComplete="new-password"
+                        placeholder={
+                          isEdit && asset?.enable_password_set
+                            ? "留空则不修改已设置的口令"
+                            : "请输入 enable 口令"
                         }
                         {...field}
                       />

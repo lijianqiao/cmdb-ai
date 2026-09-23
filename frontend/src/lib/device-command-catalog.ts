@@ -21,6 +21,8 @@ export interface DeviceCommandCatalog {
   catalog_version: string
   commands: DeviceCommandCatalogItem[]
   vendors: string[]
+  /** 登录后要执行 enable 提权的厂商：CMDB 表单只在这些厂商下显示 enable 口令 */
+  enable_password_vendors: string[]
 }
 
 /** 目录还没加载回来时用它，页面不会因为 undefined 崩掉。 */
@@ -28,6 +30,7 @@ export const EMPTY_DEVICE_COMMAND_CATALOG: DeviceCommandCatalog = {
   catalog_version: "",
   commands: [],
   vendors: [],
+  enable_password_vendors: [],
 }
 
 /** 拉取设备命令目录。 */

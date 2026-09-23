@@ -25,3 +25,5 @@ class DeviceCommandCatalogResponse(ApiModel):
     catalog_version: str
     commands: list[DeviceCommandCatalogItem]
     vendors: list[str]
+    # 登录后要执行 enable 提权的厂商：CMDB 表单只在这些厂商下显示 enable 口令。
+    enable_password_vendors: list[str]

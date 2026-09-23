@@ -357,6 +357,105 @@ async def test_mac_lookup_sends_the_vendors_own_mac_notation(
     assert connection.send_command.call_args.args[0] == "display mac-address aabb-ccdd-eeff"
 
 
+async def _cisco_asset_with_enable(db_session: AsyncSession, *, vendor: str = "cisco_iosxe") -> object:
+    """登录密码和 enable 口令都是静态的思科资产。"""
+    asset = await _make_asset(
+        db_session,
+        vendor=vendor,
+        credential_password_encrypted=encrypt_credential_password("login-pwd"),
+    )
+    asset.enable_credential_type = "static"  # type: ignore[attr-defined]
+    asset.enable_password_encrypted = encrypt_credential_password("en-secret")  # type: ignore[attr-defined]
+    return asset
+
+
+async def test_cisco_enters_enable_mode_before_sending_the_command(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """用户级登录看不了 running-config：先用登记的 enable 口令提权，再下发命令。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    asset = await _cisco_asset_with_enable(db_session)
+    connection = MagicMock()
+    connection.send_command.return_value = "hostname SW-01"
+
+    with patch(
+        "app.agent.executors._open_netmiko_connection", return_value=connection
+    ) as open_connection:
+        result = await DeviceQueryExecutor().execute(
+            db_session, asset=asset, command_name="show_running_config", dynamic_password=None
+        )
+
+    assert result.ok is True
+    assert open_connection.call_args.kwargs["enable_password"] == "en-secret"
+    called = [name for name, _, _ in connection.mock_calls]
+    assert called.index("enable") < called.index("send_command")
+
+
+async def test_failed_enable_means_nothing_was_sent(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """enable 口令错了，一条命令都没发：dispatched=False，提案退回可重试，而不是落 UNKNOWN。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    asset = await _cisco_asset_with_enable(db_session)
+    connection = MagicMock()
+    connection.enable.side_effect = ValueError("Failed to enter enable mode.")
+
+    with patch("app.agent.executors._open_netmiko_connection", return_value=connection):
+        result = await DeviceQueryExecutor().execute(
+            db_session, asset=asset, command_name="show_running_config", dynamic_password=None
+        )
+
+    assert result.ok is False
+    assert result.dispatched is False
+    assert "enable" in result.message
+    connection.send_command.assert_not_called()
+
+
+async def test_enable_is_only_used_on_cisco_platforms(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """华为 / H3C 没有 enable 这一步：即使登记了口令也不去提权，更不把口令发给设备。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    asset = await _cisco_asset_with_enable(db_session)
+    asset.vendor = "hp_comware"  # type: ignore[attr-defined]
+    connection = MagicMock()
+    connection.send_command.return_value = "sysname SW-01"
+
+    with patch(
+        "app.agent.executors._open_netmiko_connection", return_value=connection
+    ) as open_connection:
+        result = await DeviceQueryExecutor().execute(
+            db_session, asset=asset, command_name="show_version", dynamic_password=None
+        )
+
+    assert result.ok is True
+    assert open_connection.call_args.kwargs["enable_password"] is None
+    connection.enable.assert_not_called()
+
+
+async def test_cisco_without_enable_password_does_not_try_to_enable(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没登记 enable 口令的思科设备（登录就是特权级）：行为和原来一样，不多发 enable。"""
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(_generate_fernet_key()))
+    asset = await _make_asset(
+        db_session, credential_password_encrypted=encrypt_credential_password("login-pwd")
+    )
+    connection = MagicMock()
+    connection.send_command.return_value = "Cisco IOS XE Software"
+
+    with patch("app.agent.executors._open_netmiko_connection", return_value=connection):
+        await DeviceQueryExecutor().execute(
+            db_session, asset=asset, command_name="show_version", dynamic_password=None
+        )
+
+    connection.enable.assert_not_called()
+
+
 async def test_executor_connects_on_the_assets_ssh_port(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

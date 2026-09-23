@@ -149,6 +149,97 @@ async def test_ssh_port_defaults_to_22_and_can_be_changed_alone(
     assert update_resp.json()["data"]["ssh_port"] == 2222
 
 
+async def test_static_enable_password_is_stored_encrypted_and_never_echoed(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_user,
+    auth_headers: Headers,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """enable 口令和登录密码同一套规矩：加密存储，接口只返回「设没设」，审计不记口令。"""
+    await _grant_cmdb_permissions(db_session, test_user)
+    monkeypatch.setattr(settings, "CMDB_CREDENTIAL_KEY", SecretStr(Fernet.generate_key().decode()))
+    enable_secret = "En@ble-Secret-9"
+
+    create_resp = await client.post(
+        "/api/v1/cmdb/assets",
+        json={
+            "asset_type": "switch",
+            "hostname": "sw-enable-01",
+            "ip_address": "10.0.9.40",
+            "vendor": "cisco_iosxe",
+            "credential_type": "static",
+            "credential_username": "admin",
+            "credential_password": "login-pwd",
+            "enable_credential_type": "static",
+            "enable_password": enable_secret,
+        },
+        headers=auth_headers,
+    )
+
+    assert create_resp.status_code == 201, create_resp.text
+    body = create_resp.json()["data"]
+    assert body["enable_credential_type"] == "static"
+    assert body["enable_password_set"] is True
+    assert enable_secret not in create_resp.text
+    assert "enable_password_encrypted" not in create_resp.text
+    asset_id = body["id"]
+
+    # 只改主机名：enable 口令原样保留。
+    rename_resp = await client.patch(
+        f"/api/v1/cmdb/assets/{asset_id}",
+        json={"hostname": "sw-enable-01-renamed"},
+        headers=auth_headers,
+    )
+    assert rename_resp.json()["data"]["enable_password_set"] is True
+
+    # 换一个新口令：审计记「凭据已变更」，但不记口令本身。
+    change_resp = await client.patch(
+        f"/api/v1/cmdb/assets/{asset_id}",
+        json={"enable_credential_type": "static", "enable_password": "New-En@ble-7"},
+        headers=auth_headers,
+    )
+    assert change_resp.status_code == 200, change_resp.text
+    detail = await _latest_update_audit_detail(db_session, asset_id)
+    assert "凭据已变更" in detail
+    assert "New-En@ble-7" not in detail
+
+    # 改回「无」：密文一并清掉。
+    clear_resp = await client.patch(
+        f"/api/v1/cmdb/assets/{asset_id}",
+        json={"enable_credential_type": "none"},
+        headers=auth_headers,
+    )
+    assert clear_resp.json()["data"]["enable_password_set"] is False
+
+
+async def test_switch_to_static_enable_without_password_is_rejected(
+    client: AsyncClient, db_session: AsyncSession, test_user, auth_headers: Headers
+) -> None:
+    """原来没有 enable 口令、现在切成静态却不给口令：没有可保留的旧密文，只能拒绝。"""
+    await _grant_cmdb_permissions(db_session, test_user)
+    create_resp = await client.post(
+        "/api/v1/cmdb/assets",
+        json={
+            "asset_type": "switch",
+            "hostname": "sw-enable-02",
+            "ip_address": "10.0.9.41",
+            "vendor": "cisco_iosxe",
+        },
+        headers=auth_headers,
+    )
+    asset_id = create_resp.json()["data"]["id"]
+
+    update_resp = await client.patch(
+        f"/api/v1/cmdb/assets/{asset_id}",
+        json={"enable_credential_type": "static"},
+        headers=auth_headers,
+    )
+
+    assert update_resp.status_code == 422
+    assert "enable" in update_resp.text
+
+
 async def test_update_without_password_keeps_existing_secret(
     client: AsyncClient,
     db_session: AsyncSession,

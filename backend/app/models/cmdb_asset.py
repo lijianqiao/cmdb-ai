@@ -35,6 +35,12 @@ class CmdbAsset(Base, TimestampMixin):
     credential_password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 管理口的 SSH 端口；改过端口的设备不填对就连不上。
     ssh_port: Mapped[int] = mapped_column(Integer, nullable=False, default=22, server_default="22")
+    # 思科用户级登录后执行 enable 用的口令：none / static（D6 这一版不做 dynamic）。
+    # 密文和登录密码同一套加密；其它厂商没有 enable 这一步，登记了也不会用。
+    enable_credential_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="none", server_default="none"
+    )
+    enable_password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
 
     def __repr__(self) -> str:

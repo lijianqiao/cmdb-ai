@@ -227,6 +227,12 @@ CONFIG_COMMIT_COMMANDS: Mapping[VendorName, tuple[str, ...]] = {
     "juniper_junos": ("commit",),
 }
 
+# 登录后要执行 enable 才能进特权模式的厂商（D6）。只有资产登记了 enable 口令时才提权；
+# 登录就是特权级的账号不登记口令，行为和原来一样。华为 / H3C 没有这一步。
+ENABLE_PASSWORD_VENDORS: frozenset[VendorName] = frozenset(
+    {"cisco_iosxe", "cisco_small_business"}
+)
+
 # 重启确认提示：同一行里要提到 reboot/reload/reset，并带确认记号；
 # 含 save 的行（保存配置的询问）一律不匹配——那是另一个决定，不能替人回答。
 _REBOOT_CONFIRM_PROMPT = (

@@ -158,6 +158,49 @@ def test_update_can_change_only_the_ssh_port() -> None:
     assert payload.model_fields_set == {"ssh_port"}
 
 
+def test_create_defaults_to_no_enable_password() -> None:
+    payload = CmdbAssetCreate.model_validate(_base_create_kwargs())
+    assert payload.enable_credential_type == "none"
+    assert payload.enable_password is None
+
+
+def test_create_static_enable_requires_the_password() -> None:
+    with pytest.raises(ValidationError, match="enable"):
+        CmdbAssetCreate.model_validate(
+            _base_create_kwargs(vendor="cisco_iosxe", enable_credential_type="static")
+        )
+    ok = CmdbAssetCreate.model_validate(
+        _base_create_kwargs(
+            vendor="cisco_iosxe", enable_credential_type="static", enable_password="en-secret"
+        )
+    )
+    assert ok.enable_password == "en-secret"
+
+
+def test_create_none_enable_rejects_a_password() -> None:
+    with pytest.raises(ValidationError, match="enable"):
+        CmdbAssetCreate.model_validate(_base_create_kwargs(enable_password="en-secret"))
+
+
+def test_create_rejects_dynamic_enable_for_now() -> None:
+    """D6：这一版只做「无 / 静态」，动态 enable 要改审批流程，等真正需要时再做。"""
+    with pytest.raises(ValidationError):
+        CmdbAssetCreate.model_validate(
+            _base_create_kwargs(vendor="cisco_iosxe", enable_credential_type="dynamic")
+        )
+
+
+def test_update_enable_password_without_type_is_rejected() -> None:
+    """和登录凭据同一个规矩：改 enable 口令必须同时说明类型，否则分不清是改还是清。"""
+    with pytest.raises(ValidationError, match="enable_credential_type"):
+        CmdbAssetUpdate.model_validate({"enable_password": "en-secret"})
+
+
+def test_update_can_keep_static_enable_without_resending_the_password() -> None:
+    payload = CmdbAssetUpdate.model_validate({"enable_credential_type": "static"})
+    assert payload.enable_password is None
+
+
 def test_update_rejects_explicit_null_ssh_port() -> None:
     """编辑时不传端口就保留原值；显式传 null 会往非空列里写空值，直接拒绝。"""
     with pytest.raises(ValidationError, match="ssh_port"):
@@ -182,6 +225,8 @@ def test_response_still_reads_legacy_asset_type_and_vendor() -> None:
             "credential_username": "",
             "credential_password_set": False,
             "ssh_port": 22,
+            "enable_credential_type": "none",
+            "enable_password_set": False,
             "created_at": "2026-09-01T00:00:00Z",
             "updated_at": "2026-09-01T00:00:00Z",
         }
