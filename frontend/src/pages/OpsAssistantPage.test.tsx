@@ -175,7 +175,7 @@ describe("OpsAssistantPage 完全访问确认", () => {
   })
 })
 
-describe("OpsAssistantPage 完整配置会话隔离", () => {
+describe("OpsAssistantPage 完整输出会话隔离", () => {
   const sharedProposal: OpsChatItem = {
     kind: "hitl",
     id: "hitl:7",
@@ -224,12 +224,12 @@ describe("OpsAssistantPage 完整配置会话隔离", () => {
   it("同一 proposal ID 切换会话后使用当前选中的 session ID", async () => {
     render(<OpsAssistantPage />)
     await selectSession(1)
-    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    fireEvent.click(screen.getByRole("button", { name: "查看完整输出" }))
     expect(await screen.findByText("session 1")).toBeInTheDocument()
 
     await selectSession(2)
     expect(screen.queryByText("session 1")).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    fireEvent.click(screen.getByRole("button", { name: "查看完整输出" }))
 
     await waitFor(() => {
       expect(mockGetDeviceQueryResult).toHaveBeenLastCalledWith(2, 7)

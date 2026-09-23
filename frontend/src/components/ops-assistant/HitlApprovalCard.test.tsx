@@ -1002,7 +1002,7 @@ describe("HitlApprovalCard 完整设备配置", () => {
     mockUsePermission.mockReturnValue(permissionResult(false))
   })
 
-  it("点击后才加载完整配置，收起再展开复用局部缓存", async () => {
+  it("点击后才加载完整输出，收起再展开复用局部缓存", async () => {
     mockGetDeviceQueryResult.mockResolvedValue(buildDeviceQueryResult())
     render(
       <HitlApprovalCard
@@ -1018,8 +1018,8 @@ describe("HitlApprovalCard 完整设备配置", () => {
     )
 
     expect(mockGetDeviceQueryResult).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
-    expect(screen.getByText("加载完整配置…")).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "查看完整输出" }))
+    expect(screen.getByText("加载完整输出…")).toBeInTheDocument()
     await waitFor(() => {
       expect(mockGetDeviceQueryResult).toHaveBeenCalledWith(10, 1)
     })
@@ -1028,8 +1028,8 @@ describe("HitlApprovalCard 完整设备配置", () => {
     )
     expect(screen.getByText("53 个字符")).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole("button", { name: "收起完整配置" }))
-    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    fireEvent.click(screen.getByRole("button", { name: "收起完整输出" }))
+    fireEvent.click(screen.getByRole("button", { name: "查看完整输出" }))
     expect(await screen.findByTestId("hitl-full-result")).toBeInTheDocument()
     expect(mockGetDeviceQueryResult).toHaveBeenCalledTimes(1)
   })
@@ -1051,8 +1051,8 @@ describe("HitlApprovalCard 完整设备配置", () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
-    expect(await screen.findByText("加载完整配置失败")).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "查看完整输出" }))
+    expect(await screen.findByText("加载完整输出失败")).toBeInTheDocument()
     fireEvent.click(screen.getByRole("button", { name: "重试加载" }))
     expect(await screen.findByTestId("hitl-full-result")).toBeInTheDocument()
     expect(mockGetDeviceQueryResult).toHaveBeenCalledTimes(2)
@@ -1074,10 +1074,10 @@ describe("HitlApprovalCard 完整设备配置", () => {
     )
 
     expect(
-      screen.getByText("该历史记录仅保存了预览，无法恢复完整配置。"),
+      screen.getByText("该历史记录仅保存了预览，无法恢复完整输出。"),
     ).toBeInTheDocument()
     expect(
-      screen.queryByRole("button", { name: "查看完整配置" }),
+      screen.queryByRole("button", { name: "查看完整输出" }),
     ).not.toBeInTheDocument()
     expect(mockGetDeviceQueryResult).not.toHaveBeenCalled()
   })
@@ -1102,7 +1102,7 @@ describe("HitlApprovalCard 完整设备配置", () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    fireEvent.click(screen.getByRole("button", { name: "查看完整输出" }))
     fireEvent.click(await screen.findByRole("button", { name: "恢复 AI 总结" }))
     await waitFor(() => {
       expect(mockRecoverDeviceQuerySummary).toHaveBeenCalledWith(10, 1)
@@ -1133,7 +1133,7 @@ describe("HitlApprovalCard 完整设备配置", () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    fireEvent.click(screen.getByRole("button", { name: "查看完整输出" }))
     expect(await screen.findByText("AI 总结生成中")).toBeInTheDocument()
     expect(
       screen.queryByRole("button", { name: "恢复 AI 总结" }),
@@ -1156,7 +1156,7 @@ describe("HitlApprovalCard 完整设备配置", () => {
         hasFullResult
       />,
     )
-    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    fireEvent.click(screen.getByRole("button", { name: "查看完整输出" }))
     expect(await screen.findByText("session 10")).toBeInTheDocument()
 
     rerender(
@@ -1172,7 +1172,7 @@ describe("HitlApprovalCard 完整设备配置", () => {
       />,
     )
     expect(screen.queryByText("session 10")).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    fireEvent.click(screen.getByRole("button", { name: "查看完整输出" }))
     expect(await screen.findByText("session 20")).toBeInTheDocument()
     expect(mockGetDeviceQueryResult).toHaveBeenLastCalledWith(20, 1)
   })
@@ -1198,7 +1198,7 @@ describe("HitlApprovalCard 完整设备配置", () => {
         hasFullResult
       />,
     )
-    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    fireEvent.click(screen.getByRole("button", { name: "查看完整输出" }))
     fireEvent.click(await screen.findByRole("button", { name: "恢复 AI 总结" }))
 
     rerender(
@@ -1213,7 +1213,7 @@ describe("HitlApprovalCard 完整设备配置", () => {
         hasFullResult
       />,
     )
-    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    fireEvent.click(screen.getByRole("button", { name: "查看完整输出" }))
     expect(
       await screen.findByRole("button", { name: "恢复 AI 总结" }),
     ).toBeEnabled()

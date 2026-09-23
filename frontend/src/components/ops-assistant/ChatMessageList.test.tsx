@@ -153,7 +153,7 @@ describe("ChatMessageList scroll and pagination", () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole("button", { name: "查看完整配置" }))
+    fireEvent.click(screen.getByRole("button", { name: "查看完整输出" }))
     await waitFor(() => {
       expect(mockGetDeviceQueryResult).toHaveBeenCalledWith(22, 7)
     })

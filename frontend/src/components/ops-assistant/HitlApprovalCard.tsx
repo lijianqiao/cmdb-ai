@@ -1,6 +1,6 @@
 /** HITL 审批时间线卡片
  *
- * 在时间线中呈现审批状态、执行结果与完整配置抽屉；
+ * 在时间线中呈现审批状态、执行结果与完整输出抽屉；
  * 支持动态凭据口令输入与审批决策/重试/处置操作。
  */
 
@@ -338,7 +338,7 @@ export function HitlApprovalCard({
       if (fullResultRequestRef.current === requestId) setFullResult(result)
     } catch (error: unknown) {
       if (fullResultRequestRef.current === requestId) {
-        setFullResultError(readErrorMessage(error, "加载完整配置失败"))
+        setFullResultError(readErrorMessage(error, "加载完整输出失败"))
       }
     } finally {
       if (fullResultRequestRef.current === requestId) {
@@ -467,13 +467,13 @@ export function HitlApprovalCard({
                 <CollapsibleTrigger
                   render={<Button type="button" size="xs" variant="outline" />}
                 >
-                  {fullResultOpen ? "收起完整配置" : "查看完整配置"}
+                  {fullResultOpen ? "收起完整输出" : "查看完整输出"}
                 </CollapsibleTrigger>
                 <CollapsibleContent className="flex flex-col gap-2">
                   {fullResultLoading ? (
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
                       <Spinner className="size-3" />
-                      <span>加载完整配置…</span>
+                      <span>加载完整输出…</span>
                     </div>
                   ) : fullResultError ? (
                     <div className="flex flex-col items-start gap-2">
@@ -529,7 +529,7 @@ export function HitlApprovalCard({
               </Collapsible>
             ) : (
               <p className="text-xs text-muted-foreground">
-                该历史记录仅保存了预览，无法恢复完整配置。
+                该历史记录仅保存了预览，无法恢复完整输出。
               </p>
             )
           ) : null}
