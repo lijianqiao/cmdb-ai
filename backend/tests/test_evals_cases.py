@@ -22,6 +22,29 @@ def _write(tmp_path: Path, body: str, name: str = "case.yaml") -> Path:
     return path
 
 
+def test_loads_command_level_invariants(tmp_path: Path) -> None:
+    """命令级断言：同一个工具下用了哪条命令。只写这两条的用例也不算「空断言」。"""
+    path = _write(
+        tmp_path,
+        """
+id: locate-ip
+category: capability
+title: 定位 IP 走 ARP 查询
+prompt: 10.1.1.1 接在 SW-01 哪个口
+expect:
+  invariants:
+    must_use_command_any: [show_arp_lookup, show_mac_lookup]
+    must_not_use_command: [show_running_config]
+""",
+    )
+
+    case = load_case(path)
+
+    assert case.expect.must_use_command_any == ("show_arp_lookup", "show_mac_lookup")
+    assert case.expect.must_not_use_command == ("show_running_config",)
+    assert not case.expect.is_empty()
+
+
 def test_loads_max_calls_limits(tmp_path: Path) -> None:
     """max_calls 声明每个工具最多调几次，用来测「一次能做完的事别拆成多次」。"""
     path = _write(

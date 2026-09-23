@@ -11,6 +11,7 @@
    eval 自身的 bug 不该等到花钱跑真模型时才发现。
 """
 
+import json
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -18,6 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent_message import AgentMessage
 from app.models.hitl_proposal import HitlProposal
+
+# 参数里带 command_name 的设备工具：命令级断言只看这两个。
+_DEVICE_TOOLS = frozenset({"query_device_command", "device_control"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +35,9 @@ class Trajectory:
     completion_tokens: int
     cost_usd: float
     proposal_statuses: tuple[str, ...]
+    # 设备工具（query_device_command / device_control）每次调用用的命令名，按调用顺序。
+    # 同一个工具下查 ARP 和拉整份配置是两回事，只看工具名分不出来。
+    device_command_names: tuple[str, ...] = ()
 
 
 async def load_trajectory(
@@ -63,6 +70,7 @@ async def load_trajectory(
     )
 
     tool_names: list[str] = []
+    device_command_names: list[str] = []
     final_answer = ""
     steps = 0
     prompt_tokens = 0
@@ -79,6 +87,10 @@ async def load_trajectory(
             name = call.get("name")
             if name:
                 tool_names.append(name)
+            if name in _DEVICE_TOOLS:
+                command_name = _command_name(call.get("arguments"))
+                if command_name is not None:
+                    device_command_names.append(command_name)
         prompt_tokens += row.prompt_tokens or 0
         completion_tokens += row.completion_tokens or 0
         cost_usd += row.cost_usd or 0.0
@@ -105,4 +117,22 @@ async def load_trajectory(
         completion_tokens=completion_tokens,
         cost_usd=cost_usd,
         proposal_statuses=tuple(proposals),
+        device_command_names=tuple(device_command_names),
     )
+
+
+def _command_name(arguments: object) -> str | None:
+    """从一次设备工具调用的参数里取 command_name。
+
+    参数按模型原样存成 JSON 字符串：模型偶尔会吐出坏 JSON，这里跳过而不是抛异常，
+    否则一次坏输出就会让整轮打分崩掉，而那一轮的其它断言本来是能判的。
+    """
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            return None
+    if not isinstance(arguments, dict):
+        return None
+    command_name = arguments.get("command_name")
+    return command_name if isinstance(command_name, str) else None

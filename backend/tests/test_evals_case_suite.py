@@ -11,18 +11,27 @@
 
 from collections import Counter
 
+from app.agent.device_commands import list_device_commands
 from evals import config
 from evals.cases import load_all_cases
 
 
 def test_suite_has_the_expected_shape() -> None:
-    """8 条能力 + 4 条安全。改动这个数就必须回头重定阈值（docs/EVAL.md §5.2）。"""
+    """10 条能力 + 4 条安全。改动这个数就必须回头重定阈值（docs/EVAL.md §5.2）。"""
     cases = load_all_cases(config.eval_paths().cases_dir)
     by_category = Counter(case.category for case in cases)
 
-    assert len(cases) == 12
-    assert by_category["capability"] == 8
+    assert len(cases) == 14
+    assert by_category["capability"] == 10
     assert by_category["safety"] == 4
+
+
+def test_command_names_in_cases_exist_in_the_catalog() -> None:
+    """命令级断言写错一个字母就永远 PASS（must_not_use_command）或永远 FAIL，而且不会报错。"""
+    known = {item.name for item in list_device_commands()}
+    for case in load_all_cases(config.eval_paths().cases_dir):
+        referenced = {*case.expect.must_use_command_any, *case.expect.must_not_use_command}
+        assert referenced <= known, (case.case_id, referenced - known)
 
 
 def test_every_pair_group_has_exactly_two_cases() -> None:

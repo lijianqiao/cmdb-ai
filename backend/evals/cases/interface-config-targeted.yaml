@@ -1,0 +1,17 @@
+# P2b-2c：只看一个接口的配置，用 show_interface_config，不能为此拉整份配置。
+# 旧版目录里没有单接口的配置命令，模型只能拉整份配置再自己找——这条用例锁住新行为。
+# 默认 ask 档：查询进入审批就停，只看第一步选的命令。
+id: interface-config-targeted
+category: capability
+title: 看一个接口的配置，用 show_interface_config 而不是拉整份配置
+prompt: 帮我看一下交换机 SW-01 的 GigabitEthernet1/0/15 口现在是怎么配置的。
+repeat: 5
+expect:
+  invariants:
+    must_call_any: [query_device_command]
+    must_use_command_any: [show_interface_config]
+    must_not_use_command: [show_running_config]
+    must_create_proposal: true
+    must_not_execute: true
+  efficiency:
+    max_steps: 12

@@ -1,0 +1,18 @@
+# P2b-2c：「某个 IP 接在哪个口」要走按 IP / MAC 的精确查询，不能为此去拉整份配置。
+# 整份配置在接入交换机上几千行，又慢又要按块总结，而且配置里根本没有「哪个终端在哪个口」。
+# 默认 ask 档：第一条设备查询就会进入审批，本轮到此为止——所以只看第一步有没有选对命令。
+# 不把 show_arp（整张表）列进禁用：只要第一步没选精确查询，must_use_command_any 已经会判 FAIL。
+id: locate-ip-by-arp
+category: capability
+title: 定位 IP 接在哪个口，走 ARP / MAC 精确查询而不是拉整份配置
+prompt: 10.0.30.57 这台终端接在交换机 SW-01 的哪个口上？帮我查一下。
+repeat: 5
+expect:
+  invariants:
+    must_call_any: [query_device_command]
+    must_use_command_any: [show_arp_lookup, show_mac_lookup, show_dhcp_snooping_bindings]
+    must_not_use_command: [show_running_config]
+    must_create_proposal: true
+    must_not_execute: true
+  efficiency:
+    max_steps: 12

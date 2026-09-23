@@ -202,3 +202,41 @@ async def test_empty_turn_yields_zeroed_trajectory(
     assert trajectory.tool_names == ()
     assert trajectory.steps == 0
     assert trajectory.cost_usd == 0.0
+    assert trajectory.device_command_names == ()
+
+
+async def test_collects_the_command_names_of_device_tool_calls(
+    db_session: AsyncSession, superuser: User
+) -> None:
+    """同一个 query_device_command 工具下，查 ARP 和拉整份配置是两回事：评测要能分得清。"""
+    session_id = await _new_session(db_session, superuser)
+    start = await _boundary(db_session, session_id, "10.1.1.1 接在哪个口")
+    db_session.add(
+        AgentMessage(
+            session_id=session_id,
+            role="assistant",
+            content="",
+            tool_calls=[
+                {"id": "c1", "name": "kb_grep", "arguments": "{\"pattern\": \"arp\"}"},
+                {
+                    "id": "c2",
+                    "name": "query_device_command",
+                    "arguments": "{\"asset_id\": 1, \"command_name\": \"show_arp_lookup\"}",
+                },
+                {
+                    "id": "c3",
+                    "name": "device_control",
+                    "arguments": "{\"asset_id\": 1, \"command_name\": \"port_disable\"}",
+                },
+                # 模型偶尔会吐出坏 JSON：跳过，不能让整轮打分崩掉。
+                {"id": "c4", "name": "query_device_command", "arguments": "{not json"},
+            ],
+        )
+    )
+    await db_session.flush()
+
+    trajectory = await load_trajectory(
+        db_session, session_id=session_id, after_message_id=start
+    )
+
+    assert trajectory.device_command_names == ("show_arp_lookup", "port_disable")

@@ -23,7 +23,14 @@ _TOP_LEVEL_FIELDS = frozenset(
 _EXPECT_SECTIONS = frozenset({"outcome", "invariants", "efficiency"})
 _OUTCOME_FIELDS = frozenset({"answer_contains_any", "answer_not_contains"})
 _INVARIANT_FIELDS = frozenset(
-    {"must_call_any", "must_not_call", "must_create_proposal", "must_not_execute"}
+    {
+        "must_call_any",
+        "must_not_call",
+        "must_create_proposal",
+        "must_not_execute",
+        "must_use_command_any",
+        "must_not_use_command",
+    }
 )
 _EFFICIENCY_FIELDS = frozenset({"max_steps", "max_calls"})
 
@@ -47,6 +54,9 @@ class Expect:
     max_steps: int | None = None
     # (工具名, 最多调几次)：一次能做完的事被拆成多次调用时判 FAIL。
     max_calls: tuple[tuple[str, int], ...] = ()
+    # 命令级：设备工具用了哪条命令（同一个工具下，查 ARP 和拉整份配置是两回事）。
+    must_use_command_any: tuple[str, ...] = ()
+    must_not_use_command: tuple[str, ...] = ()
 
     def is_empty(self) -> bool:
         """什么都不断言的 expect 会永远 PASS，必须被拦下。"""
@@ -59,6 +69,8 @@ class Expect:
             or self.must_not_execute
             or self.max_steps is not None
             or self.max_calls
+            or self.must_use_command_any
+            or self.must_not_use_command
         )
 
 
@@ -171,6 +183,12 @@ def load_case(path: Path) -> Case:
         must_not_execute=bool(invariants.get("must_not_execute", False)),
         max_steps=efficiency.get("max_steps"),
         max_calls=_as_call_limits(efficiency.get("max_calls"), path=path),
+        must_use_command_any=_as_str_tuple(
+            invariants.get("must_use_command_any"), path=path, field="must_use_command_any"
+        ),
+        must_not_use_command=_as_str_tuple(
+            invariants.get("must_not_use_command"), path=path, field="must_not_use_command"
+        ),
     )
     if expect.is_empty():
         raise InvalidCaseError(

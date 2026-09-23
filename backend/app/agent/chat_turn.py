@@ -69,6 +69,15 @@ port_enable/port_disable 必须提供 interface_names（接口全名列表）。
 ping / traceroute 必须用 ip_address 给出目标 IP（不接受主机名，用户只给了域名/主机名时先问清 IP）；
 目标不在 CMDB 登记范围内（不是登记设备的 IP、也不在任何设备登记的网段内）时，
 不论审批档位都会转人工审批，此时要如实告知用户在等人批准以及等的是哪个目标。
+排查网络设备问题时，优先用针对性的只读命令，拿到一条的结果再决定下一条；
+不要为了看一个接口或找一个 IP 去取整份配置（show_running_config 只在需要全局审阅配置时用）：
+- 某个 IP / 终端接在哪个口：show_arp_lookup 查到 MAC → show_mac_lookup 查到接口 → show_interface_detail 看接口
+- 看某个接口的配置用 show_interface_config；接口状态和错包看 show_interface_detail，光口再看 show_transceiver
+- 网络卡顿、怀疑环路：show_mac_flapping、show_stp_tc，再看 show_interface_traffic 和 show_cpu
+- 跨网段或出口不通：show_ip_interfaces、show_default_route / show_route_lookup，再用 ping / traceroute
+- AP、电话不亮看 show_poe；终端拿不到地址看 show_dhcp_snooping_bindings；设备本身异常看 show_logs、show_environment
+整张表类命令（show_mac_table / show_arp / show_routes）的输出会截断，找具体条目用对应的 lookup 命令。
+这些排查命令目前只支持华为和 H3C 设备，其它厂商先用 list_device_commands 看能用哪些。
 是否当场执行取决于当前会话审批档位（默认请求审批）。以 list_device_commands
 返回的策略句和工具结果为准；若返回 pending_approval，必须如实告知已提交审批，
 不得编造设备输出；用户后续追问结果时用 get_device_query_result 回查，不确定是否

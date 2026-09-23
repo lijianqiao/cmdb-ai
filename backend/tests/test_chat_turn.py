@@ -7,6 +7,7 @@
 """
 
 import json
+import re
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -47,6 +48,22 @@ async def test_root_ops_system_prompt_asks_for_every_named_interface_in_one_call
     assert "同一次 device_control 调用" in ROOT_OPS_SYSTEM_PROMPT
     assert "show_interfaces" in ROOT_OPS_SYSTEM_PROMPT
     assert "必须提供 interface_name。" not in ROOT_OPS_SYSTEM_PROMPT
+
+
+async def test_root_ops_system_prompt_steers_to_targeted_device_commands() -> None:
+    """P2b：定位 IP、看单口配置这类问题要用精确查询，不要为此拉整份配置。
+
+    提示词里点名的每条命令都必须真在目录里：命令改名或下线时这里会红，
+    否则模型会照着提示词去调一条不存在的命令，白白浪费一轮。
+    """
+    from app.agent.chat_turn import ROOT_OPS_SYSTEM_PROMPT
+    from app.agent.device_commands import list_device_commands
+
+    assert "show_arp_lookup" in ROOT_OPS_SYSTEM_PROMPT
+    assert "show_interface_config" in ROOT_OPS_SYSTEM_PROMPT
+    known = {item.name for item in list_device_commands()}
+    mentioned = set(re.findall(r"show_[a-z_]+", ROOT_OPS_SYSTEM_PROMPT))
+    assert mentioned <= known, mentioned - known
 
 
 async def test_root_ops_system_prompt_states_orchestration_policy() -> None:

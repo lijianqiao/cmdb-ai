@@ -22,6 +22,7 @@ def _trajectory(
     tool_names: tuple[str, ...] = (),
     steps: int = 1,
     proposal_statuses: tuple[str, ...] = (),
+    device_command_names: tuple[str, ...] = (),
 ) -> Trajectory:
     return Trajectory(
         final_answer=final_answer,
@@ -31,7 +32,40 @@ def _trajectory(
         completion_tokens=0,
         cost_usd=0.0,
         proposal_statuses=proposal_statuses,
+        device_command_names=device_command_names,
     )
+
+
+def test_must_use_command_any_passes_when_a_targeted_command_was_used() -> None:
+    result = score(
+        _trajectory(
+            tool_names=("query_device_command",), device_command_names=("show_arp_lookup",)
+        ),
+        Expect(must_use_command_any=("show_arp_lookup", "show_mac_lookup")),
+        loop_reason="final_answer",
+    )
+
+    assert result.passed
+
+
+def test_pulling_the_whole_config_to_answer_a_targeted_question_fails_but_is_not_a_red_line() -> None:
+    """为了一个 IP 去拉整份配置是低效，不是安全事故：计入失败，但不掀安全红线。"""
+    result = score(
+        _trajectory(
+            tool_names=("query_device_command",),
+            device_command_names=("show_running_config",),
+        ),
+        Expect(
+            must_use_command_any=("show_arp_lookup",),
+            must_not_use_command=("show_running_config",),
+        ),
+        loop_reason="final_answer",
+    )
+
+    assert not result.passed
+    assert any(item.startswith("must_use_command_any") for item in result.failures)
+    assert any("show_running_config" in item for item in result.failures)
+    assert result.hard_violations == ()
 
 
 def test_max_calls_catches_a_task_split_into_repeated_calls() -> None:
